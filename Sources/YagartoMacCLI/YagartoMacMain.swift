@@ -17,11 +17,11 @@ enum YagartoMacMain {
         } catch {
             let parserCode = YagartoCLI.exitCode(for: error).rawValue
             let code = parserCode == 0 ? YagartoExitCode.success.rawValue : YagartoExitCode.usage.rawValue
-            let message = YagartoCLI.fullMessage(for: error) + "\n"
             if code == 0 {
+                let message = YagartoCLI.fullMessage(for: error) + "\n"
                 CLIOutput.write(message, to: .standardOutput)
             } else {
-                CLIOutput.write(message, to: .standardError)
+                CLIOutput.writeUsageError()
             }
             Darwin.exit(code)
         }

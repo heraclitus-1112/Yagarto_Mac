@@ -25,6 +25,45 @@ final class CLIIntegrationTests: XCTestCase {
         XCTAssertTrue(result.stderr.contains("not-a-command"))
     }
 
+    func testInvalidProfileWithJSONFormatEmitsStableStructuredChineseError() throws {
+        let directory = try CLITemporaryDirectory()
+        let arguments = ["init", "--profile", "invalid", "--format", "json"]
+
+        let first = try runCLI(arguments, in: directory.url)
+        let second = try runCLI(arguments, in: directory.url)
+
+        XCTAssertEqual(first.status, YagartoExitCode.usage.rawValue)
+        XCTAssertEqual(first.stdout, "")
+        XCTAssertEqual(first.stderr, second.stderr)
+        let payload = try JSONDecoder().decode(
+            CLIUsageErrorPayload.self,
+            from: Data(first.stderr.utf8)
+        )
+        XCTAssertFalse(payload.success)
+        XCTAssertEqual(payload.exitCode, YagartoExitCode.usage.rawValue)
+        XCTAssertTrue(payload.message.contains("profile"))
+        XCTAssertTrue(payload.message.contains("invalid"))
+        XCTAssertTrue(payload.message.contains("可选值"))
+        XCTAssertFalse(payload.message.contains("The value"))
+    }
+
+    func testInvalidProfileWithTextFormatEmitsActionableChineseError() throws {
+        let directory = try CLITemporaryDirectory()
+
+        let result = try runCLI(
+            ["init", "--profile", "invalid", "--format", "text"],
+            in: directory.url
+        )
+
+        XCTAssertEqual(result.status, YagartoExitCode.usage.rawValue)
+        XCTAssertTrue(result.stderr.contains("profile"))
+        XCTAssertTrue(result.stderr.contains("invalid"))
+        XCTAssertTrue(result.stderr.contains("可选值"))
+        XCTAssertTrue(result.stderr.contains("请"))
+        XCTAssertFalse(result.stderr.contains("The value"))
+        XCTAssertFalse(result.stderr.contains("Usage:"))
+    }
+
     func testInitAndProfileSetPersistSelectedProfilesWithJSONOutput() throws {
         let directory = try CLITemporaryDirectory()
 
@@ -114,6 +153,13 @@ private struct CLIResult {
     let status: Int32
     let stdout: String
     let stderr: String
+}
+
+private struct CLIUsageErrorPayload: Decodable {
+    let success: Bool
+    let exitCode: Int32
+    let message: String
+    let details: String?
 }
 
 private func runCLI(_ arguments: [String], in directory: URL) throws -> CLIResult {
