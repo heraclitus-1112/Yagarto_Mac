@@ -42,7 +42,7 @@ struct DisassembleCommand: ParsableCommand {
             throw YagartoError.buildStepFailed(
                 command.executable,
                 result.exitStatus,
-                result.stderr
+                result.toolOutput ?? ""
             )
         }
 

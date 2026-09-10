@@ -146,6 +146,14 @@ extension YagartoError: LocalizedError {
         }
     }
 
+    public var toolOutput: String? {
+        guard case .buildStepFailed(_, _, let output) = self else {
+            return nil
+        }
+        let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
     public var exitCode: YagartoExitCode {
         switch self {
         case .toolNotFound:

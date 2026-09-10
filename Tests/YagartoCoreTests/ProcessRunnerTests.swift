@@ -115,6 +115,28 @@ final class BuildExecutorTests: XCTestCase {
         XCTAssertEqual(runner.commands.count, 2)
     }
 
+    func testExecutorCombinesUsefulStdoutAndStderrForFailedStep() throws {
+        let directory = try TemporaryTestDirectory(component: "双流诊断")
+        let plan = makePlan(directory: directory.url, stepCount: 1)
+        let runner = RecordingProcessRunner(results: [
+            ProcessResult(
+                exitStatus: 7,
+                stdout: "stdout linker reason",
+                stderr: "stderr linker reason"
+            )
+        ])
+
+        XCTAssertThrowsError(try BuildExecutor(runner: runner).execute(plan)) { error in
+            guard let output = (error as? YagartoError)?.toolOutput else {
+                return XCTFail("失败步骤必须包含受控工具输出")
+            }
+            XCTAssertTrue(output.contains("stdout linker reason"))
+            XCTAssertTrue(output.contains("stderr linker reason"))
+            XCTAssertTrue(output.contains("stdout:"))
+            XCTAssertTrue(output.contains("stderr:"))
+        }
+    }
+
     func testExecutorRejectsOutputSymlinkAddedAfterPlanning() throws {
         let directory = try TemporaryTestDirectory(component: "执行前替换")
         let outside = try TemporaryTestDirectory(component: "外部目录")

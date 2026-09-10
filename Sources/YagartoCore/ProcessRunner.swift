@@ -12,6 +12,38 @@ public struct ProcessResult: Codable, Equatable, Sendable {
         self.stdout = stdout
         self.stderr = stderr
     }
+
+    public var toolOutput: String? {
+        let standardOutput = Self.controlledOutput(stdout)
+        let standardError = Self.controlledOutput(stderr)
+        switch (standardOutput, standardError) {
+        case (nil, nil):
+            return nil
+        case (let output?, nil):
+            return output
+        case (nil, let error?):
+            return error
+        case (let output?, let error?):
+            return "stdout:\n\(output)\nstderr:\n\(error)"
+        }
+    }
+
+    private static func controlledOutput(_ value: String) -> String? {
+        let filteredScalars = value.unicodeScalars.filter { scalar in
+            scalar.value == 0x09 || scalar.value == 0x0A || scalar.value == 0x0D
+                || scalar.value >= 0x20
+        }
+        let trimmed = String(String.UnicodeScalarView(filteredScalars))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return nil
+        }
+        let limit = 16_384
+        guard trimmed.count > limit else {
+            return trimmed
+        }
+        return String(trimmed.prefix(limit)) + "\n…（工具输出已截断）"
+    }
 }
 
 public protocol ProcessRunning {

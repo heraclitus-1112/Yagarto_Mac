@@ -144,18 +144,12 @@ final class CLIIntegrationTests: XCTestCase {
         XCTAssertFalse(payload.error.message.contains("可选值"))
     }
 
-    func testInitInUnwritableDirectoryUsesConfigurationErrorEnvelope() throws {
+    func testInitWhenConfigurationPathIsDirectoryUsesConfigurationErrorEnvelope() throws {
         let directory = try CLITemporaryDirectory()
-        try FileManager.default.setAttributes(
-            [.posixPermissions: 0o500],
-            ofItemAtPath: directory.url.path
+        try FileManager.default.createDirectory(
+            at: directory.url.appendingPathComponent("yagarto.json"),
+            withIntermediateDirectories: true
         )
-        defer {
-            try? FileManager.default.setAttributes(
-                [.posixPermissions: 0o700],
-                ofItemAtPath: directory.url.path
-            )
-        }
 
         let result = try runCLI(
             ["init", "--profile", "arm7tdmi", "--format", "json"],
@@ -174,18 +168,12 @@ final class CLIIntegrationTests: XCTestCase {
         XCTAssertNil(payload.error.details)
     }
 
-    func testDefaultTextConfigurationErrorOmitsFoundationDetails() throws {
+    func testDefaultTextConfigurationPathConflictOmitsFoundationDetails() throws {
         let directory = try CLITemporaryDirectory()
-        try FileManager.default.setAttributes(
-            [.posixPermissions: 0o500],
-            ofItemAtPath: directory.url.path
+        try FileManager.default.createDirectory(
+            at: directory.url.appendingPathComponent("yagarto.json"),
+            withIntermediateDirectories: true
         )
-        defer {
-            try? FileManager.default.setAttributes(
-                [.posixPermissions: 0o700],
-                ofItemAtPath: directory.url.path
-            )
-        }
 
         let result = try runCLI(
             ["init", "--profile", "arm7tdmi", "--format", "text"],
@@ -213,6 +201,120 @@ final class CLIIntegrationTests: XCTestCase {
         XCTAssertNil(payload.error.details)
         XCTAssertFalse(payload.error.message.contains("NSCocoaErrorDomain"))
         XCTAssertFalse(payload.error.message.contains("DecodingError"))
+    }
+
+    func testMissingSourceReportsControlledToolOutputInTextAndJSON() throws {
+        try requireARMBuildTools()
+        let directory = try CLITemporaryDirectory()
+        try ConfigStore(projectDirectory: directory.url).save(ProjectConfiguration(
+            sources: ["缺失 source.s"],
+            outputName: "missing"
+        ))
+
+        let json = try runCLI(["build", "--format", "json"], in: directory.url)
+        XCTAssertEqual(json.status, YagartoExitCode.buildFailure.rawValue)
+        let payload = try decodeErrorEnvelope(json.stderr)
+        XCTAssertEqual(payload.error.code, "build.step_failed")
+        XCTAssertNil(payload.error.details)
+        let jsonToolOutput = try XCTUnwrap(payload.error.toolOutput)
+        XCTAssertTrue(jsonToolOutput.contains("缺失 source.s"))
+        XCTAssertTrue(
+            jsonToolOutput.localizedCaseInsensitiveContains("no such file")
+                || jsonToolOutput.contains("无法")
+                || jsonToolOutput.localizedCaseInsensitiveContains("can't open")
+        )
+
+        let text = try runCLI(["build", "--format", "text"], in: directory.url)
+        XCTAssertEqual(text.status, YagartoExitCode.buildFailure.rawValue)
+        XCTAssertTrue(text.stderr.contains("build.step_failed"))
+        XCTAssertTrue(text.stderr.contains("工具输出："))
+        XCTAssertTrue(text.stderr.contains("缺失 source.s"))
+    }
+
+    func testMissingSourceTextIncludesDiagnosticCodeAndToolOutput() throws {
+        try requireARMBuildTools()
+        let directory = try CLITemporaryDirectory()
+        try ConfigStore(projectDirectory: directory.url).save(ProjectConfiguration(
+            sources: ["missing-text.s"],
+            outputName: "missing-text"
+        ))
+
+        let result = try runCLI(["build", "--format", "text"], in: directory.url)
+
+        XCTAssertEqual(result.status, YagartoExitCode.buildFailure.rawValue)
+        XCTAssertTrue(result.stderr.contains("build.step_failed"))
+        XCTAssertTrue(result.stderr.contains("工具输出："))
+        XCTAssertTrue(result.stderr.contains("missing-text.s"))
+    }
+
+    func testInvalidAssemblyReportsControlledToolOutputInTextAndJSON() throws {
+        try requireARMBuildTools()
+        let directory = try CLITemporaryDirectory()
+        try Data("""
+        .text
+        .global start
+        start:
+            definitely_not_an_arm_instruction r0, r1
+        """.utf8).write(to: directory.url.appendingPathComponent("bad.s"))
+        try ConfigStore(projectDirectory: directory.url).save(ProjectConfiguration(
+            sources: ["bad.s"],
+            outputName: "bad"
+        ))
+
+        let json = try runCLI(["build", "--format", "json"], in: directory.url)
+        XCTAssertEqual(json.status, YagartoExitCode.buildFailure.rawValue)
+        let payload = try decodeErrorEnvelope(json.stderr)
+        XCTAssertEqual(payload.error.code, "build.step_failed")
+        XCTAssertNil(payload.error.details)
+        let jsonToolOutput = try XCTUnwrap(payload.error.toolOutput)
+        XCTAssertTrue(jsonToolOutput.contains("bad.s"))
+        XCTAssertTrue(
+            jsonToolOutput.localizedCaseInsensitiveContains("instruction")
+                || jsonToolOutput.localizedCaseInsensitiveContains("error")
+        )
+
+        let text = try runCLI(["build", "--format", "text"], in: directory.url)
+        XCTAssertEqual(text.status, YagartoExitCode.buildFailure.rawValue)
+        XCTAssertTrue(text.stderr.contains("build.step_failed"))
+        XCTAssertTrue(text.stderr.contains("工具输出："))
+        XCTAssertTrue(text.stderr.contains("bad.s"))
+    }
+
+    func testInvalidAssemblyTextIncludesDiagnosticCodeAndToolOutput() throws {
+        try requireARMBuildTools()
+        let directory = try CLITemporaryDirectory()
+        try Data("""
+        .text
+        .global start
+        start:
+            invalid_instruction_for_text_case r0
+        """.utf8).write(to: directory.url.appendingPathComponent("bad-text.s"))
+        try ConfigStore(projectDirectory: directory.url).save(ProjectConfiguration(
+            sources: ["bad-text.s"],
+            outputName: "bad-text"
+        ))
+
+        let result = try runCLI(["build", "--format", "text"], in: directory.url)
+
+        XCTAssertEqual(result.status, YagartoExitCode.buildFailure.rawValue)
+        XCTAssertTrue(result.stderr.contains("build.step_failed"))
+        XCTAssertTrue(result.stderr.contains("工具输出："))
+        XCTAssertTrue(result.stderr.contains("bad-text.s"))
+    }
+
+    func testProfileSetInvalidValueIsLocalized() throws {
+        let directory = try CLITemporaryDirectory()
+
+        let result = try runCLI(
+            ["profile", "set", "invalid", "--format", "json"],
+            in: directory.url
+        )
+
+        XCTAssertEqual(result.status, YagartoExitCode.usage.rawValue)
+        let payload = try decodeErrorEnvelope(result.stderr)
+        XCTAssertEqual(payload.error.code, "usage.invalid_value")
+        XCTAssertTrue(payload.error.message.contains("invalid"))
+        XCTAssertTrue(payload.error.message.contains("可选值"))
     }
 
     func testInitAndProfileSetPersistSelectedProfilesWithJSONOutput() throws {
@@ -361,6 +463,7 @@ private struct CLIErrorEnvelope: Decodable {
         let code: String
         let message: String
         let details: String?
+        let toolOutput: String?
     }
 
     let schemaVersion: Int

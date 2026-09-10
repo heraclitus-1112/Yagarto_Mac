@@ -25,7 +25,7 @@ public struct BuildExecutor {
                 throw YagartoError.buildStepFailed(
                     step.command.executable,
                     result.exitStatus,
-                    result.stderr
+                    result.toolOutput ?? ""
                 )
             }
             if let destination = step.standardOutputFile {

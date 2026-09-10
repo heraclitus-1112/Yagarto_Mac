@@ -202,6 +202,26 @@ final class BuildPlannerTests: XCTestCase {
         }
     }
 
+    func testExistingHardLinksWithSameInodeAreRejectedAsDuplicates() throws {
+        let root = try BuildTemporaryDirectory()
+        let project = root.url.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+        let source = project.appendingPathComponent("same.s")
+        let hardLink = project.appendingPathComponent("hard-link.s")
+        try Data(".text".utf8).write(to: source)
+        try FileManager.default.linkItem(at: source, to: hardLink)
+
+        XCTAssertThrowsError(try makePlanner().plan(
+            configuration: ProjectConfiguration(sources: ["same.s", "hard-link.s"]),
+            projectDirectory: project
+        )) { error in
+            XCTAssertEqual(
+                (error as? YagartoError)?.diagnosticCode,
+                "configuration.duplicate_source"
+            )
+        }
+    }
+
     func testCanonicalEquivalentPathsProduceSameObjectNameIndividually() throws {
         let direct = try makePlanner().plan(
             configuration: ProjectConfiguration(sources: ["same.s"]),

@@ -16,7 +16,8 @@ enum CLIOutput {
         let diagnostic = Diagnostic(
             code: error.diagnosticCode,
             message: error.message,
-            details: nil
+            details: nil,
+            toolOutput: error.toolOutput
         )
         writeDiagnostic(diagnostic, exitCode: error.exitCode)
     }
@@ -54,9 +55,12 @@ enum CLIOutput {
             }
         }
 
-        write("错误：\(diagnostic.message)\n", to: .standardError)
+        write("错误 [\(diagnostic.code)]：\(diagnostic.message)\n", to: .standardError)
         if let details = diagnostic.details {
             write("详情：\(details)\n", to: .standardError)
+        }
+        if let toolOutput = diagnostic.toolOutput {
+            write("工具输出：\n\(toolOutput)\n", to: .standardError)
         }
     }
 
@@ -79,6 +83,19 @@ private struct Diagnostic: Encodable {
     let code: String
     let message: String
     let details: String?
+    let toolOutput: String?
+
+    init(
+        code: String,
+        message: String,
+        details: String? = nil,
+        toolOutput: String? = nil
+    ) {
+        self.code = code
+        self.message = message
+        self.details = details
+        self.toolOutput = toolOutput
+    }
 }
 
 private struct CLIUsageDiagnostic {
@@ -123,6 +140,14 @@ private struct CLIUsageDiagnostic {
                 diagnostic = Self.invalidProfile(value)
                 return
             }
+        }
+
+        if supplied.count >= 3,
+           supplied[0] == "profile",
+           supplied[1] == "set",
+           ProfileID(rawValue: supplied[2]) == nil {
+            diagnostic = Self.invalidProfile(supplied[2])
+            return
         }
 
         let joined = supplied.joined(separator: " ")
