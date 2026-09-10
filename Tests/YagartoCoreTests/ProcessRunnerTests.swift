@@ -1,0 +1,132 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+import Foundation
+import XCTest
+@testable import YagartoCore
+
+final class ProcessRunnerTests: XCTestCase {
+    func testSuccessfulProcessCapturesOutputAndUsesWorkingDirectory() throws {
+        let directory = try TemporaryTestDirectory(component: "进程 空格")
+        let command = CommandSpec(
+            executable: "/bin/pwd",
+            args: [],
+            workingDirectory: directory.url
+        )
+
+        let result = try ProcessRunner().run(command)
+
+        XCTAssertEqual(result.exitStatus, 0)
+        let reportedDirectory = URL(
+            fileURLWithPath: result.stdout.trimmingCharacters(in: .whitespacesAndNewlines),
+            isDirectory: true
+        ).resolvingSymlinksInPath()
+        XCTAssertEqual(reportedDirectory, directory.url.resolvingSymlinksInPath())
+        XCTAssertEqual(result.stderr, "")
+    }
+
+    func testFailedProcessCapturesStderrAndStatus() throws {
+        let command = CommandSpec(
+            executable: "/bin/ls",
+            args: ["/definitely/not/a/yagarto/file"],
+            workingDirectory: URL(fileURLWithPath: "/tmp", isDirectory: true)
+        )
+
+        let result = try ProcessRunner().run(command)
+
+        XCTAssertNotEqual(result.exitStatus, 0)
+        XCTAssertTrue(result.stderr.contains("/definitely/not/a/yagarto/file"))
+    }
+}
+
+final class BuildExecutorTests: XCTestCase {
+    func testExecutorRunsStepsInOrderAndWritesListing() throws {
+        let directory = try TemporaryTestDirectory(component: "构建 空格")
+        let plan = makePlan(directory: directory.url)
+        let runner = RecordingProcessRunner(results: [
+            ProcessResult(exitStatus: 0, stdout: "assembled", stderr: ""),
+            ProcessResult(exitStatus: 0, stdout: "listing\n", stderr: "")
+        ])
+
+        let results = try BuildExecutor(runner: runner).execute(plan)
+
+        XCTAssertEqual(results.count, 2)
+        XCTAssertEqual(runner.commands, plan.commands)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: plan.outputDirectory.path))
+        XCTAssertEqual(
+            try String(contentsOf: plan.listingFile, encoding: .utf8),
+            "listing\n"
+        )
+    }
+
+    func testExecutorStopsAfterFirstFailedStepAndMapsExitCodeFour() throws {
+        let directory = try TemporaryTestDirectory(component: "短路")
+        let plan = makePlan(directory: directory.url, stepCount: 3)
+        let runner = RecordingProcessRunner(results: [
+            ProcessResult(exitStatus: 0, stdout: "", stderr: ""),
+            ProcessResult(exitStatus: 9, stdout: "", stderr: "汇编失败"),
+            ProcessResult(exitStatus: 0, stdout: "不应执行", stderr: "")
+        ])
+
+        XCTAssertThrowsError(try BuildExecutor(runner: runner).execute(plan)) { error in
+            guard let error = error as? YagartoError else {
+                return XCTFail("错误类型应为 YagartoError")
+            }
+            XCTAssertEqual(error.exitCode, .buildFailure)
+            XCTAssertTrue(error.localizedDescription.contains("汇编失败"))
+        }
+        XCTAssertEqual(runner.commands.count, 2)
+    }
+
+    private func makePlan(directory: URL, stepCount: Int = 2) -> BuildPlan {
+        let outputDirectory = directory.appendingPathComponent(".yagarto/build/arm7tdmi", isDirectory: true)
+        let commands = (0..<stepCount).map { index in
+            CommandSpec(
+                executable: "/tool/\(index)",
+                args: ["参数 \(index)"],
+                workingDirectory: directory
+            )
+        }
+        let listingFile = outputDirectory.appendingPathComponent("demo.lst")
+        let steps = commands.enumerated().map { index, command in
+            BuildStep(
+                command: command,
+                standardOutputFile: index == 1 ? listingFile : nil
+            )
+        }
+        return BuildPlan(
+            profile: .arm7tdmi,
+            outputDirectory: outputDirectory,
+            objectFiles: [outputDirectory.appendingPathComponent("demo.o")],
+            elfFile: outputDirectory.appendingPathComponent("demo.elf"),
+            mapFile: outputDirectory.appendingPathComponent("demo.map"),
+            binaryFile: outputDirectory.appendingPathComponent("demo.bin"),
+            listingFile: listingFile,
+            steps: steps
+        )
+    }
+}
+
+private final class RecordingProcessRunner: ProcessRunning {
+    private var results: [ProcessResult]
+    private(set) var commands: [CommandSpec] = []
+
+    init(results: [ProcessResult]) {
+        self.results = results
+    }
+
+    func run(_ command: CommandSpec) throws -> ProcessResult {
+        commands.append(command)
+        return results.removeFirst()
+    }
+}
+
+private struct TemporaryTestDirectory {
+    let url: URL
+
+    init(component: String) throws {
+        url = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+            .appendingPathComponent(component, isDirectory: true)
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+    }
+}
