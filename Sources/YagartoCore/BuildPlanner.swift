@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+import CryptoKit
 import Foundation
 
 public struct BuildPlanner {
@@ -25,6 +26,10 @@ public struct BuildPlanner {
             .appendingPathComponent(".yagarto", isDirectory: true)
             .appendingPathComponent("build", isDirectory: true)
             .appendingPathComponent(configuration.profile.rawValue, isDirectory: true)
+        try ProjectPathGuard.validateOutputHierarchy(
+            projectDirectory: projectDirectory,
+            outputDirectory: outputDirectory
+        )
 
         var objectNames = Set<String>()
         var objectFiles: [URL] = []
@@ -33,8 +38,13 @@ public struct BuildPlanner {
 
         for source in configuration.sources {
             let sourceURL = projectDirectory.appendingPathComponent(source, isDirectory: false)
-            let objectName = sourceURL.deletingPathExtension().lastPathComponent + ".o"
-            guard objectNames.insert(objectName).inserted else {
+            try ProjectPathGuard.validateExistingSource(
+                sourceURL,
+                relativePath: source,
+                projectDirectory: projectDirectory
+            )
+            let objectName = objectName(for: source)
+            guard objectNames.insert(objectName.lowercased()).inserted else {
                 throw YagartoError.duplicateObjectName(objectName)
             }
             let objectURL = outputDirectory.appendingPathComponent(objectName, isDirectory: false)
@@ -107,6 +117,18 @@ public struct BuildPlanner {
         case .cortexM4, .stm32f4Discovery:
             return ["-mcpu=cortex-m4", "-mthumb", "-g"]
         }
+    }
+
+    private func objectName(for source: String) -> String {
+        let normalizedSource = source
+            .replacingOccurrences(of: "\\", with: "/")
+            .precomposedStringWithCanonicalMapping
+        let digest = SHA256.hash(data: Data(normalizedSource.utf8))
+        let shortHash = digest.prefix(6).map { String(format: "%02x", $0) }.joined()
+        let stem = URL(fileURLWithPath: normalizedSource)
+            .deletingPathExtension()
+            .lastPathComponent
+        return "\(stem)-\(shortHash).o"
     }
 
     private func toolPath(for tool: ToolIdentifier) throws -> String {

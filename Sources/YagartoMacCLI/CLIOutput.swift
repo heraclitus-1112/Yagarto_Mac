@@ -13,84 +13,134 @@ enum CLIOutput {
     }
 
     static func writeError(_ error: YagartoError) {
-        let wantsJSON = CommandLine.arguments.enumerated().contains { index, argument in
-            argument == "--format=json"
-                || (argument == "json" && index > 0 && CommandLine.arguments[index - 1] == "--format")
-        }
-        if wantsJSON {
-            let payload = ErrorOutput(
-                error: error.localizedDescription,
-                exitCode: error.exitCode.rawValue
-            )
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-            if var data = try? encoder.encode(payload) {
-                data.append(0x0A)
-                FileHandle.standardError.write(data)
-                return
-            }
-        }
-        write("错误：\(error.localizedDescription)\n", to: .standardError)
+        let diagnostic = Diagnostic(
+            code: error.diagnosticCode,
+            message: error.message,
+            details: error.details
+        )
+        writeDiagnostic(diagnostic, exitCode: error.exitCode)
     }
 
     static func writeUsageError(arguments: [String] = CommandLine.arguments) {
-        let diagnostic = CLIUsageDiagnostic(arguments: arguments)
-        let wantsJSON = arguments.enumerated().contains { index, argument in
-            argument == "--format=json"
-                || (argument == "json" && index > 0 && arguments[index - 1] == "--format")
-        }
-        if wantsJSON {
-            let payload = UsageErrorOutput(
-                success: false,
-                exitCode: YagartoExitCode.usage.rawValue,
-                message: diagnostic.message,
-                details: diagnostic.details
-            )
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-            if var data = try? encoder.encode(payload) {
-                data.append(0x0A)
-                FileHandle.standardError.write(data)
-                return
-            }
-        }
-        write("错误：\(diagnostic.message)\n", to: .standardError)
+        writeDiagnostic(
+            CLIUsageDiagnostic(arguments: arguments).diagnostic,
+            exitCode: .usage,
+            arguments: arguments
+        )
     }
 
     static func write(_ string: String, to handle: FileHandle) {
         handle.write(Data(string.utf8))
     }
+
+    private static func writeDiagnostic(
+        _ diagnostic: Diagnostic,
+        exitCode: YagartoExitCode,
+        arguments: [String] = CommandLine.arguments
+    ) {
+        if requestedJSON(arguments) {
+            let payload = ErrorEnvelope(
+                schemaVersion: 1,
+                success: false,
+                exitCode: exitCode.rawValue,
+                error: diagnostic
+            )
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+            if var data = try? encoder.encode(payload) {
+                data.append(0x0A)
+                FileHandle.standardError.write(data)
+                return
+            }
+        }
+
+        write("错误：\(diagnostic.message)\n", to: .standardError)
+        if let details = diagnostic.details {
+            write("详情：\(details)\n", to: .standardError)
+        }
+    }
+
+    private static func requestedJSON(_ arguments: [String]) -> Bool {
+        arguments.enumerated().contains { index, argument in
+            argument == "--format=json"
+                || (argument == "json" && index > 0 && arguments[index - 1] == "--format")
+        }
+    }
 }
 
-private struct ErrorOutput: Encodable {
-    let error: String
-    let exitCode: Int32
-}
-
-private struct UsageErrorOutput: Encodable {
+private struct ErrorEnvelope: Encodable {
+    let schemaVersion: Int
     let success: Bool
     let exitCode: Int32
+    let error: Diagnostic
+}
+
+private struct Diagnostic: Encodable {
+    let code: String
     let message: String
     let details: String?
 }
 
 private struct CLIUsageDiagnostic {
-    let message: String
-    let details: String?
+    let diagnostic: Diagnostic
 
     init(arguments: [String]) {
-        if let index = arguments.firstIndex(of: "--profile"),
-           arguments.indices.contains(index + 1),
-           ProfileID(rawValue: arguments[index + 1]) == nil {
-            let value = arguments[index + 1]
-            let choices = ProfileID.allCases.map(\.rawValue).joined(separator: "、")
-            message = "参数 --profile 的值“\(value)”无效；可选值：\(choices)。请修改后重试。"
-            details = "参数：--profile；输入：\(value)"
+        let supplied = Array(arguments.dropFirst())
+        if let unknown = supplied.first(where: { argument in
+            guard argument.hasPrefix("--") else { return false }
+            let name = String(argument.split(separator: "=", maxSplits: 1)[0])
+            return !["--help", "--version", "--profile", "--format"].contains(name)
+        }) {
+            diagnostic = Diagnostic(
+                code: "usage.unknown_option",
+                message: "不支持命令行选项“\(unknown)”。请运行 yagarto-mac --help 查看可用选项。",
+                details: "输入：\(unknown)"
+            )
             return
         }
 
-        let supplied = arguments.dropFirst().joined(separator: " ")
-        message = "命令行参数无效：“\(supplied)”。请运行 yagarto-mac --help 查看用法。"
-        details = supplied.isEmpty ? nil : "收到的参数：\(supplied)"
+        if let attached = supplied.first(where: { $0.hasPrefix("--profile=") }) {
+            let value = String(attached.dropFirst("--profile=".count))
+            if ProfileID(rawValue: value) == nil {
+                diagnostic = Self.invalidProfile(value)
+                return
+            }
+        }
+
+        if let index = supplied.firstIndex(of: "--profile") {
+            guard supplied.indices.contains(index + 1),
+                  !supplied[index + 1].hasPrefix("-") else {
+                diagnostic = Diagnostic(
+                    code: "usage.missing_value",
+                    message: "参数 --profile 缺少值。请提供一个有效 profile。",
+                    details: "可选值：\(Self.profileChoices)"
+                )
+                return
+            }
+            let value = supplied[index + 1]
+            if ProfileID(rawValue: value) == nil {
+                diagnostic = Self.invalidProfile(value)
+                return
+            }
+        }
+
+        let joined = supplied.joined(separator: " ")
+        diagnostic = Diagnostic(
+            code: "usage.invalid_invocation",
+            message: "命令行参数无效。请运行 yagarto-mac --help 查看用法。",
+            details: joined.isEmpty ? nil : "收到的参数：\(joined)"
+        )
+    }
+
+    private static var profileChoices: String {
+        ProfileID.allCases.map(\.rawValue).joined(separator: "、")
+    }
+
+    private static func invalidProfile(_ value: String) -> Diagnostic {
+        Diagnostic(
+            code: "usage.invalid_value",
+            message: "参数 --profile 的值“\(value)”无效；可选值：\(profileChoices)。请修改后重试。",
+            details: "参数：--profile；输入：\(value)"
+        )
     }
 }

@@ -36,6 +36,44 @@ final class ProcessRunnerTests: XCTestCase {
         XCTAssertNotEqual(result.exitStatus, 0)
         XCTAssertTrue(result.stderr.contains("/definitely/not/a/yagarto/file"))
     }
+
+    func testTemporaryCaptureIOFailureIsWrappedAsBuildError() throws {
+        let directory = try TemporaryTestDirectory(component: "捕获失败")
+        let regularFile = directory.url.appendingPathComponent("不是目录")
+        try Data("occupied".utf8).write(to: regularFile)
+        let runner = ProcessRunner(temporaryDirectory: regularFile)
+        let command = CommandSpec(
+            executable: "/usr/bin/true",
+            args: [],
+            workingDirectory: directory.url
+        )
+
+        XCTAssertThrowsError(try runner.run(command)) { error in
+            guard let error = error as? YagartoError else {
+                return XCTFail("进程捕获 IO 错误必须包装为 YagartoError")
+            }
+            XCTAssertEqual(error.exitCode, .buildFailure)
+            XCTAssertEqual(error.diagnosticCode, "process.io")
+        }
+    }
+
+    func testProcessLaunchFailureIsWrappedAsBuildError() throws {
+        let directory = try TemporaryTestDirectory(component: "启动失败")
+        let command = CommandSpec(
+            executable: directory.url.appendingPathComponent("不存在的工具").path,
+            args: [],
+            workingDirectory: directory.url
+        )
+
+        XCTAssertThrowsError(try ProcessRunner().run(command)) { error in
+            guard let error = error as? YagartoError else {
+                return XCTFail("进程启动错误必须包装为 YagartoError")
+            }
+            XCTAssertEqual(error.exitCode, .buildFailure)
+            XCTAssertEqual(error.diagnosticCode, "process.launch_failed")
+            XCTAssertNotNil(error.details)
+        }
+    }
 }
 
 final class BuildExecutorTests: XCTestCase {
@@ -75,6 +113,30 @@ final class BuildExecutorTests: XCTestCase {
             XCTAssertTrue(error.localizedDescription.contains("汇编失败"))
         }
         XCTAssertEqual(runner.commands.count, 2)
+    }
+
+    func testExecutorRejectsOutputSymlinkAddedAfterPlanning() throws {
+        let directory = try TemporaryTestDirectory(component: "执行前替换")
+        let outside = try TemporaryTestDirectory(component: "外部目录")
+        let plan = makePlan(directory: directory.url, stepCount: 1)
+        let runner = RecordingProcessRunner(results: [
+            ProcessResult(exitStatus: 0, stdout: "不应执行", stderr: "")
+        ])
+        try FileManager.default.createSymbolicLink(
+            atPath: directory.url.appendingPathComponent(".yagarto").path,
+            withDestinationPath: outside.url.path
+        )
+
+        XCTAssertThrowsError(try BuildExecutor(runner: runner).execute(plan)) { error in
+            guard let error = error as? YagartoError else {
+                return XCTFail("执行期输出 symlink 必须产生 YagartoError")
+            }
+            XCTAssertEqual(error.diagnosticCode, "configuration.output_symlink")
+        }
+        XCTAssertTrue(runner.commands.isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: outside.url.appendingPathComponent("build").path
+        ))
     }
 
     private func makePlan(directory: URL, stepCount: Int = 2) -> BuildPlan {

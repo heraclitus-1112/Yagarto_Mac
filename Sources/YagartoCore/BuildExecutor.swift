@@ -11,17 +11,14 @@ public struct BuildExecutor {
 
     @discardableResult
     public func execute(_ plan: BuildPlan) throws -> [ProcessResult] {
-        do {
-            try FileManager.default.createDirectory(
-                at: plan.outputDirectory,
-                withIntermediateDirectories: true
-            )
-        } catch {
-            throw YagartoError.cannotWriteOutput(
-                plan.outputDirectory.path,
-                error.localizedDescription
-            )
-        }
+        let projectDirectory = plan.steps.first?.command.workingDirectory
+            ?? plan.outputDirectory.deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
+        try ProjectPathGuard.createOutputDirectory(
+            projectDirectory: projectDirectory,
+            outputDirectory: plan.outputDirectory
+        )
 
         var results: [ProcessResult] = []
         for step in plan.steps {

@@ -39,7 +39,7 @@ final class BuildPlannerTests: XCTestCase {
             )
         )
         XCTAssertEqual(plan.outputDirectory.path, "/tmp/项目 空格/.yagarto/build/arm7tdmi")
-        XCTAssertEqual(plan.objectFiles.map(\.lastPathComponent), ["demo.o"])
+        XCTAssertEqual(plan.objectFiles.map(\.lastPathComponent), ["demo-24d07e4e3695.o"])
         XCTAssertEqual(plan.elfFile.lastPathComponent, "demo.elf")
         XCTAssertEqual(plan.mapFile.lastPathComponent, "demo.map")
         XCTAssertEqual(plan.binaryFile.lastPathComponent, "demo.bin")
@@ -113,26 +113,108 @@ final class BuildPlannerTests: XCTestCase {
             projectDirectory: projectDirectory
         )
 
-        XCTAssertEqual(plan.objectFiles.map(\.lastPathComponent), ["start.o", "uart.o"])
+        XCTAssertEqual(plan.objectFiles.map(\.lastPathComponent), [
+            "start-d26c439e7789.o",
+            "uart-bf0847a9541a.o"
+        ])
         XCTAssertEqual(plan.steps.count, 5)
         XCTAssertEqual(Array(plan.commands[2].args.suffix(2)), [
-            "/tmp/项目 空格/.yagarto/build/arm7tdmi/start.o",
-            "/tmp/项目 空格/.yagarto/build/arm7tdmi/uart.o"
+            "/tmp/项目 空格/.yagarto/build/arm7tdmi/start-d26c439e7789.o",
+            "/tmp/项目 空格/.yagarto/build/arm7tdmi/uart-bf0847a9541a.o"
         ])
     }
 
-    func testDuplicateSourceBasenamesAreRejected() {
+    func testCaseOnlySourceBasenamesProduceStableDistinctObjects() throws {
         let configuration = ProjectConfiguration(
-            sources: ["a/start.s", "b/start.S"]
+            sources: ["a/foo.s", "b/FOO.s"]
         )
 
-        XCTAssertThrowsError(
-            try makePlanner().plan(
-                configuration: configuration,
-                projectDirectory: projectDirectory
+        let first = try makePlanner().plan(
+            configuration: configuration,
+            projectDirectory: projectDirectory
+        )
+        let second = try makePlanner().plan(
+            configuration: configuration,
+            projectDirectory: projectDirectory
+        )
+
+        XCTAssertEqual(first.objectFiles, second.objectFiles)
+        XCTAssertEqual(first.objectFiles.map(\.lastPathComponent), [
+            "foo-601f8a7cde47.o",
+            "FOO-6bfebb9b87f3.o"
+        ])
+        XCTAssertEqual(Set(first.objectFiles.map { $0.lastPathComponent.lowercased() }).count, 2)
+    }
+
+    func testRepeatedIdenticalSourceIsRejected() {
+        let configuration = ProjectConfiguration(sources: ["same.s", "same.s"])
+
+        XCTAssertThrowsError(try makePlanner().plan(
+            configuration: configuration,
+            projectDirectory: projectDirectory
+        )) { error in
+            guard case .duplicateObjectName = error as? YagartoError else {
+                return XCTFail("重复源文件必须产生 duplicateObjectName")
+            }
+        }
+    }
+
+    func testExistingSourceSymlinkResolvingOutsideProjectIsRejected() throws {
+        let root = try BuildTemporaryDirectory()
+        let project = root.url.appendingPathComponent("project", isDirectory: true)
+        let outside = root.url.appendingPathComponent("outside.s")
+        try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+        try Data(".text".utf8).write(to: outside)
+        try FileManager.default.createSymbolicLink(
+            atPath: project.appendingPathComponent("linked.s").path,
+            withDestinationPath: outside.path
+        )
+
+        XCTAssertThrowsError(try makePlanner().plan(
+            configuration: ProjectConfiguration(sources: ["linked.s"]),
+            projectDirectory: project
+        )) { error in
+            guard let error = error as? YagartoError else {
+                return XCTFail("越界 symlink 必须产生 YagartoError")
+            }
+            XCTAssertEqual(error.diagnosticCode, "configuration.source_escape")
+            XCTAssertEqual(error.exitCode, .configuration)
+        }
+    }
+
+    func testEveryExistingOutputHierarchySymlinkIsRejected() throws {
+        let symlinkComponents = [
+            [".yagarto"],
+            [".yagarto", "build"],
+            [".yagarto", "build", "arm7tdmi"]
+        ]
+
+        for (index, components) in symlinkComponents.enumerated() {
+            let root = try BuildTemporaryDirectory()
+            let project = root.url.appendingPathComponent("project", isDirectory: true)
+            let outside = root.url.appendingPathComponent("outside-\(index)", isDirectory: true)
+            try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+            let link = components.reduce(project) { $0.appendingPathComponent($1, isDirectory: true) }
+            try FileManager.default.createDirectory(
+                at: link.deletingLastPathComponent(),
+                withIntermediateDirectories: true
             )
-        ) { error in
-            XCTAssertEqual(error as? YagartoError, .duplicateObjectName("start.o"))
+            try FileManager.default.createSymbolicLink(
+                atPath: link.path,
+                withDestinationPath: outside.path
+            )
+
+            XCTAssertThrowsError(try makePlanner().plan(
+                configuration: .default,
+                projectDirectory: project
+            )) { error in
+                guard let error = error as? YagartoError else {
+                    return XCTFail("输出 symlink 必须产生 YagartoError")
+                }
+                XCTAssertEqual(error.diagnosticCode, "configuration.output_symlink")
+                XCTAssertEqual(error.exitCode, .configuration)
+            }
         }
     }
 
@@ -178,7 +260,13 @@ final class BuildPlannerTests: XCTestCase {
         outputName: String = "demo"
     ) -> [CommandSpec] {
         let outputDirectory = "/tmp/项目 空格/.yagarto/build/\(profile.rawValue)"
-        let objectName = URL(fileURLWithPath: source).deletingPathExtension().lastPathComponent + ".o"
+        let expectedHashes: [String: String] = [
+            "start/demo.s": "24d07e4e3695",
+            "源 代码/启动.S": "2835d723abfc",
+            "startup.s": "6fca6fd5fc43"
+        ]
+        let stem = URL(fileURLWithPath: source).deletingPathExtension().lastPathComponent
+        let objectName = "\(stem)-\(expectedHashes[source]!).o"
         let object = "\(outputDirectory)/\(objectName)"
         let elf = "\(outputDirectory)/\(outputName).elf"
         let map = "\(outputDirectory)/\(outputName).map"
@@ -207,5 +295,15 @@ final class BuildPlannerTests: XCTestCase {
                 workingDirectory: workingDirectory
             )
         ]
+    }
+}
+
+private struct BuildTemporaryDirectory {
+    let url: URL
+
+    init() throws {
+        url = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
     }
 }

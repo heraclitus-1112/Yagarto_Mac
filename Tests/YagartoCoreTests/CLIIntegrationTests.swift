@@ -5,6 +5,23 @@ import XCTest
 @testable import YagartoCore
 
 final class CLIIntegrationTests: XCTestCase {
+    func testProcessHarnessCapturesTwoMegabytesOfStderrWithoutDeadlock() throws {
+        guard FileManager.default.isExecutableFile(atPath: "/usr/bin/perl") else {
+            throw XCTSkip("系统未提供 /usr/bin/perl，跳过大 stderr harness 回归")
+        }
+        let directory = try CLITemporaryDirectory()
+
+        let result = try runCapturedProcess(
+            executable: URL(fileURLWithPath: "/usr/bin/perl"),
+            arguments: ["-e", "print STDERR 'x' x (2 * 1024 * 1024); exit 7"],
+            in: directory.url
+        )
+
+        XCTAssertEqual(result.status, 7)
+        XCTAssertEqual(result.stdout, "")
+        XCTAssertEqual(result.stderr.utf8.count, 2 * 1024 * 1024)
+    }
+
     func testHelpListsTaskOneCommands() throws {
         let directory = try CLITemporaryDirectory()
 
@@ -36,15 +53,17 @@ final class CLIIntegrationTests: XCTestCase {
         XCTAssertEqual(first.stdout, "")
         XCTAssertEqual(first.stderr, second.stderr)
         let payload = try JSONDecoder().decode(
-            CLIUsageErrorPayload.self,
+            CLIErrorEnvelope.self,
             from: Data(first.stderr.utf8)
         )
         XCTAssertFalse(payload.success)
+        XCTAssertEqual(payload.schemaVersion, 1)
         XCTAssertEqual(payload.exitCode, YagartoExitCode.usage.rawValue)
-        XCTAssertTrue(payload.message.contains("profile"))
-        XCTAssertTrue(payload.message.contains("invalid"))
-        XCTAssertTrue(payload.message.contains("可选值"))
-        XCTAssertFalse(payload.message.contains("The value"))
+        XCTAssertEqual(payload.error.code, "usage.invalid_value")
+        XCTAssertTrue(payload.error.message.contains("profile"))
+        XCTAssertTrue(payload.error.message.contains("invalid"))
+        XCTAssertTrue(payload.error.message.contains("可选值"))
+        XCTAssertFalse(payload.error.message.contains("The value"))
     }
 
     func testInvalidProfileWithTextFormatEmitsActionableChineseError() throws {
@@ -62,6 +81,99 @@ final class CLIIntegrationTests: XCTestCase {
         XCTAssertTrue(result.stderr.contains("请"))
         XCTAssertFalse(result.stderr.contains("The value"))
         XCTAssertFalse(result.stderr.contains("Usage:"))
+    }
+
+    func testAttachedInvalidProfileIsLocalizedAsInvalidValue() throws {
+        let directory = try CLITemporaryDirectory()
+
+        let result = try runCLI(
+            ["init", "--profile=invalid", "--format=json"],
+            in: directory.url
+        )
+
+        XCTAssertEqual(result.status, YagartoExitCode.usage.rawValue)
+        let payload = try decodeErrorEnvelope(result.stderr)
+        XCTAssertEqual(payload.error.code, "usage.invalid_value")
+        XCTAssertTrue(payload.error.message.contains("--profile"))
+        XCTAssertTrue(payload.error.message.contains("invalid"))
+        XCTAssertFalse(payload.error.message.contains("The value"))
+    }
+
+    func testMissingProfileValueIsLocalizedAsMissingValue() throws {
+        let directory = try CLITemporaryDirectory()
+
+        let result = try runCLI(
+            ["init", "--profile", "--format", "json"],
+            in: directory.url
+        )
+
+        XCTAssertEqual(result.status, YagartoExitCode.usage.rawValue)
+        let payload = try decodeErrorEnvelope(result.stderr)
+        XCTAssertEqual(payload.error.code, "usage.missing_value")
+        XCTAssertTrue(payload.error.message.contains("--profile"))
+        XCTAssertTrue(payload.error.message.contains("缺少"))
+    }
+
+    func testUnknownOptionIsLocalizedAsUnsupportedOption() throws {
+        let directory = try CLITemporaryDirectory()
+
+        let result = try runCLI(
+            ["init", "--wat", "--format", "json"],
+            in: directory.url
+        )
+
+        XCTAssertEqual(result.status, YagartoExitCode.usage.rawValue)
+        let payload = try decodeErrorEnvelope(result.stderr)
+        XCTAssertEqual(payload.error.code, "usage.unknown_option")
+        XCTAssertTrue(payload.error.message.contains("--wat"))
+        XCTAssertTrue(payload.error.message.contains("不支持"))
+    }
+
+    func testInitInUnwritableDirectoryUsesConfigurationErrorEnvelope() throws {
+        let directory = try CLITemporaryDirectory()
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o500],
+            ofItemAtPath: directory.url.path
+        )
+        defer {
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o700],
+                ofItemAtPath: directory.url.path
+            )
+        }
+
+        let result = try runCLI(
+            ["init", "--profile", "arm7tdmi", "--format", "json"],
+            in: directory.url
+        )
+
+        XCTAssertEqual(result.status, YagartoExitCode.configuration.rawValue)
+        XCTAssertEqual(result.stdout, "")
+        let payload = try decodeErrorEnvelope(result.stderr)
+        XCTAssertEqual(payload.schemaVersion, 1)
+        XCTAssertFalse(payload.success)
+        XCTAssertEqual(payload.exitCode, YagartoExitCode.configuration.rawValue)
+        XCTAssertEqual(payload.error.code, "configuration.io")
+        XCTAssertTrue(payload.error.message.contains("配置文件"))
+        XCTAssertFalse(payload.error.message.contains("NSCocoaErrorDomain"))
+        XCTAssertNotNil(payload.error.details)
+    }
+
+    func testCorruptedConfigurationUsesStableChineseErrorAndRawDetails() throws {
+        let directory = try CLITemporaryDirectory()
+        try Data("{broken".utf8).write(
+            to: directory.url.appendingPathComponent("yagarto.json")
+        )
+
+        let result = try runCLI(["build", "--format", "json"], in: directory.url)
+
+        XCTAssertEqual(result.status, YagartoExitCode.configuration.rawValue)
+        let payload = try decodeErrorEnvelope(result.stderr)
+        XCTAssertEqual(payload.error.code, "configuration.invalid_json")
+        XCTAssertEqual(payload.error.message, "yagarto.json 格式无效。请修正 JSON 后重试。")
+        XCTAssertNotNil(payload.error.details)
+        XCTAssertFalse(payload.error.message.contains("NSCocoaErrorDomain"))
+        XCTAssertFalse(payload.error.message.contains("DecodingError"))
     }
 
     func testInitAndProfileSetPersistSelectedProfilesWithJSONOutput() throws {
@@ -109,6 +221,12 @@ final class CLIIntegrationTests: XCTestCase {
     }
 
     func testSingleFileBuildOverridesConfiguredSourcesAndDisassemblesELF() throws {
+        let requiredTools: [ToolIdentifier] = [.assembler, .linker, .objcopy, .objdump]
+        let resolver = ToolResolver()
+        let missingTools = requiredTools.filter { (try? resolver.resolve($0)) == nil }
+        guard missingTools.isEmpty else {
+            throw XCTSkip("缺少真实 ARM 工具：\(missingTools.map(\.rawValue).joined(separator: ", "))")
+        }
         let directory = try CLITemporaryDirectory()
         try Data("""
         .text
@@ -130,7 +248,13 @@ final class CLIIntegrationTests: XCTestCase {
         XCTAssertNoThrow(try JSONSerialization.jsonObject(with: Data(build.stdout.utf8)))
 
         let outputDirectory = directory.url.appendingPathComponent(".yagarto/build/arm7tdmi")
-        for filename in ["演示 文件.o", "firmware.elf", "firmware.map", "firmware.bin", "firmware.lst"] {
+        let objectFiles = try FileManager.default.contentsOfDirectory(
+            at: outputDirectory,
+            includingPropertiesForKeys: nil
+        ).filter { $0.pathExtension == "o" }
+        XCTAssertEqual(objectFiles.count, 1)
+        XCTAssertTrue(objectFiles[0].lastPathComponent.hasPrefix("演示 文件-"))
+        for filename in ["firmware.elf", "firmware.map", "firmware.bin", "firmware.lst"] {
             XCTAssertTrue(
                 FileManager.default.fileExists(atPath: outputDirectory.appendingPathComponent(filename).path),
                 "缺少构建产物 \(filename)"
@@ -155,26 +279,61 @@ private struct CLIResult {
     let stderr: String
 }
 
-private struct CLIUsageErrorPayload: Decodable {
+private struct CLIErrorEnvelope: Decodable {
+    struct ErrorBody: Decodable {
+        let code: String
+        let message: String
+        let details: String?
+    }
+
+    let schemaVersion: Int
     let success: Bool
     let exitCode: Int32
-    let message: String
-    let details: String?
+    let error: ErrorBody
+}
+
+private func decodeErrorEnvelope(_ string: String) throws -> CLIErrorEnvelope {
+    try JSONDecoder().decode(CLIErrorEnvelope.self, from: Data(string.utf8))
 }
 
 private func runCLI(_ arguments: [String], in directory: URL) throws -> CLIResult {
+    try runCapturedProcess(
+        executable: cliExecutableURL(),
+        arguments: arguments,
+        in: directory
+    )
+}
+
+private func runCapturedProcess(
+    executable: URL,
+    arguments: [String],
+    in directory: URL
+) throws -> CLIResult {
+    let captureDirectory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(at: captureDirectory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: captureDirectory) }
+    let stdoutURL = captureDirectory.appendingPathComponent("stdout")
+    let stderrURL = captureDirectory.appendingPathComponent("stderr")
+    guard FileManager.default.createFile(atPath: stdoutURL.path, contents: nil),
+          FileManager.default.createFile(atPath: stderrURL.path, contents: nil) else {
+        throw CocoaError(.fileWriteUnknown)
+    }
+    let stdoutHandle = try FileHandle(forWritingTo: stdoutURL)
+    let stderrHandle = try FileHandle(forWritingTo: stderrURL)
+
     let process = Process()
-    process.executableURL = cliExecutableURL()
+    process.executableURL = executable
     process.arguments = arguments
     process.currentDirectoryURL = directory
-    let stdoutPipe = Pipe()
-    let stderrPipe = Pipe()
-    process.standardOutput = stdoutPipe
-    process.standardError = stderrPipe
+    process.standardOutput = stdoutHandle
+    process.standardError = stderrHandle
     try process.run()
-    let stdout = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-    let stderr = stderrPipe.fileHandleForReading.readDataToEndOfFile()
     process.waitUntilExit()
+    try stdoutHandle.close()
+    try stderrHandle.close()
+    let stdout = try Data(contentsOf: stdoutURL)
+    let stderr = try Data(contentsOf: stderrURL)
     return CLIResult(
         status: process.terminationStatus,
         stdout: String(decoding: stdout, as: UTF8.self),

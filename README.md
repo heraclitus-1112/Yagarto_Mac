@@ -18,4 +18,6 @@ swift run yagarto-mac disassemble path/to/demo.elf --format json
 
 所有非交互子命令均支持 `--format text`（默认）或 `--format json`。
 
+内置链接脚本通过 SwiftPM 的 `Bundle.module` 资源包加载。请通过 `swift run` 或 SwiftPM 构建产物运行；单独复制可执行文件而不携带其资源包不属于当前 Task 1 的支持方式，资源打包发布验证将在后续发布任务完成。
+
 本项目采用 GNU General Public License v3.0 or later，详见 `LICENSE`。

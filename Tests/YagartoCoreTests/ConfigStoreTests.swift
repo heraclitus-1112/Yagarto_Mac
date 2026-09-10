@@ -41,7 +41,43 @@ final class ConfigStoreTests: XCTestCase {
         try Data("{broken".utf8).write(to: store.configurationURL)
 
         XCTAssertThrowsError(try store.load()) { error in
-            XCTAssertTrue(error is YagartoError)
+            guard let error = error as? YagartoError else {
+                return XCTFail("损坏配置必须包装为 YagartoError")
+            }
+            XCTAssertEqual(error.diagnosticCode, "configuration.invalid_json")
+            XCTAssertEqual(error.message, "yagarto.json 格式无效。请修正 JSON 后重试。")
+            XCTAssertNotNil(error.details)
+        }
+    }
+
+    func testReadIOFailureIsDistinctFromInvalidJSON() throws {
+        let directory = try TemporaryDirectory()
+        let store = ConfigStore(projectDirectory: directory.url)
+        try FileManager.default.createDirectory(
+            at: store.configurationURL,
+            withIntermediateDirectories: true
+        )
+
+        XCTAssertThrowsError(try store.load()) { error in
+            guard let error = error as? YagartoError else {
+                return XCTFail("配置读取 IO 错误必须包装为 YagartoError")
+            }
+            XCTAssertEqual(error.diagnosticCode, "configuration.io")
+            XCTAssertEqual(error.exitCode, .configuration)
+        }
+    }
+
+    func testSaveIOFailureIsWrappedAsConfigurationError() throws {
+        let directory = try TemporaryDirectory()
+        let fileInsteadOfDirectory = directory.url.appendingPathComponent("not-a-directory")
+        try Data("occupied".utf8).write(to: fileInsteadOfDirectory)
+        let store = ConfigStore(projectDirectory: fileInsteadOfDirectory)
+
+        XCTAssertThrowsError(try store.save(.default)) { error in
+            guard let error = error as? YagartoError else {
+                return XCTFail("配置写入错误必须包装为 YagartoError，实际为 \(type(of: error))")
+            }
+            XCTAssertEqual(error.exitCode, .configuration)
         }
     }
 

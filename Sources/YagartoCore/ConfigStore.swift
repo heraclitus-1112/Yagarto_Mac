@@ -20,7 +20,10 @@ public struct ConfigStore: Sendable {
         } catch let error as CocoaError where error.code == .fileReadNoSuchFile {
             throw YagartoError.configurationNotFound(configurationURL.path)
         } catch {
-            throw YagartoError.corruptedConfiguration(error.localizedDescription)
+            throw YagartoError.configurationIOFailed(
+                configurationURL.path,
+                error.localizedDescription
+            )
         }
 
         let configuration: ProjectConfiguration
@@ -36,11 +39,18 @@ public struct ConfigStore: Sendable {
 
     public func save(_ configuration: ProjectConfiguration) throws {
         try Self.validate(configuration)
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
-        var data = try encoder.encode(configuration)
-        data.append(0x0A)
-        try data.write(to: configurationURL, options: .atomic)
+        do {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+            var data = try encoder.encode(configuration)
+            data.append(0x0A)
+            try data.write(to: configurationURL, options: .atomic)
+        } catch {
+            throw YagartoError.configurationIOFailed(
+                configurationURL.path,
+                error.localizedDescription
+            )
+        }
     }
 
     public static func validate(_ configuration: ProjectConfiguration) throws {
