@@ -13,6 +13,7 @@ public enum YagartoError: Error, Equatable, Sendable {
     case pathTraversal(String)
     case sourceEscapesProject(String)
     case outputSymlink(String)
+    case duplicateSource(String)
     case invalidOutputName(String)
     case duplicateObjectName(String)
     case toolNotFound(String)
@@ -54,6 +55,8 @@ extension YagartoError: LocalizedError {
             return "configuration.source_escape"
         case .outputSymlink:
             return "configuration.output_symlink"
+        case .duplicateSource:
+            return "configuration.duplicate_source"
         case .invalidOutputName:
             return "configuration.invalid_output_name"
         case .duplicateObjectName:
@@ -97,6 +100,8 @@ extension YagartoError: LocalizedError {
             return "源文件“\(source)”解析后位于项目目录之外；请移除越界符号链接。"
         case .outputSymlink(let path):
             return "输出路径“\(path)”是符号链接；为避免写出项目目录，构建已停止。"
+        case .duplicateSource(let source):
+            return "源文件“\(source)”与另一个输入指向同一文件；请移除重复项。"
         case .invalidOutputName(let outputName):
             return "输出名“\(outputName)”必须是单个相对文件名，不能包含目录或路径穿越。"
         case .duplicateObjectName(let objectName):

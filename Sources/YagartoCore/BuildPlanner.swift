@@ -32,18 +32,20 @@ public struct BuildPlanner {
         )
 
         var objectNames = Set<String>()
+        var sourceIdentities = Set<String>()
         var objectFiles: [URL] = []
         var steps: [BuildStep] = []
         let cpuArguments = cpuArguments(for: configuration.profile)
 
         for source in configuration.sources {
-            let sourceURL = projectDirectory.appendingPathComponent(source, isDirectory: false)
-            try ProjectPathGuard.validateExistingSource(
-                sourceURL,
+            let canonicalSource = try ProjectPathGuard.canonicalSource(
                 relativePath: source,
                 projectDirectory: projectDirectory
             )
-            let objectName = objectName(for: source)
+            guard sourceIdentities.insert(canonicalSource.identity).inserted else {
+                throw YagartoError.duplicateSource(source)
+            }
+            let objectName = objectName(for: canonicalSource.relativePath)
             guard objectNames.insert(objectName.lowercased()).inserted else {
                 throw YagartoError.duplicateObjectName(objectName)
             }
@@ -61,7 +63,7 @@ public struct BuildPlanner {
             }
             steps.append(BuildStep(command: CommandSpec(
                 executable: try toolPath(for: assemblyTool),
-                args: assemblyArguments + ["-o", objectURL.path, sourceURL.path],
+                args: assemblyArguments + ["-o", objectURL.path, canonicalSource.url.path],
                 workingDirectory: projectDirectory
             )))
         }
@@ -100,6 +102,7 @@ public struct BuildPlanner {
 
         return BuildPlan(
             profile: configuration.profile,
+            projectDirectory: projectDirectory,
             outputDirectory: outputDirectory,
             objectFiles: objectFiles,
             elfFile: elfFile,

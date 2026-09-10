@@ -11,17 +11,15 @@ public struct BuildExecutor {
 
     @discardableResult
     public func execute(_ plan: BuildPlan) throws -> [ProcessResult] {
-        let projectDirectory = plan.steps.first?.command.workingDirectory
-            ?? plan.outputDirectory.deletingLastPathComponent()
-                .deletingLastPathComponent()
-                .deletingLastPathComponent()
         try ProjectPathGuard.createOutputDirectory(
-            projectDirectory: projectDirectory,
+            projectDirectory: plan.projectDirectory,
             outputDirectory: plan.outputDirectory
         )
+        try validateOutputPaths(for: plan)
 
         var results: [ProcessResult] = []
         for step in plan.steps {
+            try validateOutputPaths(for: plan)
             let result = try runner.run(step.command)
             guard result.exitStatus == 0 else {
                 throw YagartoError.buildStepFailed(
@@ -31,6 +29,10 @@ public struct BuildExecutor {
                 )
             }
             if let destination = step.standardOutputFile {
+                try ProjectPathGuard.validateArtifactPaths(
+                    [destination],
+                    outputDirectory: plan.outputDirectory
+                )
                 do {
                     try Data(result.stdout.utf8).write(to: destination, options: .atomic)
                 } catch {
@@ -43,5 +45,16 @@ public struct BuildExecutor {
             results.append(result)
         }
         return results
+    }
+
+    private func validateOutputPaths(for plan: BuildPlan) throws {
+        try ProjectPathGuard.validateOutputHierarchy(
+            projectDirectory: plan.projectDirectory,
+            outputDirectory: plan.outputDirectory
+        )
+        try ProjectPathGuard.validateArtifactPaths(
+            plan.artifactFiles,
+            outputDirectory: plan.outputDirectory
+        )
     }
 }

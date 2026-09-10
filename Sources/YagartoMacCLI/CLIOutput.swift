@@ -16,7 +16,7 @@ enum CLIOutput {
         let diagnostic = Diagnostic(
             code: error.diagnosticCode,
             message: error.message,
-            details: error.details
+            details: nil
         )
         writeDiagnostic(diagnostic, exitCode: error.exitCode)
     }
@@ -86,10 +86,11 @@ private struct CLIUsageDiagnostic {
 
     init(arguments: [String]) {
         let supplied = Array(arguments.dropFirst())
+        let allowedOptions = Self.allowedLongOptions(for: supplied)
         if let unknown = supplied.first(where: { argument in
             guard argument.hasPrefix("--") else { return false }
             let name = String(argument.split(separator: "=", maxSplits: 1)[0])
-            return !["--help", "--version", "--profile", "--format"].contains(name)
+            return !allowedOptions.contains(name)
         }) {
             diagnostic = Diagnostic(
                 code: "usage.unknown_option",
@@ -134,6 +135,23 @@ private struct CLIUsageDiagnostic {
 
     private static var profileChoices: String {
         ProfileID.allCases.map(\.rawValue).joined(separator: "、")
+    }
+
+    private static func allowedLongOptions(for arguments: [String]) -> Set<String> {
+        let common: Set<String> = ["--help", "--format"]
+        guard let command = arguments.first else {
+            return ["--help", "--version"]
+        }
+        switch command {
+        case "init":
+            return common.union(["--profile"])
+        case "doctor", "build", "disassemble":
+            return common
+        case "profile":
+            return common
+        default:
+            return ["--help", "--version"]
+        }
     }
 
     private static func invalidProfile(_ value: String) -> Diagnostic {

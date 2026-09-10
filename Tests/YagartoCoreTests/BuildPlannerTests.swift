@@ -39,6 +39,7 @@ final class BuildPlannerTests: XCTestCase {
             )
         )
         XCTAssertEqual(plan.outputDirectory.path, "/tmp/项目 空格/.yagarto/build/arm7tdmi")
+        XCTAssertEqual(plan.projectDirectory, projectDirectory.standardizedFileURL)
         XCTAssertEqual(plan.objectFiles.map(\.lastPathComponent), ["demo-24d07e4e3695.o"])
         XCTAssertEqual(plan.elfFile.lastPathComponent, "demo.elf")
         XCTAssertEqual(plan.mapFile.lastPathComponent, "demo.map")
@@ -153,10 +154,68 @@ final class BuildPlannerTests: XCTestCase {
             configuration: configuration,
             projectDirectory: projectDirectory
         )) { error in
-            guard case .duplicateObjectName = error as? YagartoError else {
-                return XCTFail("重复源文件必须产生 duplicateObjectName")
+            XCTAssertEqual(
+                (error as? YagartoError)?.diagnosticCode,
+                "configuration.duplicate_source"
+            )
+        }
+    }
+
+    func testLexicallyEquivalentSourcePathsAreRejectedAsDuplicates() {
+        let equivalentPairs = [
+            ["same.s", "./same.s"],
+            ["dir/x.s", "dir//x.s"]
+        ]
+
+        for sources in equivalentPairs {
+            XCTAssertThrowsError(try makePlanner().plan(
+                configuration: ProjectConfiguration(sources: sources),
+                projectDirectory: projectDirectory
+            )) { error in
+                XCTAssertEqual(
+                    (error as? YagartoError)?.diagnosticCode,
+                    "configuration.duplicate_source"
+                )
             }
         }
+    }
+
+    func testExistingFileAndInProjectSymlinkAliasAreRejectedAsDuplicates() throws {
+        let root = try BuildTemporaryDirectory()
+        let project = root.url.appendingPathComponent("project", isDirectory: true)
+        try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
+        let source = project.appendingPathComponent("same.s")
+        try Data(".text".utf8).write(to: source)
+        try FileManager.default.createSymbolicLink(
+            atPath: project.appendingPathComponent("alias.s").path,
+            withDestinationPath: source.path
+        )
+
+        XCTAssertThrowsError(try makePlanner().plan(
+            configuration: ProjectConfiguration(sources: ["same.s", "alias.s"]),
+            projectDirectory: project
+        )) { error in
+            XCTAssertEqual(
+                (error as? YagartoError)?.diagnosticCode,
+                "configuration.duplicate_source"
+            )
+        }
+    }
+
+    func testCanonicalEquivalentPathsProduceSameObjectNameIndividually() throws {
+        let direct = try makePlanner().plan(
+            configuration: ProjectConfiguration(sources: ["same.s"]),
+            projectDirectory: projectDirectory
+        )
+        let dotted = try makePlanner().plan(
+            configuration: ProjectConfiguration(sources: ["./same.s"]),
+            projectDirectory: projectDirectory
+        )
+
+        XCTAssertEqual(
+            direct.objectFiles.first?.lastPathComponent,
+            dotted.objectFiles.first?.lastPathComponent
+        )
     }
 
     func testExistingSourceSymlinkResolvingOutsideProjectIsRejected() throws {

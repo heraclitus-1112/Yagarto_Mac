@@ -129,6 +129,21 @@ final class CLIIntegrationTests: XCTestCase {
         XCTAssertTrue(payload.error.message.contains("不支持"))
     }
 
+    func testProfileOptionIsUnsupportedForBuildSubcommand() throws {
+        let directory = try CLITemporaryDirectory()
+
+        let result = try runCLI(
+            ["build", "--profile", "invalid", "--format", "json"],
+            in: directory.url
+        )
+
+        XCTAssertEqual(result.status, YagartoExitCode.usage.rawValue)
+        let payload = try decodeErrorEnvelope(result.stderr)
+        XCTAssertEqual(payload.error.code, "usage.unknown_option")
+        XCTAssertTrue(payload.error.message.contains("--profile"))
+        XCTAssertFalse(payload.error.message.contains("可选值"))
+    }
+
     func testInitInUnwritableDirectoryUsesConfigurationErrorEnvelope() throws {
         let directory = try CLITemporaryDirectory()
         try FileManager.default.setAttributes(
@@ -156,10 +171,34 @@ final class CLIIntegrationTests: XCTestCase {
         XCTAssertEqual(payload.error.code, "configuration.io")
         XCTAssertTrue(payload.error.message.contains("配置文件"))
         XCTAssertFalse(payload.error.message.contains("NSCocoaErrorDomain"))
-        XCTAssertNotNil(payload.error.details)
+        XCTAssertNil(payload.error.details)
     }
 
-    func testCorruptedConfigurationUsesStableChineseErrorAndRawDetails() throws {
+    func testDefaultTextConfigurationErrorOmitsFoundationDetails() throws {
+        let directory = try CLITemporaryDirectory()
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o500],
+            ofItemAtPath: directory.url.path
+        )
+        defer {
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o700],
+                ofItemAtPath: directory.url.path
+            )
+        }
+
+        let result = try runCLI(
+            ["init", "--profile", "arm7tdmi", "--format", "text"],
+            in: directory.url
+        )
+
+        XCTAssertEqual(result.status, YagartoExitCode.configuration.rawValue)
+        XCTAssertTrue(result.stderr.contains("无法读写配置文件"))
+        XCTAssertFalse(result.stderr.contains("详情："))
+        XCTAssertFalse(result.stderr.contains("NSCocoaErrorDomain"))
+    }
+
+    func testCorruptedConfigurationUsesStableChineseErrorAndOmitsRawDetails() throws {
         let directory = try CLITemporaryDirectory()
         try Data("{broken".utf8).write(
             to: directory.url.appendingPathComponent("yagarto.json")
@@ -171,7 +210,7 @@ final class CLIIntegrationTests: XCTestCase {
         let payload = try decodeErrorEnvelope(result.stderr)
         XCTAssertEqual(payload.error.code, "configuration.invalid_json")
         XCTAssertEqual(payload.error.message, "yagarto.json 格式无效。请修正 JSON 后重试。")
-        XCTAssertNotNil(payload.error.details)
+        XCTAssertNil(payload.error.details)
         XCTAssertFalse(payload.error.message.contains("NSCocoaErrorDomain"))
         XCTAssertFalse(payload.error.message.contains("DecodingError"))
     }
@@ -221,12 +260,7 @@ final class CLIIntegrationTests: XCTestCase {
     }
 
     func testSingleFileBuildOverridesConfiguredSourcesAndDisassemblesELF() throws {
-        let requiredTools: [ToolIdentifier] = [.assembler, .linker, .objcopy, .objdump]
-        let resolver = ToolResolver()
-        let missingTools = requiredTools.filter { (try? resolver.resolve($0)) == nil }
-        guard missingTools.isEmpty else {
-            throw XCTSkip("缺少真实 ARM 工具：\(missingTools.map(\.rawValue).joined(separator: ", "))")
-        }
+        try requireARMBuildTools()
         let directory = try CLITemporaryDirectory()
         try Data("""
         .text
@@ -271,6 +305,49 @@ final class CLIIntegrationTests: XCTestCase {
         )
         XCTAssertTrue((payload["disassembly"] as? String)?.contains("<start>") == true)
     }
+
+    func testRealBuildRejectsPreexistingMapSymlinkWithoutChangingVictim() throws {
+        try requireARMBuildTools()
+        let directory = try CLITemporaryDirectory()
+        let outside = try CLITemporaryDirectory()
+        try Data("""
+        .text
+        .global start
+        start:
+            bx lr
+        """.utf8).write(to: directory.url.appendingPathComponent("demo.s"))
+        try ConfigStore(projectDirectory: directory.url).save(ProjectConfiguration(
+            sources: ["demo.s"],
+            outputName: "firmware"
+        ))
+        let outputDirectory = directory.url.appendingPathComponent(
+            ".yagarto/build/arm7tdmi",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(
+            at: outputDirectory,
+            withIntermediateDirectories: true
+        )
+        let victim = outside.url.appendingPathComponent("victim.txt")
+        try Data("不可修改".utf8).write(to: victim)
+        try FileManager.default.createSymbolicLink(
+            atPath: outputDirectory.appendingPathComponent("firmware.map").path,
+            withDestinationPath: victim.path
+        )
+
+        let result = try runCLI(["build", "--format", "json"], in: directory.url)
+
+        XCTAssertEqual(result.status, YagartoExitCode.configuration.rawValue)
+        let payload = try decodeErrorEnvelope(result.stderr)
+        XCTAssertEqual(payload.error.code, "configuration.output_symlink")
+        XCTAssertNil(payload.error.details)
+        XCTAssertEqual(try String(contentsOf: victim, encoding: .utf8), "不可修改")
+        let objectFiles = try FileManager.default.contentsOfDirectory(
+            at: outputDirectory,
+            includingPropertiesForKeys: nil
+        ).filter { $0.pathExtension == "o" }
+        XCTAssertTrue(objectFiles.isEmpty)
+    }
 }
 
 private struct CLIResult {
@@ -294,6 +371,15 @@ private struct CLIErrorEnvelope: Decodable {
 
 private func decodeErrorEnvelope(_ string: String) throws -> CLIErrorEnvelope {
     try JSONDecoder().decode(CLIErrorEnvelope.self, from: Data(string.utf8))
+}
+
+private func requireARMBuildTools() throws {
+    let requiredTools: [ToolIdentifier] = [.assembler, .linker, .objcopy, .objdump]
+    let resolver = ToolResolver()
+    let missingTools = requiredTools.filter { (try? resolver.resolve($0)) == nil }
+    guard missingTools.isEmpty else {
+        throw XCTSkip("缺少真实 ARM 工具：\(missingTools.map(\.rawValue).joined(separator: ", "))")
+    }
 }
 
 private func runCLI(_ arguments: [String], in directory: URL) throws -> CLIResult {

@@ -139,6 +139,51 @@ final class BuildExecutorTests: XCTestCase {
         ))
     }
 
+    func testExecutorRejectsPreexistingMapSymlinkBeforeRunningCommands() throws {
+        let directory = try TemporaryTestDirectory(component: "map 符号链接")
+        let outside = try TemporaryTestDirectory(component: "map 外部")
+        let plan = makePlan(directory: directory.url, stepCount: 1)
+        let victim = outside.url.appendingPathComponent("victim.txt")
+        try Data("保持不变".utf8).write(to: victim)
+        try FileManager.default.createDirectory(
+            at: plan.outputDirectory,
+            withIntermediateDirectories: true
+        )
+        try FileManager.default.createSymbolicLink(
+            atPath: plan.mapFile.path,
+            withDestinationPath: victim.path
+        )
+        let runner = RecordingProcessRunner(results: [
+            ProcessResult(exitStatus: 0, stdout: "不应执行", stderr: "")
+        ])
+
+        XCTAssertThrowsError(try BuildExecutor(runner: runner).execute(plan)) { error in
+            XCTAssertEqual((error as? YagartoError)?.diagnosticCode, "configuration.output_symlink")
+        }
+        XCTAssertTrue(runner.commands.isEmpty)
+        XCTAssertEqual(try String(contentsOf: victim, encoding: .utf8), "保持不变")
+    }
+
+    func testExecutorRechecksAllArtifactsBeforeEveryStep() throws {
+        let directory = try TemporaryTestDirectory(component: "逐步复查")
+        let outside = try TemporaryTestDirectory(component: "逐步外部")
+        let plan = makePlan(directory: directory.url, stepCount: 2)
+        let victim = outside.url.appendingPathComponent("victim.txt")
+        try Data("保持不变".utf8).write(to: victim)
+        let runner = MutatingProcessRunner {
+            try FileManager.default.createSymbolicLink(
+                atPath: plan.binaryFile.path,
+                withDestinationPath: victim.path
+            )
+        }
+
+        XCTAssertThrowsError(try BuildExecutor(runner: runner).execute(plan)) { error in
+            XCTAssertEqual((error as? YagartoError)?.diagnosticCode, "configuration.output_symlink")
+        }
+        XCTAssertEqual(runner.commands.count, 1)
+        XCTAssertEqual(try String(contentsOf: victim, encoding: .utf8), "保持不变")
+    }
+
     private func makePlan(directory: URL, stepCount: Int = 2) -> BuildPlan {
         let outputDirectory = directory.appendingPathComponent(".yagarto/build/arm7tdmi", isDirectory: true)
         let commands = (0..<stepCount).map { index in
@@ -157,6 +202,7 @@ final class BuildExecutorTests: XCTestCase {
         }
         return BuildPlan(
             profile: .arm7tdmi,
+            projectDirectory: directory,
             outputDirectory: outputDirectory,
             objectFiles: [outputDirectory.appendingPathComponent("demo.o")],
             elfFile: outputDirectory.appendingPathComponent("demo.elf"),
@@ -179,6 +225,23 @@ private final class RecordingProcessRunner: ProcessRunning {
     func run(_ command: CommandSpec) throws -> ProcessResult {
         commands.append(command)
         return results.removeFirst()
+    }
+}
+
+private final class MutatingProcessRunner: ProcessRunning {
+    private let mutation: () throws -> Void
+    private(set) var commands: [CommandSpec] = []
+
+    init(mutation: @escaping () throws -> Void) {
+        self.mutation = mutation
+    }
+
+    func run(_ command: CommandSpec) throws -> ProcessResult {
+        commands.append(command)
+        if commands.count == 1 {
+            try mutation()
+        }
+        return ProcessResult(exitStatus: 0, stdout: "", stderr: "")
     }
 }
 

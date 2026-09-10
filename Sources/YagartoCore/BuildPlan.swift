@@ -14,6 +14,7 @@ public struct BuildStep: Equatable, Sendable {
 
 public struct BuildPlan: Equatable, Sendable {
     public let profile: ProfileID
+    public let projectDirectory: URL
     public let outputDirectory: URL
     public let objectFiles: [URL]
     public let elfFile: URL
@@ -24,6 +25,7 @@ public struct BuildPlan: Equatable, Sendable {
 
     public init(
         profile: ProfileID,
+        projectDirectory: URL,
         outputDirectory: URL,
         objectFiles: [URL],
         elfFile: URL,
@@ -33,6 +35,7 @@ public struct BuildPlan: Equatable, Sendable {
         steps: [BuildStep]
     ) {
         self.profile = profile
+        self.projectDirectory = projectDirectory.standardizedFileURL
         self.outputDirectory = outputDirectory
         self.objectFiles = objectFiles
         self.elfFile = elfFile
@@ -44,5 +47,13 @@ public struct BuildPlan: Equatable, Sendable {
 
     public var commands: [CommandSpec] {
         steps.map(\.command)
+    }
+
+    public var artifactFiles: [URL] {
+        var seen = Set<String>()
+        return (objectFiles + [elfFile, mapFile, binaryFile, listingFile]
+            + steps.compactMap(\.standardOutputFile)).filter { url in
+                seen.insert(url.standardizedFileURL.path).inserted
+            }
     }
 }
