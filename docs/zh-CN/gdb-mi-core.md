@@ -57,7 +57,7 @@ idle -> building -> ready -> launching -> stopped <-> running
 
 每次 `*stopped` 都派发独立任务刷新执行位置、寄存器、stack、默认 `$sp` 64-byte memory window、反汇编和有界 console；唯一 MI event loop 不会同步等待整套刷新，因此慢 pane 不会延迟后续 `*running`/`*stopped`。每条 snapshot 查询默认有 2 秒超时，也可由 controller 初始化参数缩短；超时请求会从 session pending 表移除。frame 或 register 失败产生 critical diagnostic；stack、memory、disassembly 等可选 pane 失败产生非关键 diagnostic。两者都保留 `stopped`，不会阻塞后续命令。
 
-每次 launch 都使用新的 generation 与 session identity。event、snapshot 和 recovery 在发布前同时检查 generation、session 与允许状态；stop/relaunch 会取消并等待旧代后台任务清理。因此旧代的慢 snapshot 或进程组 shutdown 即使跨 actor reentrancy 完成，也不能覆盖新 snapshot、清空新 session 或发布旧事件。
+每次 `launchStarted` 后立即创建唯一 attempt generation；旧任务清理、取消检查、新 session 启动、事件任务安装以及失败回滚属于同一事务。每个异步边界后都会重新确认该 attempt 仍拥有 `launching`，否则不再 spawn 或发布，并回收已经启动的 session。`stop()` 会先使并发 launch attempt 失效；只有仍拥有 `launching` 的 attempt 才能执行 `launchFailed -> ready`，因此 stop 接管后的旧 rollback 不会覆盖 termination 状态。event、snapshot 和 recovery 在发布前也同时检查 generation、session 与允许状态；旧代的慢 snapshot 或进程组 shutdown 即使跨 actor reentrancy 完成，也不能覆盖新 snapshot、清空新 session 或发布旧事件。
 
 寄存器展示集合固定为：
 

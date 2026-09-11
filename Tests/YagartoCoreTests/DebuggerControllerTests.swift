@@ -190,6 +190,129 @@ final class DebuggerControllerTests: XCTestCase {
         withExtendedLifetime((oldFixture, newFixture)) {}
     }
 
+    func testCancellingRelaunchDuringOldRecoveryRollsBackAndAllowsNextLaunch() async throws {
+        let oldFixture = try ControllerGDBFixture(autoExitWithStubbornChild: true, label: "old")
+        let newFixture = try ControllerGDBFixture(label: "new")
+        let controller = DebuggerController(plan: oldFixture.plan(profile: .arm7tdmi))
+
+        try await controller.launch()
+        _ = try await oldFixture.waitForChildPID()
+        try await waitForState(.ready, controller: controller)
+        try await controller.buildStarted()
+        try await controller.buildSucceeded(plan: newFixture.plan(profile: .arm7tdmi))
+
+        let cancelledLaunch = Task { try await controller.launch() }
+        try await waitForState(.launching, controller: controller)
+        cancelledLaunch.cancel()
+        do {
+            try await cancelledLaunch.value
+            XCTFail("expected cleanup-time launch cancellation")
+        } catch is CancellationError {
+            // Expected: the cancelled attempt owns and rolls back `.launching`.
+        }
+
+        let stateAfterCancellation = await controller.currentState
+        XCTAssertEqual(stateAfterCancellation, .ready)
+        XCTAssertTrue(newFixture.processIDsIfPresent().isEmpty)
+        try await controller.launch()
+        _ = try await waitForSnapshot(controller, fullName: "/tmp/new/main.s")
+        try await controller.stop()
+        withExtendedLifetime((oldFixture, newFixture)) {}
+    }
+
+    func testStopDuringRelaunchCleanupPreventsPostStopSpawn() async throws {
+        let oldFixture = try ControllerGDBFixture(autoExitWithStubbornChild: true, label: "old")
+        let newFixture = try ControllerGDBFixture(label: "new")
+        let controller = DebuggerController(plan: oldFixture.plan(profile: .arm7tdmi))
+
+        try await controller.launch()
+        let oldChild = try await oldFixture.waitForChildPID()
+        try await waitForState(.ready, controller: controller)
+        try await controller.buildStarted()
+        try await controller.buildSucceeded(plan: newFixture.plan(profile: .arm7tdmi))
+
+        let invalidatedLaunch = Task { try await controller.launch() }
+        try await waitForState(.launching, controller: controller)
+        try await controller.stop()
+        do {
+            try await invalidatedLaunch.value
+            XCTFail("expected stop to invalidate the concurrent launch")
+        } catch is CancellationError {
+            // Expected: stop owns termination after invalidating this attempt.
+        }
+
+        try await Task.sleep(for: .milliseconds(50))
+        let stateAfterStop = await controller.currentState
+        XCTAssertEqual(stateAfterStop, .ready)
+        XCTAssertTrue(newFixture.processIDsIfPresent().isEmpty)
+        XCTAssertEqual(Darwin.kill(oldChild, 0), -1)
+        XCTAssertEqual(errno, ESRCH)
+        withExtendedLifetime((oldFixture, newFixture)) {}
+    }
+
+    func testCancellationAfterSessionStartShutsDownSpawnedProcessAndRollsBack() async throws {
+        let fixture = try ControllerGDBFixture(label: "post-start")
+        let gate = ControllerLaunchGate()
+        let controller = DebuggerController(
+            plan: fixture.plan(profile: .arm7tdmi),
+            postStartSynchronization: { await gate.pause() }
+        )
+
+        let cancelledLaunch = Task { try await controller.launch() }
+        try await waitForArrival(1, at: gate)
+        try await waitForProcessCount(1, fixture: fixture)
+        cancelledLaunch.cancel()
+        await gate.release(1)
+        do {
+            try await cancelledLaunch.value
+            XCTFail("expected cancellation after the session started")
+        } catch is CancellationError {
+            // Expected: rollback shuts down the already-spawned session.
+        }
+
+        let processID = try XCTUnwrap(fixture.processIDsIfPresent().first)
+        XCTAssertEqual(Darwin.kill(processID, 0), -1)
+        XCTAssertEqual(errno, ESRCH)
+        let finalState = await controller.currentState
+        XCTAssertEqual(finalState, .ready)
+    }
+
+    func testRepeatedCancelAndStopInterleavingsCannotLeakAcrossLaunchAttempts() async throws {
+        let fixture = try ControllerGDBFixture(label: "interleaved")
+        let gate = ControllerLaunchGate()
+        let controller = DebuggerController(
+            plan: fixture.plan(profile: .arm7tdmi),
+            postStartSynchronization: { await gate.pause() }
+        )
+
+        for attempt in 1...6 {
+            let invalidatedLaunch = Task { try await controller.launch() }
+            try await waitForArrival(attempt, at: gate)
+            try await waitForProcessCount(attempt, fixture: fixture)
+            if attempt.isMultiple(of: 2) {
+                try await controller.stop()
+            } else {
+                invalidatedLaunch.cancel()
+            }
+            await gate.release(attempt)
+            do {
+                try await invalidatedLaunch.value
+                XCTFail("attempt \(attempt) should have been invalidated")
+            } catch is CancellationError {
+                // Expected for both direct cancellation and stop takeover.
+            }
+            let state = await controller.currentState
+            XCTAssertEqual(state, .ready)
+        }
+
+        let processIDs = fixture.processIDsIfPresent()
+        XCTAssertEqual(processIDs.count, 6)
+        for processID in processIDs {
+            XCTAssertEqual(Darwin.kill(processID, 0), -1, "pid \(processID) still exists")
+            XCTAssertEqual(errno, ESRCH)
+        }
+    }
+
     func testRapidStopAndRelaunchCyclesDoNotLeakOrDeadlock() async throws {
         let fixture = try ControllerGDBFixture()
         let controller = DebuggerController(plan: fixture.plan(profile: .arm7tdmi))
@@ -309,6 +432,30 @@ final class DebuggerControllerTests: XCTestCase {
         throw ControllerTestError.timeout
     }
 
+    private func waitForArrival(
+        _ expected: Int,
+        at gate: ControllerLaunchGate
+    ) async throws {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while ContinuousClock.now < deadline {
+            if await gate.arrivalCount >= expected { return }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        throw ControllerTestError.timeout
+    }
+
+    private func waitForProcessCount(
+        _ expected: Int,
+        fixture: ControllerGDBFixture
+    ) async throws {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while ContinuousClock.now < deadline {
+            if fixture.processIDsIfPresent().count == expected { return }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        throw ControllerTestError.timeout
+    }
+
     private func firstSnapshot(from stream: AsyncStream<DebuggerEvent>) async throws -> DebugSnapshot {
         for await event in stream {
             if case .snapshot(let snapshot) = event { return snapshot }
@@ -320,6 +467,23 @@ final class DebuggerControllerTests: XCTestCase {
 
 private enum ControllerTestError: Error {
     case timeout
+}
+
+private actor ControllerLaunchGate {
+    private(set) var arrivalCount = 0
+    private var releases: [Int: CheckedContinuation<Void, Never>] = [:]
+
+    func pause() async {
+        arrivalCount += 1
+        let arrival = arrivalCount
+        await withCheckedContinuation { continuation in
+            releases[arrival] = continuation
+        }
+    }
+
+    func release(_ arrival: Int) {
+        releases.removeValue(forKey: arrival)?.resume()
+    }
 }
 
 private final class ControllerGDBFixture {
@@ -409,6 +573,10 @@ private final class ControllerGDBFixture {
         try String(contentsOf: pidLog, encoding: .utf8)
             .split(separator: "\n")
             .compactMap { pid_t($0) }
+    }
+
+    func processIDsIfPresent() -> [pid_t] {
+        (try? processIDs()) ?? []
     }
 
     func waitForChildPID() async throws -> pid_t {

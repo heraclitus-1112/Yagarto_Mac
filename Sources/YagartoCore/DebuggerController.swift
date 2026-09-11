@@ -12,6 +12,7 @@ public actor DebuggerController {
     private let consoleLimit: Int
     private let eventBufferLimit: Int
     private let snapshotCommandTimeout: Duration
+    private let postStartSynchronization: (@Sendable () async -> Void)?
     private var machine: DebuggerStateMachine
     private var plan: DebugLaunchPlan?
     private var session: GDBMISession?
@@ -37,6 +38,7 @@ public actor DebuggerController {
         self.consoleLimit = max(1, consoleLimit)
         self.eventBufferLimit = max(1, eventBufferLimit)
         self.snapshotCommandTimeout = snapshotCommandTimeout
+        postStartSynchronization = nil
         machine = DebuggerStateMachine()
     }
 
@@ -51,6 +53,23 @@ public actor DebuggerController {
         self.consoleLimit = max(1, consoleLimit)
         self.eventBufferLimit = max(1, eventBufferLimit)
         self.snapshotCommandTimeout = snapshotCommandTimeout
+        postStartSynchronization = nil
+        machine = DebuggerStateMachine(initialState: .ready)
+    }
+
+    init(
+        plan: DebugLaunchPlan,
+        consoleLimit: Int = 512,
+        eventBufferLimit: Int = 128,
+        snapshotCommandTimeout: Duration = .seconds(2),
+        postStartSynchronization: @escaping @Sendable () async -> Void
+    ) {
+        profile = plan.profile
+        self.plan = plan
+        self.consoleLimit = max(1, consoleLimit)
+        self.eventBufferLimit = max(1, eventBufferLimit)
+        self.snapshotCommandTimeout = snapshotCommandTimeout
+        self.postStartSynchronization = postStartSynchronization
         machine = DebuggerStateMachine(initialState: .ready)
     }
 
@@ -89,49 +108,54 @@ public actor DebuggerController {
         try Task.checkCancellation()
         guard let plan else { throw DebuggerControllerError.missingLaunchPlan }
         try transition(.launchStarted)
-        generation = UUID()
-        await cancelAndAwaitBackgroundTasks()
-        if let staleSession = session {
-            session = nil
-            await staleSession.shutdown(timeout: .zero)
-        }
-        try Task.checkCancellation()
-
-        let launchGeneration = UUID()
-        generation = launchGeneration
-        latestSnapshot = nil
-        let newSession = GDBMISession(plan: plan)
-        session = newSession
-        let stream = await newSession.events()
-        let eventTaskID = UUID()
-        let eventTask = Task { [weak self] in
-            for await event in stream {
-                guard !Task.isCancelled else { return }
-                await self?.receive(
-                    event,
-                    generation: launchGeneration,
-                    sourceSession: newSession
-                )
-            }
-            await self?.eventTaskFinished(eventTaskID)
-        }
-        sessionEventTask = TrackedTask(
-            id: eventTaskID,
-            task: eventTask
-        )
+        let attemptGeneration = UUID()
+        generation = attemptGeneration
+        var attemptSession: GDBMISession?
+        var attemptEventTask: TrackedTask?
         do {
-            try await newSession.start()
-            guard isCurrent(launchGeneration, session: newSession) else {
-                throw CancellationError()
-            }
-        } catch {
-            if isCurrent(launchGeneration, session: newSession) {
-                generation = UUID()
+            await cancelAndAwaitBackgroundTasks()
+            try validateLaunchAttempt(attemptGeneration)
+            if let staleSession = session {
                 session = nil
-                await cancelAndAwaitBackgroundTasks()
-                await newSession.shutdown(timeout: .zero)
-                if machine.state == .launching { try transition(.launchFailed) }
+                await staleSession.shutdown(timeout: .zero)
+                try validateLaunchAttempt(attemptGeneration)
             }
+
+            latestSnapshot = nil
+            let newSession = GDBMISession(plan: plan)
+            attemptSession = newSession
+            session = newSession
+            let stream = await newSession.events()
+            try validateLaunchAttempt(attemptGeneration, session: newSession)
+            try await newSession.start()
+            try validateLaunchAttempt(attemptGeneration, session: newSession)
+            if let postStartSynchronization {
+                await postStartSynchronization()
+                try validateLaunchAttempt(attemptGeneration, session: newSession)
+            }
+
+            let eventTaskID = UUID()
+            let eventTask = Task { [weak self] in
+                for await event in stream {
+                    guard !Task.isCancelled else { return }
+                    await self?.receive(
+                        event,
+                        generation: attemptGeneration,
+                        sourceSession: newSession
+                    )
+                }
+                await self?.eventTaskFinished(eventTaskID)
+            }
+            let trackedEventTask = TrackedTask(id: eventTaskID, task: eventTask)
+            attemptEventTask = trackedEventTask
+            sessionEventTask = trackedEventTask
+            try validateLaunchAttempt(attemptGeneration, session: newSession)
+        } catch {
+            await rollbackLaunchAttempt(
+                generation: attemptGeneration,
+                session: attemptSession,
+                eventTask: attemptEventTask
+            )
             throw error
         }
     }
@@ -504,6 +528,40 @@ public actor DebuggerController {
 
     private func isCurrent(_ candidate: UUID, session candidateSession: GDBMISession) -> Bool {
         generation == candidate && session === candidateSession
+    }
+
+    private func validateLaunchAttempt(
+        _ candidate: UUID,
+        session candidateSession: GDBMISession? = nil
+    ) throws {
+        try Task.checkCancellation()
+        guard generation == candidate, machine.state == .launching else {
+            throw CancellationError()
+        }
+        if let candidateSession, session !== candidateSession {
+            throw CancellationError()
+        }
+    }
+
+    private func rollbackLaunchAttempt(
+        generation attemptGeneration: UUID,
+        session attemptSession: GDBMISession?,
+        eventTask attemptEventTask: TrackedTask?
+    ) async {
+        if let attemptEventTask {
+            attemptEventTask.task.cancel()
+            if sessionEventTask?.id == attemptEventTask.id {
+                sessionEventTask = nil
+            }
+            await attemptEventTask.task.value
+        }
+        if let attemptSession {
+            if session === attemptSession { session = nil }
+            await attemptSession.shutdown(timeout: .zero)
+        }
+        guard generation == attemptGeneration, machine.state == .launching else { return }
+        generation = UUID()
+        try? transition(.launchFailed)
     }
 
     private func cancelSnapshotTasks() {
