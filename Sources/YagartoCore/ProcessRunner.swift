@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import Foundation
+import Dispatch
 
 public struct ProcessResult: Codable, Equatable, Sendable {
     public let exitStatus: Int32
@@ -162,21 +163,14 @@ public struct ProcessRunner: ProcessRunning {
     }
 
     private static func executeInteractively(_ command: CommandSpec) throws -> ProcessTermination {
-        InteractiveProcessSignalState.lock.lock()
-        defer { InteractiveProcessSignalState.lock.unlock() }
-        InteractiveProcessSignalState.processGroup = 0
-        InteractiveProcessSignalState.receivedSignal = 0
+        InteractiveProcessCoordinator.lock.lock()
+        defer { InteractiveProcessCoordinator.lock.unlock() }
 
         let handledSignals = [SIGINT, SIGTERM, SIGHUP]
-        let previousHandlers = handledSignals.map {
-            Darwin.signal($0, forwardInteractiveProcessSignal)
-        }
-        defer {
-            InteractiveProcessSignalState.processGroup = 0
-            for (signalNumber, previousHandler) in zip(handledSignals, previousHandlers) {
-                _ = Darwin.signal(signalNumber, previousHandler)
-            }
-        }
+        let signalMonitor = try InteractiveSignalMonitor(
+            signals: handledSignals,
+            executable: command.executable
+        )
 
         var fileActions: posix_spawn_file_actions_t?
         var attributes: posix_spawnattr_t?
@@ -264,7 +258,6 @@ public struct ProcessRunner: ProcessRunning {
             )
         }
 
-        InteractiveProcessSignalState.processGroup = childPID
         let terminalFileDescriptor = STDIN_FILENO
         let originalForegroundGroup = isatty(terminalFileDescriptor) == 1
             ? tcgetpgrp(terminalFileDescriptor)
@@ -291,82 +284,220 @@ public struct ProcessRunner: ProcessRunning {
             }
         }
 
-        if InteractiveProcessSignalState.receivedSignal != 0 {
-            _ = Darwin.kill(
-                -childPID,
-                InteractiveProcessSignalState.receivedSignal
+        _ = Darwin.kill(childPID, SIGCONT)
+        return try superviseInteractiveProcess(
+            childPID: childPID,
+            signalMonitor: signalMonitor,
+            executable: command.executable
+        )
+    }
+}
+
+private enum InteractiveProcessCoordinator {
+    static let lock = NSLock()
+}
+
+private final class InteractiveSignalMonitor {
+    private let descriptor: Int32
+    private let executable: String
+    private var previousHandlers: [(signal: Int32, handler: sig_t?)] = []
+    private var isClosed = false
+
+    init(signals: [Int32], executable: String) throws {
+        self.executable = executable
+        descriptor = kqueue()
+        guard descriptor >= 0 else {
+            throw YagartoError.processLaunchFailed(
+                executable,
+                String(cString: strerror(errno))
             )
         }
-        _ = Darwin.kill(childPID, SIGCONT)
 
-        var waitStatus = Int32(0)
+        // EVFILT_SIGNAL records ignored process-directed signals, so no Swift
+        // callback executes in async-signal context or shares mutable state.
+        for signalNumber in signals {
+            previousHandlers.append((
+                signalNumber,
+                Darwin.signal(signalNumber, SIG_IGN)
+            ))
+        }
+
+        var registrations = signals.map { signalNumber in
+            var event = kevent64_s()
+            event.ident = UInt64(signalNumber)
+            event.filter = Int16(EVFILT_SIGNAL)
+            event.flags = UInt16(EV_ADD | EV_ENABLE | EV_CLEAR)
+            return event
+        }
+        let registrationStatus = registrations.withUnsafeMutableBufferPointer { buffer in
+            Darwin.kevent64(
+                descriptor,
+                buffer.baseAddress,
+                Int32(buffer.count),
+                nil,
+                0,
+                0,
+                nil
+            )
+        }
+        guard registrationStatus == 0 else {
+            let errorCode = errno
+            closeAndRestore()
+            throw YagartoError.processLaunchFailed(
+                executable,
+                String(cString: strerror(errorCode))
+            )
+        }
+    }
+
+    deinit {
+        closeAndRestore()
+    }
+
+    func nextSignal(waitNanoseconds: UInt64) throws -> Int32? {
+        var event = kevent64_s()
+        var timeout = timespec(
+            tv_sec: Int(waitNanoseconds / 1_000_000_000),
+            tv_nsec: Int(waitNanoseconds % 1_000_000_000)
+        )
         while true {
-            let result = waitpid(childPID, &waitStatus, 0)
-            if result == childPID {
-                break
+            let eventCount = Darwin.kevent64(
+                descriptor,
+                nil,
+                0,
+                &event,
+                1,
+                0,
+                &timeout
+            )
+            if eventCount == 1 {
+                return Int32(event.ident)
             }
-            if result == -1 && errno == EINTR {
+            if eventCount == 0 {
+                return nil
+            }
+            if errno == EINTR {
                 continue
             }
-            if result == -1 {
+            throw YagartoError.processLaunchFailed(
+                executable,
+                String(cString: strerror(errno))
+            )
+        }
+    }
+
+    private func closeAndRestore() {
+        guard !isClosed else { return }
+        isClosed = true
+        for saved in previousHandlers.reversed() {
+            _ = Darwin.signal(saved.signal, saved.handler)
+        }
+        _ = Darwin.close(descriptor)
+    }
+}
+
+private func superviseInteractiveProcess(
+    childPID: pid_t,
+    signalMonitor: InteractiveSignalMonitor,
+    executable: String
+) throws -> ProcessTermination {
+    enum EscalationStage {
+        case waiting
+        case originalSignal
+        case terminate
+        case kill
+    }
+
+    let graceNanoseconds: UInt64 = 200_000_000
+    let killReapNanoseconds: UInt64 = 1_000_000_000
+    let pollNanoseconds: UInt64 = 20_000_000
+    var stage = EscalationStage.waiting
+    var deadline: UInt64?
+    var receivedSignal: Int32?
+    var waitStatus = Int32(0)
+    var childReaped = false
+
+    while true {
+        if !childReaped {
+            let waitResult = waitpid(childPID, &waitStatus, WNOHANG)
+            if waitResult == childPID {
+                childReaped = true
+            } else if waitResult == -1, errno != EINTR {
+                let errorCode = errno
+                _ = Darwin.kill(-childPID, SIGKILL)
                 throw YagartoError.processLaunchFailed(
-                    command.executable,
-                    String(cString: strerror(errno))
+                    executable,
+                    String(cString: strerror(errorCode))
                 )
             }
         }
-        terminateRemainingProcessGroup(childPID)
 
-        if InteractiveProcessSignalState.receivedSignal != 0 {
-            return ProcessTermination(
-                reason: .uncaughtSignal,
-                status: InteractiveProcessSignalState.receivedSignal
-            )
+        let groupAlive = processGroupExists(childPID)
+        if childReaped && !groupAlive {
+            break
         }
 
-        let terminatingSignal = waitStatus & 0x7F
-        if terminatingSignal != 0 && terminatingSignal != 0x7F {
-            return ProcessTermination(reason: .uncaughtSignal, status: terminatingSignal)
+        let now = DispatchTime.now().uptimeNanoseconds
+        if let currentDeadline = deadline, now >= currentDeadline {
+            switch stage {
+            case .originalSignal:
+                _ = Darwin.kill(-childPID, SIGTERM)
+                stage = .terminate
+                deadline = now + graceNanoseconds
+            case .terminate:
+                _ = Darwin.kill(-childPID, SIGKILL)
+                stage = .kill
+                deadline = now + killReapNanoseconds
+            case .kill:
+                _ = Darwin.kill(-childPID, SIGKILL)
+                throw YagartoError.processLaunchFailed(
+                    executable,
+                    "受控进程组在 SIGKILL 后仍未于时限内退出。"
+                )
+            case .waiting:
+                break
+            }
+            continue
         }
-        return ProcessTermination(reason: .exit, status: (waitStatus >> 8) & 0xFF)
+
+        if childReaped && groupAlive && stage == .waiting {
+            _ = Darwin.kill(-childPID, SIGTERM)
+            stage = .terminate
+            deadline = now + graceNanoseconds
+            continue
+        }
+
+        let remaining = deadline.map { $0 > now ? $0 - now : 0 } ?? pollNanoseconds
+        let signalWait = min(pollNanoseconds, remaining)
+        if let signalNumber = try signalMonitor.nextSignal(
+            waitNanoseconds: signalWait
+        ) {
+            _ = Darwin.kill(-childPID, signalNumber)
+            if receivedSignal == nil {
+                receivedSignal = signalNumber
+                stage = .originalSignal
+                deadline = DispatchTime.now().uptimeNanoseconds + graceNanoseconds
+            }
+        }
     }
-}
 
-private enum InteractiveProcessSignalState {
-    static let lock = NSLock()
-    nonisolated(unsafe) static var processGroup = pid_t(0)
-    nonisolated(unsafe) static var receivedSignal = Int32(0)
-}
-
-private func forwardInteractiveProcessSignal(_ signalNumber: Int32) {
-    InteractiveProcessSignalState.receivedSignal = signalNumber
-    let processGroup = InteractiveProcessSignalState.processGroup
-    if processGroup > 0 {
-        _ = Darwin.kill(-processGroup, signalNumber)
+    if let receivedSignal {
+        return ProcessTermination(reason: .uncaughtSignal, status: receivedSignal)
     }
+    let terminatingSignal = waitStatus & 0x7F
+    if terminatingSignal != 0 && terminatingSignal != 0x7F {
+        return ProcessTermination(reason: .uncaughtSignal, status: terminatingSignal)
+    }
+    return ProcessTermination(reason: .exit, status: (waitStatus >> 8) & 0xFF)
 }
 
-private func terminateRemainingProcessGroup(_ processGroup: pid_t) {
-    guard processGroup > 0 else { return }
+private func processGroupExists(_ processGroup: pid_t) -> Bool {
+    guard processGroup > 0 else { return false }
     errno = 0
-    guard Darwin.kill(-processGroup, 0) == 0 || errno != ESRCH else { return }
-
-    _ = Darwin.kill(-processGroup, SIGTERM)
-    for _ in 0..<100 {
-        errno = 0
-        if Darwin.kill(-processGroup, 0) == -1, errno == ESRCH {
-            return
-        }
-        usleep(10_000)
+    if Darwin.kill(-processGroup, 0) == 0 {
+        return true
     }
-    _ = Darwin.kill(-processGroup, SIGKILL)
-    for _ in 0..<100 {
-        errno = 0
-        if Darwin.kill(-processGroup, 0) == -1, errno == ESRCH {
-            return
-        }
-        usleep(10_000)
-    }
+    return errno != ESRCH
 }
 
 private typealias SpawnAddChdir = @convention(c) (

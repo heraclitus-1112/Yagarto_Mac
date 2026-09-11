@@ -16,7 +16,9 @@ final class CoreModelTests: XCTestCase {
         XCTAssertEqual(YagartoExitCode.buildFailure.rawValue, 4)
         XCTAssertEqual(YagartoExitCode.missingTool.rawValue, 5)
         XCTAssertEqual(YagartoExitCode.unsupported.rawValue, 6)
+        XCTAssertEqual(YagartoExitCode.hangup.rawValue, 129)
         XCTAssertEqual(YagartoExitCode.interrupted.rawValue, 130)
+        XCTAssertEqual(YagartoExitCode.terminated.rawValue, 143)
     }
 
     func testErrorsProvideActionableChineseMessageAndExitCode() {

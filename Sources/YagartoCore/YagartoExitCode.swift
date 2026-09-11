@@ -7,5 +7,7 @@ public enum YagartoExitCode: Int32, Codable, Sendable {
     case buildFailure = 4
     case missingTool = 5
     case unsupported = 6
+    case hangup = 129
     case interrupted = 130
+    case terminated = 143
 }

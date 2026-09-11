@@ -42,9 +42,11 @@ swift run yagarto-mac flash firmware.elf --profile stm32f4-discovery --yes
 
 对 `stm32f4-discovery`，请先通过 `flash --yes` 明确完成写入，再使用 `run`/`debug` attach。OpenOCD 调试日志使用随机文件名，并在启动前以排他、禁止跟随符号链接的方式创建。
 
+实际烧录前会先通过 macOS `system_profiler` 只读枚举 ST-Link USB VID/PID。明确没有匹配设备时返回 6，且不会启动 OpenOCD；枚举失败，或已有 ST-Link 候选但 OpenOCD 报告 open/权限/占用/配置等错误时返回 4 并保留原始诊断。`flash --dry-run` 不会执行 USB 枚举、OpenOCD 探测或烧录。
+
 `doctor` 分别报告常规 GDB、simulator GDB 候选、二者的 `target sim` 能力、QEMU、OpenOCD、`stm32f4discovery.cfg`，并列出三个 profile 将采用的 backend 与 GDB。JSON 报告带 `schemaVersion`，可与 `run/debug --dry-run --format json` 的选择交叉检查。
 
-非交互输出支持 `--format text`（默认）或 `--format json`，错误使用统一 JSON envelope。实际 `run`/`debug` 会把终端直接交给 GDB，因此只允许 `--format text`；若指定 JSON 会在启动任何后端前以退出码 2 拒绝。需要 JSON 时使用 `--dry-run`。父 CLI 收到 `SIGINT`、`SIGTERM` 或 `SIGHUP` 时会把信号转发到受控进程组并等待回收，Ctrl-C 映射为退出码 130。
+非交互输出支持 `--format text`（默认）或 `--format json`，错误使用统一 JSON envelope。实际 `run`/`debug` 会把终端直接交给 GDB，因此只允许 `--format text`；若指定 JSON 会在启动任何后端前以退出码 2 拒绝。需要 JSON 时使用 `--dry-run`。父 CLI 通过 kqueue 监听 `SIGINT`、`SIGTERM` 和 `SIGHUP`，按“原信号、短暂宽限、`SIGTERM`、短暂宽限、`SIGKILL`”有界清理整个受控进程组并回收组长；退出状态分别遵循 130、143 和 129。
 
 项目不会自动安装 QEMU。若要使用 QEMU 后端，请通过你信任的包管理器安装 `qemu-system-arm`，再用 `doctor` 确认路径。`arm7tdmi` 只在没有可用 GDB simulator 时回退到 ARM926；`cortex-m4` 则要求 QEMU 提供 `mps2-an386` machine。
 
@@ -54,7 +56,7 @@ swift run yagarto-mac flash firmware.elf --profile stm32f4-discovery --yes
 
 部分现代 Arm GNU Toolchain 所带 GDB 没有内置 simulator。辅助脚本固定使用 GNU GDB 17.2 源码，并且不会跳过源码校验：调用者必须从可信渠道取得该发布包的 SHA-256。
 
-脚本会检查 `gmake`、GMP、MPFR 和 Texinfo，配置 `--target=arm-none-eabi`，保留 simulator。安装后它使用 `arm-none-eabi-as`/`arm-none-eabi-ld` 生成最小 ARM7 ELF，并依次验证 `target sim`、`file`/`load`、断点命中、`stepi`，以及读取 `r0`–`r15`/`cpsr`；全部成功后才提供 `arm-none-eabi-gdb-sim` 别名。此过程会进行较长时间的本地编译。
+脚本会检查 `gmake`、GMP、MPFR 和 Texinfo，配置 `--target=arm-none-eabi`，保留 simulator。安装后它使用 `arm-none-eabi-as`/`arm-none-eabi-ld` 生成最小 ARM7 ELF，并依次验证 `target sim`、`file`/`load`、断点命中、`stepi`，以及读取 `r0`–`r12`、GDB 的规范别名 `sp`/`lr`/`pc` 和 `cpsr`；全部成功后才提供 `arm-none-eabi-gdb-sim` 别名。此过程会进行较长时间的本地编译。
 
 ```sh
 scripts/bootstrap-gdb-sim.sh \

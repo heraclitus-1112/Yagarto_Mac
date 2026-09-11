@@ -128,14 +128,14 @@ EOF
             -ex "break _start" \
             -ex "run" \
             -ex "stepi" \
-            -ex "info registers r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 cpsr"
+            -ex "info registers r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 sp lr pc cpsr"
     ) >"$selftest_output" 2>&1; then
         echo "安装后的 GDB 未通过完整 ARM7 simulator 自测：" >&2
         sed -n '1,160p' "$selftest_output" >&2
         return 1
     fi
 
-    for register in r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 cpsr; do
+    for register in r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 sp lr pc cpsr; do
         if ! grep -E "^[[:space:]]*${register}[[:space:]]" "$selftest_output" >/dev/null 2>&1; then
             echo "完整 GDB 自测未能读取寄存器 ${register}：" >&2
             sed -n '1,160p' "$selftest_output" >&2
@@ -147,7 +147,7 @@ EOF
         sed -n '1,160p' "$selftest_output" >&2
         return 1
     fi
-    echo "完整 ARM7 simulator 自测通过：target sim、ELF load、断点、单步和 r0-r15/cpsr。"
+    echo "完整 ARM7 simulator 自测通过：target sim、ELF load、断点、单步和 r0-r12/sp/lr/pc/cpsr。"
 }
 
 if [ -n "$VERIFY_GDB" ]; then

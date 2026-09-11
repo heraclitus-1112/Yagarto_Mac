@@ -28,6 +28,7 @@ public enum YagartoError: Error, Equatable, Sendable {
     case processIOFailed(String, String)
     case processLaunchFailed(String, String)
     case interactiveJSONUnsupported
+    case terminatedBySignal(Int32)
     case interrupted
     case buildStepFailed(String, Int32, String)
     case cannotWriteOutput(String, String)
@@ -94,6 +95,8 @@ extension YagartoError: LocalizedError {
             return "process.launch_failed"
         case .interactiveJSONUnsupported:
             return "usage.interactive_json_unsupported"
+        case .terminatedBySignal:
+            return "process.terminated_by_signal"
         case .interrupted:
             return "process.interrupted"
         case .buildStepFailed:
@@ -160,6 +163,8 @@ extension YagartoError: LocalizedError {
             return "无法启动“\(executable)”。请检查工具路径和执行权限。"
         case .interactiveJSONUnsupported:
             return "实际 run/debug 是交互式会话，不支持 --format json；请改用 --format text，或添加 --dry-run 输出 JSON 启动计划。"
+        case .terminatedBySignal(let signal):
+            return "操作收到信号 \(signal)，受控调试进程组已回收。"
         case .interrupted:
             return "操作已由 Ctrl-C 中断。"
         case .buildStepFailed(let executable, let status, _):
@@ -183,6 +188,8 @@ extension YagartoError: LocalizedError {
             return "路径：\(path)；\(detail)"
         case .processLaunchFailed(_, let detail):
             return detail
+        case .terminatedBySignal(let signal):
+            return "退出状态：\(128 + signal)"
         case .buildStepFailed(_, _, let detail):
             return detail.isEmpty ? nil : detail
         case .cannotWriteOutput(let path, let detail):
@@ -206,6 +213,17 @@ extension YagartoError: LocalizedError {
         switch self {
         case .flashUnsupportedProfile, .interactiveJSONUnsupported:
             return .usage
+        case .terminatedBySignal(let signal):
+            switch 128 + signal {
+            case YagartoExitCode.hangup.rawValue:
+                return .hangup
+            case YagartoExitCode.interrupted.rawValue:
+                return .interrupted
+            case YagartoExitCode.terminated.rawValue:
+                return .terminated
+            default:
+                return .buildFailure
+            }
         case .toolNotFound, .debugBackendUnavailable:
             return .missingTool
         case .missingResource, .flashBoardNotFound:

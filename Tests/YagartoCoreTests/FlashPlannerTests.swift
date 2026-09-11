@@ -84,7 +84,7 @@ final class FlashPlannerTests: XCTestCase {
         }
     }
 
-    func testHardwareProbeUsesOpenOCDInitShutdownAndReportsNoBoard() throws {
+    func testHardwareProbeUsesOpenOCDInitShutdownAndPreservesNoDeviceFailure() throws {
         let runner = FlashRecordingRunner(result: ProcessResult(
             exitStatus: 1,
             stdout: "",
@@ -93,11 +93,14 @@ final class FlashPlannerTests: XCTestCase {
         let probe = OpenOCDHardwareProbe(runner: runner)
         let project = URL(fileURLWithPath: "/tmp/探针 项目", isDirectory: true)
 
-        XCTAssertFalse(try probe.isBoardConnected(
+        XCTAssertThrowsError(try probe.isBoardConnected(
             openOCDExecutable: "/tools/openocd",
             boardConfig: URL(fileURLWithPath: "/board config.cfg"),
             projectDirectory: project
-        ))
+        )) { error in
+            XCTAssertEqual((error as? YagartoError)?.exitCode, .buildFailure)
+            XCTAssertEqual((error as? YagartoError)?.toolOutput, "no device found")
+        }
         XCTAssertEqual(runner.commands, [CommandSpec(
             executable: "/tools/openocd",
             args: ["-f", "/board config.cfg", "-c", "init", "-c", "shutdown"],
@@ -174,6 +177,173 @@ final class FlashPlannerTests: XCTestCase {
         }
     }
 
+    func testSystemProfilerEnumeratorRecognizesCanonicalSTLinkVIDPID() throws {
+        let runner = FlashRecordingRunner(result: ProcessResult(
+            exitStatus: 0,
+            stdout: """
+            {"SPUSBDataType":[{"_name":"ST-LINK/V2-1","vendor_id":"0x0483  (STMicroelectronics)","product_id":"0x374b"}]}
+            """,
+            stderr: ""
+        ))
+        let enumerator = SystemProfilerSTLinkUSBEnumerator(runner: runner)
+
+        XCTAssertEqual(try enumerator.presence(), .present)
+        XCTAssertEqual(runner.commands, [CommandSpec(
+            executable: "/usr/sbin/system_profiler",
+            args: ["SPUSBDataType", "-json"],
+            workingDirectory: URL(
+                fileURLWithPath: FileManager.default.currentDirectoryPath,
+                isDirectory: true
+            )
+        )])
+    }
+
+    func testSystemProfilerEnumeratorReportsExplicitAbsenceForUnrelatedUSBDevices() throws {
+        let runner = FlashRecordingRunner(result: ProcessResult(
+            exitStatus: 0,
+            stdout: """
+            {"SPUSBDataType":[{"vendor_id":"0x05ac","product_id":"0x1234"}]}
+            """,
+            stderr: ""
+        ))
+
+        XCTAssertEqual(
+            try SystemProfilerSTLinkUSBEnumerator(runner: runner).presence(),
+            .absent
+        )
+    }
+
+    func testSystemProfilerEnumeratorPreservesEnumerationFailure() {
+        let diagnostic = "USB data source unavailable"
+        let runner = FlashRecordingRunner(result: ProcessResult(
+            exitStatus: 7,
+            stdout: "",
+            stderr: diagnostic
+        ))
+
+        XCTAssertThrowsError(try SystemProfilerSTLinkUSBEnumerator(
+            runner: runner
+        ).presence()) { error in
+            XCTAssertEqual((error as? YagartoError)?.exitCode, .buildFailure)
+            XCTAssertEqual((error as? YagartoError)?.toolOutput, diagnostic)
+        }
+    }
+
+    func testSystemProfilerEnumeratorRejectsMissingUSBDataSchemaAsFailure() {
+        let runner = FlashRecordingRunner(result: ProcessResult(
+            exitStatus: 0,
+            stdout: "{}",
+            stderr: ""
+        ))
+
+        XCTAssertThrowsError(try SystemProfilerSTLinkUSBEnumerator(
+            runner: runner
+        ).presence()) { error in
+            XCTAssertEqual((error as? YagartoError)?.exitCode, .buildFailure)
+            XCTAssertTrue(
+                (error as? YagartoError)?.toolOutput?.contains("SPUSBDataType") == true
+            )
+        }
+    }
+
+    func testFlashExecutorUsesUSBAbsenceAsExitSixWithoutRunningOpenOCD() throws {
+        let plan = try flashTestPlan()
+        let enumerator = StubSTLinkUSBEnumerator(result: .success(.absent))
+        let probe = StubHardwareProbe(connected: true)
+        let runner = FlashRecordingRunner(result: ProcessResult(
+            exitStatus: 0,
+            stdout: "",
+            stderr: ""
+        ))
+
+        XCTAssertThrowsError(try FlashExecutor(
+            stLinkUSBEnumerator: enumerator,
+            hardwareProbe: probe,
+            runner: runner
+        ).execute(plan)) { error in
+            XCTAssertEqual(error as? YagartoError, .flashBoardNotFound)
+        }
+        XCTAssertEqual(enumerator.invocationCount, 1)
+        XCTAssertEqual(probe.invocationCount, 0)
+        XCTAssertTrue(runner.commands.isEmpty)
+    }
+
+    func testFlashExecutorPreservesOpenOCDErrorsWhenUSBDeviceIsPresent() throws {
+        for diagnostic in [
+            "Error: open failed",
+            "Error: LIBUSB_ERROR_ACCESS permission denied",
+            "Error: debug adapter is busy",
+            "Error: invalid board configuration"
+        ] {
+            let probeRunner = FlashRecordingRunner(result: ProcessResult(
+                exitStatus: 1,
+                stdout: "",
+                stderr: diagnostic
+            ))
+            let programRunner = FlashRecordingRunner(result: ProcessResult(
+                exitStatus: 0,
+                stdout: "",
+                stderr: ""
+            ))
+
+            XCTAssertThrowsError(try FlashExecutor(
+                stLinkUSBEnumerator: StubSTLinkUSBEnumerator(result: .success(.present)),
+                hardwareProbe: OpenOCDHardwareProbe(runner: probeRunner),
+                runner: programRunner
+            ).execute(try flashTestPlan())) { error in
+                XCTAssertEqual((error as? YagartoError)?.exitCode, .buildFailure)
+                XCTAssertEqual((error as? YagartoError)?.toolOutput, diagnostic)
+            }
+            XCTAssertTrue(programRunner.commands.isEmpty)
+        }
+    }
+
+    func testFlashExecutorTreatsOpenOCDNoDeviceOutputAsConflictWhenUSBIsPresent() throws {
+        let diagnostic = "Error: no device found"
+        let probeRunner = FlashRecordingRunner(result: ProcessResult(
+            exitStatus: 1,
+            stdout: "",
+            stderr: diagnostic
+        ))
+
+        XCTAssertThrowsError(try FlashExecutor(
+            stLinkUSBEnumerator: StubSTLinkUSBEnumerator(result: .success(.present)),
+            hardwareProbe: OpenOCDHardwareProbe(runner: probeRunner),
+            runner: FlashRecordingRunner(result: ProcessResult(
+                exitStatus: 0,
+                stdout: "",
+                stderr: ""
+            ))
+        ).execute(try flashTestPlan())) { error in
+            XCTAssertEqual((error as? YagartoError)?.exitCode, .buildFailure)
+            XCTAssertEqual((error as? YagartoError)?.toolOutput, diagnostic)
+        }
+    }
+
+    func testFlashExecutorPreservesUSBEnumerationFailureBeforeOpenOCDProbe() throws {
+        let diagnostic = "system_profiler USB enumeration failed"
+        let enumerator = StubSTLinkUSBEnumerator(result: .failure(.buildStepFailed(
+            "/usr/sbin/system_profiler",
+            9,
+            diagnostic
+        )))
+        let probe = StubHardwareProbe(connected: true)
+
+        XCTAssertThrowsError(try FlashExecutor(
+            stLinkUSBEnumerator: enumerator,
+            hardwareProbe: probe,
+            runner: FlashRecordingRunner(result: ProcessResult(
+                exitStatus: 0,
+                stdout: "",
+                stderr: ""
+            ))
+        ).execute(try flashTestPlan())) { error in
+            XCTAssertEqual((error as? YagartoError)?.exitCode, .buildFailure)
+            XCTAssertEqual((error as? YagartoError)?.toolOutput, diagnostic)
+        }
+        XCTAssertEqual(probe.invocationCount, 0)
+    }
+
     func testFlashExecutorReturnsExitSixAndDoesNotProgramWhenBoardIsAbsent() throws {
         let project = URL(fileURLWithPath: "/tmp/烧录项目", isDirectory: true)
         let plan = try FlashPlanner(
@@ -192,13 +362,14 @@ final class FlashPlannerTests: XCTestCase {
         ))
 
         XCTAssertThrowsError(try FlashExecutor(
+            stLinkUSBEnumerator: StubSTLinkUSBEnumerator(result: .success(.absent)),
             hardwareProbe: probe,
             runner: runner
         ).execute(plan)) { error in
             XCTAssertEqual((error as? YagartoError)?.exitCode, .unsupported)
             XCTAssertEqual((error as? YagartoError)?.diagnosticCode, "flash.board_not_found")
         }
-        XCTAssertEqual(probe.invocationCount, 1)
+        XCTAssertEqual(probe.invocationCount, 0)
         XCTAssertTrue(runner.commands.isEmpty)
     }
 
@@ -217,6 +388,7 @@ final class FlashPlannerTests: XCTestCase {
         let runner = FlashRecordingRunner(result: expected)
 
         let result = try FlashExecutor(
+            stLinkUSBEnumerator: StubSTLinkUSBEnumerator(result: .success(.present)),
             hardwareProbe: probe,
             runner: runner
         ).execute(plan)
@@ -243,6 +415,7 @@ final class FlashPlannerTests: XCTestCase {
         ))
 
         XCTAssertThrowsError(try FlashExecutor(
+            stLinkUSBEnumerator: StubSTLinkUSBEnumerator(result: .success(.present)),
             hardwareProbe: StubHardwareProbe(connected: true),
             runner: runner
         ).execute(plan)) { error in
@@ -251,6 +424,18 @@ final class FlashPlannerTests: XCTestCase {
             XCTAssertEqual((error as? YagartoError)?.toolOutput, "verify failed")
         }
     }
+}
+
+private func flashTestPlan() throws -> FlashPlan {
+    let project = URL(fileURLWithPath: "/tmp/烧录项目", isDirectory: true)
+    return try FlashPlanner(
+        openOCDExecutable: "/tools/openocd",
+        boardConfig: URL(fileURLWithPath: "/board.cfg")
+    ).plan(
+        configuration: ProjectConfiguration(profile: .stm32f4Discovery),
+        elf: project.appendingPathComponent("demo.elf"),
+        projectDirectory: project
+    )
 }
 
 private final class FlashRecordingRunner: ProcessRunning {
@@ -282,5 +467,19 @@ private final class StubHardwareProbe: HardwareProbing {
     ) throws -> Bool {
         invocationCount += 1
         return connected
+    }
+}
+
+private final class StubSTLinkUSBEnumerator: STLinkUSBEnumerating {
+    let result: Result<STLinkUSBPresence, YagartoError>
+    private(set) var invocationCount = 0
+
+    init(result: Result<STLinkUSBPresence, YagartoError>) {
+        self.result = result
+    }
+
+    func presence() throws -> STLinkUSBPresence {
+        invocationCount += 1
+        return try result.get()
     }
 }

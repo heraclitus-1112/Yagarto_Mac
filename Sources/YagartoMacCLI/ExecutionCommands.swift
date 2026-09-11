@@ -270,6 +270,12 @@ private func executeDebugLaunchPlan(_ plan: DebugLaunchPlan) throws {
     if status == YagartoExitCode.interrupted.rawValue {
         throw YagartoError.interrupted
     }
+    if status == YagartoExitCode.hangup.rawValue {
+        throw YagartoError.terminatedBySignal(SIGHUP)
+    }
+    if status == YagartoExitCode.terminated.rawValue {
+        throw YagartoError.terminatedBySignal(SIGTERM)
+    }
     guard status == 0 else {
         throw YagartoError.buildStepFailed(plan.gdbExecutable, status, "")
     }

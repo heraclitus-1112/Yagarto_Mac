@@ -62,6 +62,105 @@ public protocol HardwareProbing {
     ) throws -> Bool
 }
 
+public enum STLinkUSBPresence: String, Codable, Equatable, Sendable {
+    case absent
+    case present
+}
+
+public protocol STLinkUSBEnumerating {
+    func presence() throws -> STLinkUSBPresence
+}
+
+public struct SystemProfilerSTLinkUSBEnumerator: STLinkUSBEnumerating {
+    private let runner: any ProcessRunning
+    private let executable: String
+
+    public init(
+        runner: any ProcessRunning = ProcessRunner(),
+        executable: String? = nil,
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) {
+        self.runner = runner
+        self.executable = executable
+            ?? environment["YAGARTO_MAC_SYSTEM_PROFILER"]
+            ?? "/usr/sbin/system_profiler"
+    }
+
+    public func presence() throws -> STLinkUSBPresence {
+        let result = try runner.run(CommandSpec(
+            executable: executable,
+            args: ["SPUSBDataType", "-json"],
+            workingDirectory: URL(
+                fileURLWithPath: FileManager.default.currentDirectoryPath,
+                isDirectory: true
+            )
+        ))
+        guard result.exitStatus == 0 else {
+            throw YagartoError.buildStepFailed(
+                executable,
+                result.exitStatus,
+                result.toolOutput ?? ""
+            )
+        }
+
+        let object: Any
+        do {
+            object = try JSONSerialization.jsonObject(with: Data(result.stdout.utf8))
+        } catch {
+            let output = result.toolOutput.map { "\($0)\n" } ?? ""
+            throw YagartoError.buildStepFailed(
+                executable,
+                1,
+                "\(output)无法解析 USB 枚举 JSON：\(error.localizedDescription)"
+            )
+        }
+        guard let root = object as? [String: Any],
+              let devices = root["SPUSBDataType"] as? [Any] else {
+            let output = result.toolOutput.map { "\($0)\n" } ?? ""
+            throw YagartoError.buildStepFailed(
+                executable,
+                1,
+                "\(output)USB 枚举 JSON 缺少 SPUSBDataType 数组。"
+            )
+        }
+        return Self.containsSTLink(in: devices) ? .present : .absent
+    }
+
+    private static let stLinkProductIDs: Set<Int> = [
+        0x3744, 0x3748, 0x374B, 0x374D, 0x374E,
+        0x374F, 0x3752, 0x3753, 0x3754
+    ]
+
+    private static func containsSTLink(in value: Any) -> Bool {
+        if let dictionary = value as? [String: Any] {
+            if identifier(dictionary["vendor_id"]) == 0x0483,
+               let productID = identifier(dictionary["product_id"]),
+               stLinkProductIDs.contains(productID) {
+                return true
+            }
+            return dictionary.values.contains(where: containsSTLink)
+        }
+        if let array = value as? [Any] {
+            return array.contains(where: containsSTLink)
+        }
+        return false
+    }
+
+    private static func identifier(_ value: Any?) -> Int? {
+        if let number = value as? NSNumber {
+            return number.intValue
+        }
+        guard let string = value as? String else { return nil }
+        if let range = string.range(
+            of: #"0x[0-9a-fA-F]+"#,
+            options: .regularExpression
+        ) {
+            return Int(string[range].dropFirst(2), radix: 16)
+        }
+        return Int(string.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+}
+
 public struct OpenOCDHardwareProbe: HardwareProbing {
     private let runner: any ProcessRunning
 
@@ -82,62 +181,25 @@ public struct OpenOCDHardwareProbe: HardwareProbing {
         guard result.exitStatus != 0 else {
             return true
         }
-
-        let output = result.toolOutput ?? ""
-        let normalized = output.lowercased()
-        let noDeviceMarkers = [
-            "no device found",
-            "libusb_error_no_device",
-            "no cmsis-dap device found",
-            "unable to find a matching cmsis-dap device",
-            "unable to find any matching cmsis-dap device",
-            "could not find or open device"
-        ]
-        let actionableErrorMarkers = [
-            "permission",
-            "libusb_error_access",
-            "access",
-            "busy",
-            "configuration",
-            "config",
-            "syntax error",
-            "driver"
-        ]
-        let contradictoryErrorLine = normalized
-            .split(whereSeparator: \Character.isNewline)
-            .contains { line in
-                let isError = line.contains("error:") || line.contains("fatal:")
-                let isOnlyNoDevice = noDeviceMarkers.contains { line.contains($0) }
-                return isError && !isOnlyNoDevice
-            }
-        if actionableErrorMarkers.contains(where: { normalized.contains($0) })
-            || contradictoryErrorLine {
-            throw YagartoError.buildStepFailed(
-                openOCDExecutable,
-                result.exitStatus,
-                output
-            )
-        }
-        let explicitlyMissing = noDeviceMarkers.contains { normalized.contains($0) }
-        if explicitlyMissing {
-            return false
-        }
         throw YagartoError.buildStepFailed(
             openOCDExecutable,
             result.exitStatus,
-            output
+            result.toolOutput ?? ""
         )
     }
 }
 
 public struct FlashExecutor {
+    private let stLinkUSBEnumerator: any STLinkUSBEnumerating
     private let hardwareProbe: any HardwareProbing
     private let runner: any ProcessRunning
 
     public init(
+        stLinkUSBEnumerator: any STLinkUSBEnumerating = SystemProfilerSTLinkUSBEnumerator(),
         hardwareProbe: any HardwareProbing = OpenOCDHardwareProbe(),
         runner: any ProcessRunning = ProcessRunner()
     ) {
+        self.stLinkUSBEnumerator = stLinkUSBEnumerator
         self.hardwareProbe = hardwareProbe
         self.runner = runner
     }
@@ -146,12 +208,19 @@ public struct FlashExecutor {
     public func execute(_ plan: FlashPlan) throws -> ProcessResult {
         let project = plan.command.workingDirectory
         let boardConfig = URL(fileURLWithPath: plan.boardConfig, isDirectory: false)
+        guard try stLinkUSBEnumerator.presence() == .present else {
+            throw YagartoError.flashBoardNotFound
+        }
         guard try hardwareProbe.isBoardConnected(
             openOCDExecutable: plan.command.executable,
             boardConfig: boardConfig,
             projectDirectory: project
         ) else {
-            throw YagartoError.flashBoardNotFound
+            throw YagartoError.buildStepFailed(
+                plan.command.executable,
+                1,
+                "OpenOCD 探测未确认 ST-Link 连接。"
+            )
         }
 
         let result = try runner.run(plan.command)

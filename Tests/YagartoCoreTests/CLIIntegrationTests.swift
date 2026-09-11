@@ -638,43 +638,63 @@ final class CLIIntegrationTests: XCTestCase {
         XCTAssertTrue(result.stderr.contains("Ctrl-C"))
     }
 
-    func testRunForwardsParentSIGINTAndReapsChildProcessGroup() throws {
-        let directory = try CLITemporaryDirectory()
-        let tools = directory.url.appendingPathComponent("signal-tools", isDirectory: true)
-        let pidFile = directory.url.appendingPathComponent("descendant-pids.txt")
-        try writeExecutable(
-            """
-            #!/bin/sh
-            cleanup_signal() {
-                exit 130
-            }
-            trap cleanup_signal INT TERM HUP
-            /bin/sleep 30 &
-            grandchild=$!
-            printf '%s %s\n' "$$" "$grandchild" > "$YAGARTO_SIGNAL_PID_FILE"
-            wait "$grandchild"
-            """,
-            to: tools.appendingPathComponent("arm-none-eabi-gdb")
-        )
-        try writeExecutable(
-            "#!/bin/sh\nexit 0\n",
-            to: tools.appendingPathComponent("qemu-system-arm")
-        )
+    func testRunEscalatesParentSignalsAndReapsIgnoringProcessGroupWithinBound() throws {
+        let cases: [(
+            signal: Int32,
+            expectedStatus: Int32,
+            diagnosticCode: String,
+            name: String
+        )] = [
+            (SIGINT, 128 + SIGINT, "process.interrupted", "SIGINT"),
+            (SIGTERM, 128 + SIGTERM, "process.terminated_by_signal", "SIGTERM"),
+            (SIGHUP, 128 + SIGHUP, "process.terminated_by_signal", "SIGHUP")
+        ]
 
-        let result = try runCLIAndSendSignal(
-            ["run", "firmware.elf", "--profile", "cortex-m4", "--format", "text"],
-            in: directory.url,
-            environment: [
-                "PATH": "\(tools.path):/usr/bin:/bin",
-                "YAGARTO_SIGNAL_PID_FILE": pidFile.path
-            ],
-            signal: SIGINT,
-            pidFile: pidFile
-        )
+        for testCase in cases {
+            let directory = try CLITemporaryDirectory()
+            let tools = directory.url.appendingPathComponent("signal-tools", isDirectory: true)
+            let pidFile = directory.url.appendingPathComponent("descendant-pids.txt")
+            try writeExecutable(
+                """
+                #!/bin/sh
+                trap '' INT TERM HUP
+                /bin/sleep 30 &
+                grandchild=$!
+                printf '%s %s\n' "$$" "$grandchild" > "$YAGARTO_SIGNAL_PID_FILE"
+                wait "$grandchild"
+                """,
+                to: tools.appendingPathComponent("arm-none-eabi-gdb")
+            )
+            try writeExecutable(
+                "#!/bin/sh\nexit 0\n",
+                to: tools.appendingPathComponent("qemu-system-arm")
+            )
 
-        XCTAssertEqual(result.status, YagartoExitCode.interrupted.rawValue, result.stderr)
-        let remaining = result.descendantPIDs.filter { !processHasExited($0) }
-        XCTAssertTrue(remaining.isEmpty, "信号后仍存在 PID：\(remaining)")
+            let start = Date()
+            let result = try runCLIAndSendSignal(
+                ["run", "firmware.elf", "--profile", "cortex-m4", "--format", "text"],
+                in: directory.url,
+                environment: [
+                    "PATH": "\(tools.path):/usr/bin:/bin",
+                    "YAGARTO_SIGNAL_PID_FILE": pidFile.path
+                ],
+                signal: testCase.signal,
+                pidFile: pidFile
+            )
+
+            XCTAssertEqual(
+                result.status,
+                testCase.expectedStatus,
+                "\(testCase.name)：\(result.stderr)"
+            )
+            XCTAssertLessThan(Date().timeIntervalSince(start), 3, testCase.name)
+            XCTAssertTrue(result.stderr.contains(testCase.diagnosticCode), testCase.name)
+            let remaining = result.descendantPIDs.filter { !processHasExited($0) }
+            XCTAssertTrue(
+                remaining.isEmpty,
+                "\(testCase.name) 后仍存在 PID：\(remaining)"
+            )
+        }
     }
 
     func testDebugLaunchesSelectedGDBAndReturnsItsSuccessfulStatus() throws {
@@ -742,9 +762,15 @@ final class CLIIntegrationTests: XCTestCase {
         let prefix = directory.url.appendingPathComponent("dry-run-openocd", isDirectory: true)
         let openOCD = prefix.appendingPathComponent("bin/openocd")
         let marker = directory.url.appendingPathComponent("openocd-executed")
+        let profilerMarker = directory.url.appendingPathComponent("system-profiler-executed")
+        let profiler = prefix.appendingPathComponent("bin/system_profiler")
         try writeExecutable(
             "#!/bin/sh\n: > \"$YAGARTO_OPENOCD_MARKER\"\nexit 0\n",
             to: openOCD
+        )
+        try writeExecutable(
+            "#!/bin/sh\n: > \"$YAGARTO_PROFILER_MARKER\"\nprintf '{\"SPUSBDataType\":[]}'\n",
+            to: profiler
         )
         let board = prefix.appendingPathComponent(
             "share/openocd/scripts/board/stm32f4discovery.cfg"
@@ -765,7 +791,9 @@ final class CLIIntegrationTests: XCTestCase {
             in: directory.url,
             environment: [
                 "PATH": "\(prefix.appendingPathComponent("bin").path):/usr/bin:/bin",
-                "YAGARTO_OPENOCD_MARKER": marker.path
+                "YAGARTO_OPENOCD_MARKER": marker.path,
+                "YAGARTO_MAC_SYSTEM_PROFILER": profiler.path,
+                "YAGARTO_PROFILER_MARKER": profilerMarker.path
             ]
         )
 
@@ -776,6 +804,7 @@ final class CLIIntegrationTests: XCTestCase {
         XCTAssertTrue(plan.elf.hasSuffix("/固件 文件.elf"))
         XCTAssertEqual(plan.command.executable, openOCD.path)
         XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: profilerMarker.path))
 
         let textResult = try runCLI(
             [
@@ -787,7 +816,9 @@ final class CLIIntegrationTests: XCTestCase {
             in: directory.url,
             environment: [
                 "PATH": "\(prefix.appendingPathComponent("bin").path):/usr/bin:/bin",
-                "YAGARTO_OPENOCD_MARKER": marker.path
+                "YAGARTO_OPENOCD_MARKER": marker.path,
+                "YAGARTO_MAC_SYSTEM_PROFILER": profiler.path,
+                "YAGARTO_PROFILER_MARKER": profilerMarker.path
             ]
         )
         XCTAssertEqual(textResult.status, 0, textResult.stderr)
@@ -795,6 +826,7 @@ final class CLIIntegrationTests: XCTestCase {
         XCTAssertTrue(textResult.stdout.contains("OpenOCD：\(openOCD.path)"))
         XCTAssertTrue(textResult.stdout.contains("program"))
         XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: profilerMarker.path))
     }
 
     func testFlashRejectsNonDiscoveryProfileAsUsageBeforeToolLookup() throws {
@@ -833,11 +865,20 @@ final class CLIIntegrationTests: XCTestCase {
         XCTAssertTrue(payload.error.message.contains("arm7tdmi"))
     }
 
-    func testFlashReportsExitSixWithoutProgrammingWhenProbeFindsNoBoard() throws {
+    func testFlashReportsExitSixWithoutOpenOCDWhenUSBEnumerationFindsNoBoard() throws {
         let directory = try CLITemporaryDirectory()
         let prefix = directory.url.appendingPathComponent("openocd-prefix", isDirectory: true)
         let openOCD = prefix.appendingPathComponent("bin/openocd")
-        try writeExecutable("#!/bin/sh\necho 'no device found' >&2\nexit 1\n", to: openOCD)
+        let openOCDMarker = directory.url.appendingPathComponent("openocd-executed")
+        try writeExecutable(
+            "#!/bin/sh\n: > \"$YAGARTO_OPENOCD_MARKER\"\nexit 1\n",
+            to: openOCD
+        )
+        let profiler = prefix.appendingPathComponent("bin/system_profiler")
+        try writeExecutable(
+            "#!/bin/sh\nprintf '{\"SPUSBDataType\":[]}'\n",
+            to: profiler
+        )
         let board = prefix.appendingPathComponent(
             "share/openocd/scripts/board/stm32f4discovery.cfg"
         )
@@ -855,13 +896,18 @@ final class CLIIntegrationTests: XCTestCase {
                 "--format", "json"
             ],
             in: directory.url,
-            environment: ["PATH": "\(prefix.appendingPathComponent("bin").path):/usr/bin:/bin"]
+            environment: [
+                "PATH": "\(prefix.appendingPathComponent("bin").path):/usr/bin:/bin",
+                "YAGARTO_MAC_SYSTEM_PROFILER": profiler.path,
+                "YAGARTO_OPENOCD_MARKER": openOCDMarker.path
+            ]
         )
 
         XCTAssertEqual(result.status, YagartoExitCode.unsupported.rawValue)
         let payload = try decodeErrorEnvelope(result.stderr)
         XCTAssertEqual(payload.error.code, "flash.board_not_found")
         XCTAssertTrue(payload.error.message.contains("STM32F4 Discovery"))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: openOCDMarker.path))
     }
 
     func testFlashSuccessProbesThenProgramsWithSafeArgumentsAndJSONOutput() throws {
@@ -881,6 +927,11 @@ final class CLIIntegrationTests: XCTestCase {
         )
         try Data("# fake board config\n".utf8).write(to: board)
         let log = directory.url.appendingPathComponent("openocd-arguments.log")
+        let profiler = prefix.appendingPathComponent("bin/system_profiler")
+        try writeExecutable(
+            "#!/bin/sh\nprintf '{\"SPUSBDataType\":[{\"vendor_id\":\"0x0483\",\"product_id\":\"0x374b\"}]}'\n",
+            to: profiler
+        )
 
         let result = try runCLI(
             [
@@ -892,7 +943,8 @@ final class CLIIntegrationTests: XCTestCase {
             in: directory.url,
             environment: [
                 "PATH": "\(prefix.appendingPathComponent("bin").path):/usr/bin:/bin",
-                "YAGARTO_TEST_OPENOCD_LOG": log.path
+                "YAGARTO_TEST_OPENOCD_LOG": log.path,
+                "YAGARTO_MAC_SYSTEM_PROFILER": profiler.path
             ]
         )
 
