@@ -253,8 +253,7 @@ public final class AppViewModel {
         await reconcileBreakpoint(
             key,
             sourceURL: document.sourceURL,
-            session: debugSessionGeneration,
-            preservesDeferredIntent: false
+            session: debugSessionGeneration
         )
     }
 
@@ -448,8 +447,7 @@ public final class AppViewModel {
                     await reconcileBreakpoint(
                         key,
                         sourceURL: document.sourceURL,
-                        session: session,
-                        preservesDeferredIntent: false
+                        session: session
                     )
                     guard isCurrentStart(generation, session: session, document: document) else { return }
                 }
@@ -502,8 +500,7 @@ public final class AppViewModel {
     private func reconcileBreakpoint(
         _ key: BreakpointKey,
         sourceURL: URL,
-        session: UInt64,
-        preservesDeferredIntent: Bool
+        session: UInt64
     ) async {
         guard !reconcilingBreakpoints.contains(key) else { return }
         reconcilingBreakpoints.insert(key)
@@ -530,19 +527,11 @@ public final class AppViewModel {
                             guard debugSessionGeneration == session,
                                   canonicalPath(document?.sourceURL) == key.canonicalPath else { return }
                             breakpointIdentifiers[key] = remote.id
-                            if preservesDeferredIntent {
-                                appendBreakpointDiagnostic(
-                                    line: key.line,
-                                    message: "断点移除失败，将在下次暂停时重试：\(error.localizedDescription)"
-                                )
-                                return
-                            } else {
-                                setBreakpointDesired(true, for: key)
-                                appendBreakpointDiagnostic(
-                                    line: key.line,
-                                    message: "取消后的远端断点移除失败，已恢复本地状态：\(error.localizedDescription)"
-                                )
-                            }
+                            setBreakpointDesired(true, for: key)
+                            appendBreakpointDiagnostic(
+                                line: key.line,
+                                message: "取消后的远端断点移除失败，已恢复本地状态：\(error.localizedDescription)"
+                            )
                         }
                     } else {
                         breakpointIdentifiers[key] = remote.id
@@ -556,19 +545,11 @@ public final class AppViewModel {
                     guard debugSessionGeneration == session,
                           canonicalPath(document?.sourceURL) == key.canonicalPath else { return }
                     if breakpointIdentifiers[key] == nil, breakpointIsDesired(key) {
-                        if preservesDeferredIntent {
-                            appendBreakpointDiagnostic(
-                                line: key.line,
-                                message: "断点设置失败，将在下次暂停时重试：\(error.localizedDescription)"
-                            )
-                            return
-                        } else {
-                            setBreakpointDesired(false, for: key)
-                            appendBreakpointDiagnostic(
-                                line: key.line,
-                                message: "断点设置失败，已恢复本地状态：\(error.localizedDescription)"
-                            )
-                        }
+                        setBreakpointDesired(false, for: key)
+                        appendBreakpointDiagnostic(
+                            line: key.line,
+                            message: "断点设置失败，已恢复本地状态：\(error.localizedDescription)"
+                        )
                     }
                 }
             } else if !desired, let remoteIdentifier {
@@ -591,19 +572,11 @@ public final class AppViewModel {
                           canonicalPath(document?.sourceURL) == key.canonicalPath else { return }
                     guard breakpointIdentifiers[key] == remoteIdentifier else { continue }
                     if !breakpointIsDesired(key) {
-                        if preservesDeferredIntent {
-                            appendBreakpointDiagnostic(
-                                line: key.line,
-                                message: "断点移除失败，将在下次暂停时重试：\(error.localizedDescription)"
-                            )
-                            return
-                        } else {
-                            setBreakpointDesired(true, for: key)
-                            appendBreakpointDiagnostic(
-                                line: key.line,
-                                message: "断点移除失败，已恢复本地状态：\(error.localizedDescription)"
-                            )
-                        }
+                        setBreakpointDesired(true, for: key)
+                        appendBreakpointDiagnostic(
+                            line: key.line,
+                            message: "断点移除失败，已恢复本地状态：\(error.localizedDescription)"
+                        )
                     }
                 }
             } else {
@@ -629,8 +602,7 @@ public final class AppViewModel {
                 await self.reconcileBreakpoint(
                     key,
                     sourceURL: sourceURL,
-                    session: session,
-                    preservesDeferredIntent: true
+                    session: session
                 )
             }
         }

@@ -526,7 +526,7 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertTrue(model.breakpoints.lines.isEmpty)
     }
 
-    func testDeferredBreakpointFailureKeepsIntentAndRetriesAtFollowingStop() async throws {
+    func testDeferredBreakpointSetFailureRollsBackVisibleStateAndUserRetryAdds() async throws {
         let fixture = try ViewModelFixture()
         let debug = ControlledBreakpointDebugService()
         let model = try await stoppedModel(fixture: fixture, debug: debug)
@@ -538,20 +538,18 @@ final class AppViewModelTests: XCTestCase {
         await debug.emitState(.stopped)
         await waitUntil { !model.debugDiagnostics.isEmpty }
 
-        XCTAssertEqual(model.breakpoints.lines, [2])
+        XCTAssertTrue(model.breakpoints.lines.isEmpty, "设置失败后不能显示远端并不存在的断点")
         let remoteAfterFailure = await debug.remoteBreakpointIDs()
         XCTAssertTrue(remoteAfterFailure.isEmpty)
         XCTAssertTrue(model.debugDiagnostics.contains { $0.message.contains("断点") })
 
-        await debug.emitState(.running)
-        await waitUntil { model.state == .running }
-        await debug.emitState(.stopped)
+        await model.toggleBreakpoint(line: 2)
         await waitUntilRemoteBreakpoints(debug, count: 1)
 
         XCTAssertEqual(model.breakpoints.lines, [2])
     }
 
-    func testDeferredBreakpointRemovalFailureKeepsIntentAndRetriesAtFollowingStop() async throws {
+    func testDeferredBreakpointRemovalFailureRestoresVisibleRemoteStateAndUserRetryRemoves() async throws {
         let fixture = try ViewModelFixture()
         let debug = ControlledBreakpointDebugService()
         let model = try await stoppedModel(fixture: fixture, debug: debug)
@@ -564,14 +562,12 @@ final class AppViewModelTests: XCTestCase {
         await debug.emitState(.stopped)
         await waitUntil { !model.debugDiagnostics.isEmpty }
 
-        XCTAssertTrue(model.breakpoints.lines.isEmpty)
+        XCTAssertEqual(model.breakpoints.lines, [2], "删除失败后必须继续显示实际仍存在的远端断点")
         let remoteAfterFailure = await debug.remoteBreakpointIDs()
         XCTAssertEqual(remoteAfterFailure.count, 1)
         XCTAssertTrue(model.debugDiagnostics.contains { $0.message.contains("断点") })
 
-        await debug.emitState(.running)
-        await waitUntil { model.state == .running }
-        await debug.emitState(.stopped)
+        await model.toggleBreakpoint(line: 2)
         await waitUntilRemoteBreakpoints(debug, count: 0)
 
         XCTAssertTrue(model.breakpoints.lines.isEmpty)
