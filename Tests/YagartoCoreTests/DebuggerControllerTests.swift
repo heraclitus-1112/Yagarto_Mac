@@ -1,0 +1,316 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+import Foundation
+import XCTest
+@testable import YagartoCore
+
+final class DebuggerControllerTests: XCTestCase {
+    func testStoppedEventRefreshesCompleteARM7Snapshot() async throws {
+        let fixture = try ControllerGDBFixture()
+        let controller = DebuggerController(plan: fixture.plan(profile: .arm7tdmi), consoleLimit: 3)
+        let events = await controller.events()
+
+        try await controller.launch()
+        let snapshot = try await waitForSnapshot(controller)
+        let state = await controller.currentState
+
+        XCTAssertEqual(state, .stopped)
+        XCTAssertEqual(snapshot.stopReason, .breakpointHit)
+        XCTAssertEqual(snapshot.location?.fullName, "/tmp/课程/main.s")
+        XCTAssertEqual(snapshot.location?.line?.numeric, 12)
+        XCTAssertEqual(snapshot.stack.count, 2)
+        XCTAssertEqual(snapshot.memory.first?.contents, "002affff")
+        XCTAssertEqual(snapshot.disassembly.first?.instruction, "mov r0, #42")
+        XCTAssertEqual(snapshot.registers.map(\.name), (0...15).map { "r\($0)" } + ["CPSR"])
+        XCTAssertEqual(snapshot.registers.first?.value?.numeric, 42)
+        XCTAssertEqual(snapshot.registers.last?.value?.numeric, 0x60000013)
+        XCTAssertEqual(snapshot.console.map(\.text), ["console-3", "console-4", "console-5"])
+        XCTAssertTrue(snapshot.diagnostics.isEmpty)
+
+        let emitted = try await firstSnapshot(from: events)
+        XCTAssertEqual(emitted, snapshot)
+        try await controller.stop()
+    }
+
+    func testResultDoneNeverGuessesRunningStateBeforeAsyncRunning() async throws {
+        let fixture = try ControllerGDBFixture()
+        let controller = DebuggerController(plan: fixture.plan(profile: .arm7tdmi))
+        try await controller.launch()
+        _ = try await waitForSnapshot(controller)
+
+        try await controller.run()
+        let immediately = await controller.currentState
+        XCTAssertEqual(immediately, .stopped)
+        try await waitForState(.running, controller: controller)
+        try await controller.pause()
+        try await waitForState(.stopped, controller: controller)
+        try await controller.stop()
+    }
+
+    func testOptionalPaneFailureKeepsStoppedSnapshotAndDiagnostic() async throws {
+        let fixture = try ControllerGDBFixture(failMemory: true)
+        let controller = DebuggerController(plan: fixture.plan(profile: .arm7tdmi))
+
+        try await controller.launch()
+        let snapshot = try await waitForSnapshot(controller)
+
+        let state = await controller.currentState
+        XCTAssertEqual(state, .stopped)
+        XCTAssertTrue(snapshot.memory.isEmpty)
+        XCTAssertTrue(snapshot.diagnostics.contains(where: {
+            $0.pane == .memory && !$0.isCritical && $0.message.contains("memory unavailable")
+        }))
+        XCTAssertNotNil(snapshot.location)
+        XCTAssertFalse(snapshot.registers.isEmpty)
+        try await controller.stop()
+    }
+
+    func testM4RegisterProfileUsesXPSRAndSystemRegistersNeverCPSR() async throws {
+        let fixture = try ControllerGDBFixture()
+        let controller = DebuggerController(plan: fixture.plan(profile: .cortexM4))
+
+        try await controller.launch()
+        let snapshot = try await waitForSnapshot(controller)
+        let names = snapshot.registers.map { $0.name.lowercased() }
+
+        XCTAssertEqual(names, (0...15).map { "r\($0)" } + [
+            "xpsr", "msp", "psp", "control", "primask"
+        ])
+        XCTAssertFalse(names.contains("cpsr"))
+        XCTAssertNil(snapshot.registers.first(where: { $0.name == "PSP" })?.value)
+        try await controller.stop()
+    }
+
+    func testCriticalFrameAndRegisterFailuresRemainVisibleWithoutDeadlock() async throws {
+        let fixture = try ControllerGDBFixture(failCritical: true)
+        let controller = DebuggerController(plan: fixture.plan(profile: .arm7tdmi))
+
+        try await controller.launch()
+        let snapshot = try await waitForSnapshot(controller)
+
+        let state = await controller.currentState
+        XCTAssertEqual(state, .stopped)
+        XCTAssertEqual(snapshot.location?.function, "main")
+        XCTAssertTrue(snapshot.registers.allSatisfy { $0.value == nil })
+        XCTAssertTrue(snapshot.diagnostics.contains(where: { $0.pane == .frame && $0.isCritical }))
+        XCTAssertTrue(snapshot.diagnostics.contains(where: { $0.pane == .registers && $0.isCritical }))
+        try await controller.stop()
+    }
+
+    func testHungCriticalPaneTimesOutAndStillPublishesSnapshot() async throws {
+        let fixture = try ControllerGDBFixture(hangFrame: true)
+        let controller = DebuggerController(
+            plan: fixture.plan(profile: .arm7tdmi),
+            snapshotCommandTimeout: .milliseconds(50)
+        )
+
+        try await controller.launch()
+        let snapshot = try await waitForSnapshot(controller)
+
+        XCTAssertTrue(snapshot.diagnostics.contains(where: {
+            $0.pane == .frame && $0.isCritical && $0.message.contains("timed out")
+        }))
+        try await controller.stop()
+    }
+
+    func testControlMemoryAndBreakpointMethodsSendTypedMICommands() async throws {
+        let fixture = try ControllerGDBFixture()
+        let controller = DebuggerController(plan: fixture.plan(profile: .arm7tdmi))
+        try await controller.launch()
+        _ = try await waitForSnapshot(controller)
+
+        let memory = try await controller.readMemory(
+            DebugMemoryRequest(address: "0x2000", byteCount: 16)
+        )
+        XCTAssertEqual(memory.first?.begin.numeric, 0x1000)
+        let breakpoint = try await controller.setBreakpoint("main.s:12")
+        XCTAssertEqual(breakpoint.id, "7")
+        try await controller.removeBreakpoint(breakpoint.id)
+        try await controller.stepInstruction()
+        try await controller.stepOver()
+
+        let commands = try fixture.commands()
+        XCTAssertTrue(commands.contains("-data-read-memory-bytes 0x2000 16"))
+        XCTAssertTrue(commands.contains("-break-insert -- \"main.s:12\""))
+        XCTAssertTrue(commands.contains("-break-delete 7"))
+        XCTAssertTrue(commands.contains("-exec-step-instruction"))
+        XCTAssertTrue(commands.contains("-exec-next"))
+        try await controller.stop()
+    }
+
+    func testBuildAndLaunchFailuresRecoverToDocumentedStableStates() async throws {
+        let profileController = DebuggerController(profile: .arm7tdmi)
+        try await profileController.buildStarted()
+        try await profileController.buildFailed()
+        let buildFailureState = await profileController.currentState
+        XCTAssertEqual(buildFailureState, .idle)
+
+        let brokenPlan = DebugLaunchPlan(
+            profile: .arm7tdmi,
+            backend: .gdbSimulator,
+            gdbExecutable: "/missing/gdb",
+            gdbArguments: [],
+            initCommands: [],
+            warnings: [],
+            elf: "/tmp/a.elf",
+            projectDirectory: "/tmp"
+        )
+        let launchController = DebuggerController(plan: brokenPlan)
+        do {
+            try await launchController.launch()
+            XCTFail("expected launch failure")
+        } catch {
+            let launchFailureState = await launchController.currentState
+            XCTAssertEqual(launchFailureState, .ready)
+        }
+    }
+
+    private func waitForSnapshot(_ controller: DebuggerController) async throws -> DebugSnapshot {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while ContinuousClock.now < deadline {
+            if let snapshot = await controller.latestSnapshot { return snapshot }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        throw ControllerTestError.timeout
+    }
+
+    private func waitForState(
+        _ expected: DebuggerState,
+        controller: DebuggerController
+    ) async throws {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while ContinuousClock.now < deadline {
+            if await controller.currentState == expected { return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        throw ControllerTestError.timeout
+    }
+
+    private func firstSnapshot(from stream: AsyncStream<DebuggerEvent>) async throws -> DebugSnapshot {
+        for await event in stream {
+            if case .snapshot(let snapshot) = event { return snapshot }
+        }
+        throw ControllerTestError.timeout
+    }
+
+}
+
+private enum ControllerTestError: Error {
+    case timeout
+}
+
+private final class ControllerGDBFixture {
+    let directory: URL
+    let script: URL
+    let capture: URL
+    let failMemory: Bool
+    let failCritical: Bool
+    let hangFrame: Bool
+
+    init(
+        failMemory: Bool = false,
+        failCritical: Bool = false,
+        hangFrame: Bool = false
+    ) throws {
+        self.failMemory = failMemory
+        self.failCritical = failCritical
+        self.hangFrame = hangFrame
+        directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        script = directory.appendingPathComponent("controller fake gdb.py")
+        capture = directory.appendingPathComponent("commands.txt")
+        try Self.source.write(to: script, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
+    }
+
+    deinit { try? FileManager.default.removeItem(at: directory) }
+
+    func plan(profile: ProfileID) -> DebugLaunchPlan {
+        DebugLaunchPlan(
+            profile: profile,
+            backend: .gdbSimulator,
+            gdbExecutable: script.path,
+            gdbArguments: [
+                "--capture", capture.path,
+                "--fail-memory", failMemory ? "yes" : "no",
+                "--fail-critical", failCritical ? "yes" : "no",
+                "--hang-frame", hangFrame ? "yes" : "no"
+            ],
+            initCommands: [],
+            warnings: [],
+            elf: directory.appendingPathComponent("demo.elf").path,
+            projectDirectory: directory.path
+        )
+    }
+
+    func commands() throws -> [String] {
+        try String(contentsOf: capture, encoding: .utf8)
+            .split(separator: "\n")
+            .map(String.init)
+    }
+
+    private static let source = #"""
+#!/usr/bin/python3
+import sys, threading, time
+
+capture = sys.argv[sys.argv.index("--capture") + 1]
+fail_memory = sys.argv[sys.argv.index("--fail-memory") + 1] == "yes"
+fail_critical = sys.argv[sys.argv.index("--fail-critical") + 1] == "yes"
+hang_frame = sys.argv[sys.argv.index("--hang-frame") + 1] == "yes"
+
+def out(value):
+    sys.stdout.write(value + "\n")
+    sys.stdout.flush()
+
+for value in range(1, 6):
+    out('~"console-%d"' % value)
+out('*stopped,reason="breakpoint-hit",frame={addr="0x1000",func="main",file="main.s",fullname="/tmp/课程/main.s",line="12"}')
+
+for raw in sys.stdin:
+    raw = raw.rstrip("\r\n")
+    pos = 0
+    while pos < len(raw) and raw[pos].isdigit():
+        pos += 1
+    token, command = raw[:pos], raw[pos:]
+    with open(capture, "a", encoding="utf-8") as handle:
+        handle.write(command + "\n")
+    if command == "-stack-info-frame":
+        if hang_frame:
+            pass
+        elif fail_critical:
+            out(token + '^error,msg="frame unavailable"')
+        else:
+            out(token + '^done,frame={addr="0x1000",func="main",file="main.s",fullname="/tmp/课程/main.s",line="12"}')
+    elif command == "-data-list-register-names":
+        if fail_critical:
+            out(token + '^error,msg="registers unavailable"')
+        else:
+            names = ["r%d" % value for value in range(16)] + ["", "cpsr", "xpsr", "msp", "", "control", "primask"]
+            out(token + '^done,register-names=[' + ','.join('"%s"' % value for value in names) + ']')
+    elif command == "-data-list-register-values x":
+        out(token + '^done,register-values=[{number="17",value="0x60000013"},{number="0",value="42"},{number="18",value="0x01000000"},{number="19",value="0x20001000"},{number="21",value="0"},{number="22",value="1"}]')
+    elif command == "-stack-list-frames":
+        out(token + '^done,stack=[frame={addr="0x1000",func="main",line="12"},frame={addr="0x2000",func="reset"}]')
+    elif command.startswith("-data-read-memory-bytes"):
+        if fail_memory:
+            out(token + '^error,msg="memory unavailable"')
+        else:
+            out(token + '^done,memory=[{begin="0x1000",offset="0",end="0x1004",contents="002affff"}]')
+    elif command.startswith("-data-disassemble"):
+        out(token + '^done,asm_insns=[{address="0x1000",func-name="main",offset="0",inst="mov r0, #42"}]')
+    elif command == "-exec-continue":
+        out(token + "^done")
+        threading.Thread(target=lambda: (time.sleep(0.15), out("*running,thread-id=\"all\"")), daemon=True).start()
+    elif command == "-exec-interrupt --all":
+        out(token + "^done")
+        out('*stopped,reason="signal-received",frame={addr="0x1000",func="main"}')
+    elif command.startswith("-break-insert"):
+        out(token + '^done,bkpt={number="7",addr="0x1000"}')
+    elif command == "-gdb-exit":
+        out(token + "^exit")
+        sys.exit(0)
+    else:
+        out(token + "^done")
+"""#
+}
