@@ -76,7 +76,8 @@
 (defvar-local yagarto-mac--configuration-mtime nil)
 (defvar-local yagarto-mac--profile nil)
 (defvar-local yagarto-mac--profile-error nil)
-(defvar-local yagarto-mac--run-buffer-p nil)
+(defvar-local yagarto-mac--owned-process nil
+  "当前缓冲区由 `yagarto-mac-run' 创建并拥有的具体进程对象。")
 
 (defun yagarto-mac--base-command ()
   "返回经过验证的 CLI 基础 argv。"
@@ -394,11 +395,54 @@ QUIET 非 nil 时把错误保存为模式行状态而不触发错误。"
   (format "*yagarto-mac run: %s*"
           (file-name-nondirectory (directory-file-name root))))
 
+(defun yagarto-mac--run-process-sentinel (process _event)
+  "仅在 PROCESS 仍是记录的 owner 时清除其缓冲区所有权。"
+  (unless (process-live-p process)
+    (let ((buffer (process-get process 'yagarto-mac-owner-buffer)))
+      (when (buffer-live-p buffer)
+        (with-current-buffer buffer
+          (when (eq yagarto-mac--owned-process process)
+            (setq yagarto-mac--owned-process nil))))
+      (process-put process 'yagarto-mac-owner-buffer nil))))
+
+(defun yagarto-mac--record-owned-process (buffer process)
+  "把 BUFFER 的具体 PROCESS 记录为 YAGARTO Mac owner 并安装 sentinel。"
+  (when process
+    (with-current-buffer buffer
+      (setq-local yagarto-mac--owned-process process))
+    (process-put process 'yagarto-mac-owner-buffer buffer)
+    (unless (process-get process 'yagarto-mac-sentinel-installed)
+      (process-put process 'yagarto-mac-sentinel-installed t)
+      (let ((previous-sentinel (process-sentinel process)))
+        (set-process-sentinel
+         process
+         (lambda (changed-process event)
+           (unwind-protect
+               (when previous-sentinel
+                 (funcall previous-sentinel changed-process event))
+             (yagarto-mac--run-process-sentinel changed-process event))))))
+    ;; 极短命令可能在 sentinel 安装前结束；同步应用同一 identity 检查。
+    (unless (process-live-p process)
+      (yagarto-mac--run-process-sentinel process "finished\n"))
+    process))
+
+(defun yagarto-mac--owned-current-process (&optional buffer)
+  "返回 BUFFER 中仍与记录 owner identity 相同的活动进程。"
+  (let ((buffer (or buffer (current-buffer))))
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+        (let ((current-process (get-buffer-process buffer))
+              (owned-process yagarto-mac--owned-process))
+          (when (and (eq current-process owned-process)
+                     owned-process
+                     (process-live-p owned-process))
+            owned-process))))))
+
 (defun yagarto-mac--stop-buffer-process (&optional buffer)
   "有界停止 BUFFER 中的进程，并返回是否找到活动进程。"
   (let* ((buffer (or buffer (current-buffer)))
-         (process (and (buffer-live-p buffer) (get-buffer-process buffer))))
-    (when (and process (process-live-p process))
+         (process (yagarto-mac--owned-current-process buffer)))
+    (when process
       (condition-case nil
           (progn
             (interrupt-process process)
@@ -418,7 +462,7 @@ QUIET 非 nil 时把错误保存为模式行状态而不触发错误。"
 (defun yagarto-mac-stop ()
   "停止当前或最近一次 YAGARTO Mac `run' 进程。"
   (interactive)
-  (let ((buffer (if (bound-and-true-p yagarto-mac--run-buffer-p)
+  (let ((buffer (if (yagarto-mac--owned-current-process (current-buffer))
                     (current-buffer)
                   yagarto-mac--last-run-buffer)))
     (unless (and (buffer-live-p buffer)
@@ -448,9 +492,9 @@ QUIET 非 nil 时把错误保存为模式行状态而不触发错误。"
        (user-error "找不到 YAGARTO Mac 命令 `%s'；请安装 CLI 或自定义 `yagarto-mac-command'：%s"
                    program (error-message-string error-data))))
     (with-current-buffer buffer
-      (setq-local yagarto-mac--run-buffer-p t)
       (add-hook 'kill-buffer-hook
                 #'yagarto-mac--kill-current-buffer-process nil t))
+    (yagarto-mac--record-owned-process buffer (get-buffer-process buffer))
     (setq yagarto-mac--last-run-buffer buffer)
     (pop-to-buffer buffer)))
 

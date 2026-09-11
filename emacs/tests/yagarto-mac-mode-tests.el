@@ -502,10 +502,13 @@
                                 :noquery t)))
     (unwind-protect
         (progn
+          (yagarto-mac--record-owned-process buffer process)
           (should (process-live-p process))
           (yagarto-mac--stop-buffer-process buffer)
           (accept-process-output process 0.1)
-          (should-not (process-live-p process)))
+          (should-not (process-live-p process))
+          (with-current-buffer buffer
+            (should-not yagarto-mac--owned-process)))
       (when (process-live-p process) (delete-process process))
       (when (buffer-live-p buffer) (kill-buffer buffer)))))
 
@@ -514,7 +517,10 @@
         (fake-process 'fake-yagarto-process)
         events)
     (unwind-protect
-        (cl-letf (((symbol-function 'get-buffer-process)
+        (progn
+          (with-current-buffer buffer
+            (setq-local yagarto-mac--owned-process fake-process))
+          (cl-letf (((symbol-function 'get-buffer-process)
                    (lambda (_buffer) fake-process))
                   ((symbol-function 'process-live-p)
                    (lambda (_process) t))
@@ -531,13 +537,50 @@
                                    (if (consp event) (car event) event))
                                  events)
                          '(interrupt grace delete)))
-          (should (<= (cadr (nth 1 events)) 1.0)))
+            (should (<= (cadr (nth 1 events)) 1.0))))
       (kill-buffer buffer))))
 
-(ert-deftest yagarto-mac-stop-never-terminates-an-unrelated-buffer-process ()
+(ert-deftest yagarto-mac-run-records-process-and-clears-owner-on-natural-exit ()
+  (skip-unless (and (file-executable-p "/bin/sh")
+                    (file-executable-p "/bin/cat")))
+  (let* ((root (yagarto-mac-test--project))
+         (source (expand-file-name "课程 示例.s" root))
+         (yagarto-mac-command '("/bin/sh" "-c" "exec /bin/cat"))
+         run-buffer process)
+    (unwind-protect
+        (with-temp-buffer
+          (setq buffer-file-name source
+                default-directory (file-name-as-directory root))
+          (cl-letf (((symbol-function 'pop-to-buffer)
+                     (lambda (buffer &rest _ignored) buffer)))
+            (yagarto-mac-run))
+          (setq run-buffer yagarto-mac--last-run-buffer
+                process (get-buffer-process run-buffer))
+          (should (process-live-p process))
+          (with-current-buffer run-buffer
+            (should (eq yagarto-mac--owned-process process)))
+          (process-send-eof process)
+          (let ((deadline (+ (float-time) 2.0)))
+            (while (and (process-live-p process)
+                        (< (float-time) deadline))
+              (accept-process-output process 0.05)))
+          (accept-process-output nil 0.05)
+          (should-not (process-live-p process))
+          (with-current-buffer run-buffer
+            (should-not yagarto-mac--owned-process)))
+      (when (and process (process-live-p process)) (delete-process process))
+      (when (buffer-live-p run-buffer) (kill-buffer run-buffer))
+      (delete-directory root t))))
+
+(ert-deftest yagarto-mac-stop-never-terminates-process-reusing-stale-run-buffer ()
   (skip-unless (file-executable-p "/bin/cat"))
-  (let* ((buffer (generate-new-buffer " *unrelated-process-test*"))
-         (process (make-process :name "unrelated-process-test"
+  (let* ((buffer (generate-new-buffer " *reused-process-test*"))
+         (stale-owner (make-process :name "stale-owner-test"
+                                    :buffer nil
+                                    :command '("/bin/cat")
+                                    :connection-type 'pipe
+                                    :noquery t))
+         (process (make-process :name "reused-process-test"
                                 :buffer buffer
                                 :command '("/bin/cat")
                                 :connection-type 'pipe
@@ -545,9 +588,59 @@
          (yagarto-mac--last-run-buffer nil))
     (unwind-protect
         (with-current-buffer buffer
+          (setq-local yagarto-mac--owned-process stale-owner)
           (should-error (yagarto-mac-stop) :type 'user-error)
           (should (process-live-p process)))
+      (when (process-live-p stale-owner) (delete-process stale-owner))
       (when (process-live-p process) (delete-process process))
+      (when (buffer-live-p buffer) (kill-buffer buffer)))))
+
+(ert-deftest yagarto-mac-kill-hook-never-terminates-reused-buffer-process ()
+  (skip-unless (file-executable-p "/bin/cat"))
+  (let* ((buffer (generate-new-buffer " *reused-kill-hook-test*"))
+         (stale-owner (make-process :name "stale-kill-owner-test"
+                                    :buffer nil
+                                    :command '("/bin/cat")
+                                    :connection-type 'pipe
+                                    :noquery t))
+         (process (make-process :name "reused-kill-hook-test"
+                                :buffer buffer
+                                :command '("/bin/cat")
+                                :connection-type 'pipe
+                                :noquery t)))
+    (unwind-protect
+        (with-current-buffer buffer
+          (setq-local yagarto-mac--owned-process stale-owner)
+          (yagarto-mac--kill-current-buffer-process)
+          (should (process-live-p process)))
+      (when (process-live-p stale-owner) (delete-process stale-owner))
+      (when (process-live-p process) (delete-process process))
+      (when (buffer-live-p buffer) (kill-buffer buffer)))))
+
+(ert-deftest yagarto-mac-stale-sentinel-never-clears-new-owned-process ()
+  (skip-unless (file-executable-p "/bin/cat"))
+  (let* ((buffer (generate-new-buffer " *sentinel-identity-test*"))
+         (old-process (make-process :name "old-sentinel-test"
+                                    :buffer buffer
+                                    :command '("/bin/cat")
+                                    :connection-type 'pipe
+                                    :noquery t))
+         (new-process (make-process :name "new-sentinel-test"
+                                    :buffer buffer
+                                    :command '("/bin/cat")
+                                    :connection-type 'pipe
+                                    :noquery t)))
+    (unwind-protect
+        (progn
+          (process-put old-process 'yagarto-mac-owner-buffer buffer)
+          (with-current-buffer buffer
+            (setq-local yagarto-mac--owned-process new-process))
+          (delete-process old-process)
+          (yagarto-mac--run-process-sentinel old-process "finished\n")
+          (with-current-buffer buffer
+            (should (eq yagarto-mac--owned-process new-process))))
+      (when (process-live-p old-process) (delete-process old-process))
+      (when (process-live-p new-process) (delete-process new-process))
       (when (buffer-live-p buffer) (kill-buffer buffer)))))
 
 (provide 'yagarto-mac-mode-tests)

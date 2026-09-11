@@ -22,6 +22,19 @@ for tool in "$READELF" "$OBJDUMP" "$NM"; do
     }
 done
 
+extract_entry_address() {
+    awk '
+        /^[[:space:]]*Entry point address:[[:space:]]*/ {
+            sub(/^[[:space:]]*Entry point address:[[:space:]]*/, "")
+            sub(/[[:space:]]*$/, "")
+            print
+            found = 1
+            exit
+        }
+        END { if (!found) exit 1 }
+    '
+}
+
 check_example() {
     relative=$1
     profile=$2
@@ -53,8 +66,11 @@ check_example() {
         || { printf '错误：ELF 不是 ARM：%s\n' "$elf" >&2; return 1; }
     "$READELF" -A "$elf" | grep -q "Tag_CPU_arch: $cpu_arch" \
         || { printf '错误：ELF CPU 架构不是 %s：%s\n' "$cpu_arch" "$elf" >&2; return 1; }
-    "$READELF" -h "$elf" | grep -q "Entry point address:.*$entry_address" \
-        || { printf '错误：ELF 入口不是 %s：%s\n' "$entry_address" "$elf" >&2; return 1; }
+    actual_entry=$("$READELF" -h "$elf" | extract_entry_address) \
+        || { printf '错误：无法提取 ELF 入口：%s\n' "$elf" >&2; return 1; }
+    [ "$actual_entry" = "$entry_address" ] \
+        || { printf '错误：ELF 入口不是 %s（实际 %s）：%s\n' \
+                    "$entry_address" "$actual_entry" "$elf" >&2; return 1; }
     "$READELF" -S "$elf" | grep -q '\.text' \
         || { printf '错误：ELF 缺少 .text：%s\n' "$elf" >&2; return 1; }
     "$READELF" -S "$elf" | grep -q '\.debug_info' \

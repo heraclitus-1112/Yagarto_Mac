@@ -21,9 +21,13 @@ TEMP_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/yagarto-emacs-tests.XXXXXX")
 trap 'rm -rf "$TEMP_ROOT"' EXIT HUP INT TERM
 
 cp "$REPOSITORY_ROOT/emacs/yagarto-mac-mode.el" "$TEMP_ROOT/yagarto-mac-mode.el"
+cp "$REPOSITORY_ROOT/emacs/tests/yagarto-mac-mode-tests.el" \
+    "$TEMP_ROOT/yagarto-mac-mode-tests.el"
 "$EMACS_BIN" --batch -Q -L "$TEMP_ROOT" \
     --eval '(setq byte-compile-error-on-warn t)' \
-    -f batch-byte-compile "$TEMP_ROOT/yagarto-mac-mode.el"
+    -f batch-byte-compile \
+    "$TEMP_ROOT/yagarto-mac-mode.el" \
+    "$TEMP_ROOT/yagarto-mac-mode-tests.el"
 
 "$EMACS_BIN" --batch -Q \
     -L "$REPOSITORY_ROOT/emacs" \
