@@ -25,9 +25,6 @@ public struct MIParser: Sendable {
         guard data.count <= maxLineBytes else {
             throw MIParseError.lineTooLong(limit: maxLineBytes)
         }
-        guard String(data: data, encoding: .utf8) != nil else {
-            throw MIParseError.invalidUTF8
-        }
         return try parseBytes(Array(data))
     }
 
@@ -38,7 +35,7 @@ public struct MIParser: Sendable {
         var bytes = originalBytes
         if bytes.last == 0x0D { bytes.removeLast() }
         guard !bytes.isEmpty else { throw MIParseError.emptyLine }
-        guard String(bytes: bytes, encoding: .utf8) != nil else {
+        guard Self.syntaxBytesAreASCII(bytes) else {
             throw MIParseError.invalidUTF8
         }
         if bytes == Array("(gdb)".utf8) || bytes == Array("(gdb) ".utf8) {
@@ -67,11 +64,14 @@ public struct MIParser: Sendable {
             guard let kind = MIAsyncKind(rawValue: Character(UnicodeScalar(prefix))) else {
                 throw MIParseError.unknownRecordPrefix(prefix)
             }
+            let asyncClass = try cursor.parseIdentifier()
             record = .asynchronous(MIAsyncRecord(
                 token: token,
                 kind: kind,
-                asyncClass: try cursor.parseIdentifier(),
-                results: try cursor.parseOptionalResults()
+                asyncClass: asyncClass,
+                results: try cursor.parseOptionalResults(
+                    allowLeadingMessage: kind == .exec && asyncClass == "stopped"
+                )
             ))
         case UInt8(ascii: "~"), UInt8(ascii: "@"), UInt8(ascii: "&"):
             guard token == nil,
@@ -86,6 +86,27 @@ public struct MIParser: Sendable {
             throw MIParseError.trailingGarbage(position: cursor.position)
         }
         return record
+    }
+
+    private static func syntaxBytesAreASCII(_ bytes: [UInt8]) -> Bool {
+        var insideCString = false
+        var escaped = false
+        for byte in bytes {
+            if insideCString {
+                if escaped {
+                    escaped = false
+                } else if byte == UInt8(ascii: "\\") {
+                    escaped = true
+                } else if byte == UInt8(ascii: "\"") {
+                    insideCString = false
+                }
+            } else if byte == UInt8(ascii: "\"") {
+                insideCString = true
+            } else if byte >= 0x80 {
+                return false
+            }
+        }
+        return true
     }
 }
 
@@ -125,10 +146,24 @@ private struct Cursor {
         return String(decoding: bytes[start..<position], as: UTF8.self)
     }
 
-    mutating func parseOptionalResults() throws -> MIResults {
+    mutating func parseOptionalResults(
+        allowLeadingMessage: Bool = false
+    ) throws -> MIResults {
         guard peek() == UInt8(ascii: ",") else { return MIResults() }
         position += 1
-        return try parseResults(until: nil, depth: 0)
+        var leadingFields: [MIResult] = []
+        if allowLeadingMessage, peek() == UInt8(ascii: "\"") {
+            leadingFields.append(MIResult(
+                variable: "message",
+                value: .constant(try parseCString())
+            ))
+            guard peek() == UInt8(ascii: ",") else {
+                return MIResults(leadingFields)
+            }
+            position += 1
+        }
+        let remaining = try parseResults(until: nil, depth: 0)
+        return MIResults(leadingFields + remaining.fields)
     }
 
     mutating func parseResults(until terminator: UInt8?, depth: Int) throws -> MIResults {

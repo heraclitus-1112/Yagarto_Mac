@@ -83,6 +83,24 @@ final class MIParserTests: XCTestCase {
         XCTAssertEqual(record.results["text"]?.constant, "路径\\\"\n\r\t\u{1B}ABé")
     }
 
+    func testParsesGDB15StartupRecordThatMixesRawAndOctalUTF8Bytes() throws {
+        var line = Data(
+            "*stopped,\"Starting program\",execfile=\"/tmp/demo.elf\",reason=\"breakpoint-hit\",frame={fullname=\"/tmp/".utf8
+        )
+        line.append(0xE6)
+        line.append(contentsOf: "\\225".utf8)
+        line.append(0xB0)
+        line.append(contentsOf: "/main.s\",line=\"12\"}".utf8)
+
+        guard case .asynchronous(let stopped) = try parser.parse(line) else {
+            return XCTFail("expected stopped record")
+        }
+        XCTAssertEqual(stopped.results["message"]?.constant, "Starting program")
+        XCTAssertEqual(stopped.results["execfile"]?.constant, "/tmp/demo.elf")
+        XCTAssertEqual(stopped.frame?.fullName, "/tmp/数/main.s")
+        XCTAssertEqual(stopped.frame?.line?.numeric, 12)
+    }
+
     func testRejectsInvalidUTF8FromRawTransport() {
         XCTAssertThrowsError(try parser.parse(Data([0x5e, 0x64, 0x6f, 0x6e, 0x65, 0xff]))) {
             XCTAssertEqual($0 as? MIParseError, .invalidUTF8)
