@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+import Darwin
+import Foundation
 import XCTest
 @testable import YagartoCore
 
@@ -165,6 +167,50 @@ final class ToolResolverTests: XCTestCase {
         XCTAssertEqual(try resolver.resolveGDBSimulator(), simulator)
     }
 
+    func testCapabilityProbeTimesOutAndReapsIgnoringProcessGroup() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("capability-probe-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let pidFile = directory.appendingPathComponent("pids")
+        let escapedPIDFile = pidFile.path.replacingOccurrences(of: "'", with: "'\\''")
+        let hangingCommand = """
+        trap '' TERM
+        (trap '' TERM; while :; do /bin/sleep 30; done) &
+        child=$!
+        printf '%s %s\n' "$$" "$child" > '\(escapedPIDFile)'
+        while :; do /bin/sleep 30; done
+        """
+
+        let start = Date()
+        let capable = TimedProcessCapabilityProbe.run(
+            CommandSpec(
+                executable: "/bin/sh",
+                args: ["-c", hangingCommand],
+                workingDirectory: directory
+            ),
+            timeout: 0.2
+        )
+
+        XCTAssertFalse(capable)
+        XCTAssertLessThan(Date().timeIntervalSince(start), 2)
+        let processIDs = try String(contentsOf: pidFile, encoding: .utf8)
+            .split(whereSeparator: \.isWhitespace)
+            .compactMap { pid_t($0) }
+        XCTAssertEqual(processIDs.count, 2)
+        for _ in 0..<100 where !processIDs.allSatisfy(toolResolverProcessHasExited) {
+            usleep(10_000)
+        }
+        XCTAssertTrue(
+            processIDs.allSatisfy(toolResolverProcessHasExited),
+            "能力探测留下进程：\(processIDs)"
+        )
+        XCTAssertTrue(
+            toolResolverProcessGroupHasExited(processIDs[0]),
+            "能力探测留下进程组：\(processIDs[0])"
+        )
+    }
+
     func testDoctorReportsNormalAndSimulatorGDBSeparatelyWithProfileSelections() {
         let resolver = ToolResolver(
             environment: [
@@ -307,6 +353,16 @@ final class ToolResolverTests: XCTestCase {
         )
         XCTAssertEqual(resolver.doctor(overrides: [.openOCD: openOCD]).stm32f4BoardConfig, board)
     }
+}
+
+private func toolResolverProcessHasExited(_ processID: pid_t) -> Bool {
+    errno = 0
+    return Darwin.kill(processID, 0) == -1 && errno == ESRCH
+}
+
+private func toolResolverProcessGroupHasExited(_ processGroup: pid_t) -> Bool {
+    errno = 0
+    return Darwin.kill(-processGroup, 0) == -1 && errno == ESRCH
 }
 
 private final class CapabilityProbeRecorder {

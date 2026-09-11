@@ -150,7 +150,7 @@ final class BootstrapScriptTests: XCTestCase {
 
         XCTAssertEqual(result.exitStatus, 1, result.stderr)
         XCTAssertTrue(result.stderr.contains("GNU GCC"), result.stderr)
-        XCTAssertTrue(result.stderr.contains("brew install gcc"), result.stderr)
+        XCTAssertTrue(result.stderr.contains("brew install gcc@15"), result.stderr)
         XCTAssertFalse(
             FileManager.default.fileExists(atPath: fixture.configureArgumentsLog.path),
             "缺少 GNU GCC 时不应进入 configure"
@@ -182,6 +182,58 @@ final class BootstrapScriptTests: XCTestCase {
             FileManager.default.fileExists(atPath: fixture.configureArgumentsLog.path),
             "显式传入 Apple Clang 时不应进入 configure"
         )
+    }
+
+    func testDarwinBuildRejectsGNUCompilerWithWrongMajorVersion() throws {
+        let fixture = try BootstrapArchiveSnapshotFixture(
+            sourceKind: .regular,
+            includeGNUCompiler: false
+        )
+        defer { fixture.cleanup() }
+        let gcc16 = fixture.tools.appendingPathComponent("gcc-16")
+        let gxx16 = fixture.tools.appendingPathComponent("g++-16")
+        for compiler in [gcc16, gxx16] {
+            try writeBootstrapExecutable(
+                "#!/bin/sh\ncase \"$1\" in -dumpfullversion) printf '16.2.0\\n' ;; *) printf 'gcc-16 (Homebrew GCC 16.2.0) 16.2.0\\n' ;; esac\n",
+                to: compiler
+            )
+        }
+        var environment = fixture.environment
+        environment["CC"] = gcc16.path
+        environment["CXX"] = gxx16.path
+
+        let result = try runBootstrap(
+            [
+                "--prefix", fixture.installPrefix.path,
+                "--sha256", String(repeating: "0", count: 64),
+                "--archive", fixture.archive.path
+            ],
+            environment: environment
+        )
+
+        XCTAssertEqual(result.exitStatus, 1, result.stderr)
+        XCTAssertTrue(result.stderr.contains("主版本必须为 15"), result.stderr)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.configureArgumentsLog.path))
+    }
+
+    func testDarwinBuildDiscoversKegOnlyGCC15UsingHomebrewPrefix() throws {
+        let fixture = try BootstrapArchiveSnapshotFixture(
+            sourceKind: .regular,
+            includeGNUCompiler: false,
+            includeKegOnlyGNUCompiler: true
+        )
+        defer { fixture.cleanup() }
+
+        let result = try runBootstrap(
+            [
+                "--prefix", fixture.installPrefix.path,
+                "--sha256", String(repeating: "0", count: 64),
+                "--archive", fixture.archive.path
+            ],
+            environment: fixture.environment
+        )
+
+        XCTAssertEqual(result.exitStatus, 0, result.stderr)
     }
 
     func testLocalArchiveSnapshotCopyFailureStopsBeforeHashAndExtraction() throws {
@@ -527,7 +579,8 @@ final class BootstrapScriptTests: XCTestCase {
     ) throws -> ProcessResult {
         try ProcessRunner().run(CommandSpec(
             executable: "/usr/bin/env",
-            args: environment.map { "\($0.key)=\($0.value)" }
+            args: ["-i"]
+                + isolatedBootstrapEnvironment(environment).map { "\($0.key)=\($0.value)" }
                 + ["/bin/sh", scriptURL.path]
                 + arguments,
             workingDirectory: repositoryRoot
@@ -661,7 +714,12 @@ private struct BootstrapArchiveSnapshotFixture {
     let snapshotModeLog: URL
     let configureArgumentsLog: URL
 
-    init(sourceKind: SourceKind, includeGNUCompiler: Bool = true) throws {
+    init(
+        sourceKind: SourceKind,
+        includeGNUCompiler: Bool = true,
+        includeKegOnlyGNUCompiler: Bool = false
+    ) throws {
+        var additionalEnvironment: [String: String] = [:]
         directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(
                 "bootstrap-snapshot-\(sourceKind.rawValue)-\(UUID().uuidString)",
@@ -781,10 +839,24 @@ private struct BootstrapArchiveSnapshotFixture {
         if includeGNUCompiler {
             for compiler in ["gcc-15", "g++-15"] {
                 try writeBootstrapExecutable(
-                    "#!/bin/sh\nprintf '%s\\n' 'gcc-15 (Homebrew GCC 15.2.0) 15.2.0'\n",
+                    "#!/bin/sh\ncase \"$1\" in -dumpfullversion) printf '15.2.0\\n' ;; *) printf '%s\\n' 'gcc-15 (Homebrew GCC 15.2.0) 15.2.0' ;; esac\n",
                     to: tools.appendingPathComponent(compiler)
                 )
             }
+        }
+        if includeKegOnlyGNUCompiler {
+            let prefix = directory.appendingPathComponent("gcc@15", isDirectory: true)
+            for compiler in ["gcc-15", "g++-15"] {
+                try writeBootstrapExecutable(
+                    "#!/bin/sh\ncase \"$1\" in -dumpfullversion) printf '15.3.0\\n' ;; *) printf '%s\\n' 'gcc-15 (Homebrew GCC 15.3.0) 15.3.0' ;; esac\n",
+                    to: prefix.appendingPathComponent("bin/\(compiler)")
+                )
+            }
+            try writeBootstrapExecutable(
+                "#!/bin/sh\nif [ \"$1\" = --prefix ] && [ \"$2\" = gcc@15 ]; then printf '%s\\n' \"$YAGARTO_GCC15_PREFIX\"; exit 0; fi\nexit 1\n",
+                to: tools.appendingPathComponent("brew")
+            )
+            additionalEnvironment["YAGARTO_GCC15_PREFIX"] = prefix.path
         }
         let producer = """
         #!/bin/sh
@@ -812,7 +884,7 @@ private struct BootstrapArchiveSnapshotFixture {
             "YAGARTO_CONFIGURE_TEMPLATE": configureTemplate.path,
             "YAGARTO_GDB_TEMPLATE": gdbTemplate.path,
             "YAGARTO_INSTALL_PREFIX": installPrefix.path
-        ]
+        ].merging(additionalEnvironment, uniquingKeysWith: { _, override in override })
     }
 
     let environment: [String: String]
@@ -940,10 +1012,7 @@ private func runBootstrapProcess(
     process.arguments = [repositoryRoot.appendingPathComponent("scripts/bootstrap-gdb-sim.sh").path]
         + arguments
     process.currentDirectoryURL = repositoryRoot
-    process.environment = ProcessInfo.processInfo.environment.merging(
-        environment,
-        uniquingKeysWith: { _, override in override }
-    )
+    process.environment = isolatedBootstrapEnvironment(environment)
     process.standardOutput = stdout
     process.standardError = stderr
 
@@ -999,6 +1068,17 @@ private func bootstrapProcessHasExited(_ pid: pid_t) -> Bool {
     guard pid > 0 else { return true }
     errno = 0
     return Darwin.kill(pid, 0) == -1 && errno == ESRCH
+}
+
+private func isolatedBootstrapEnvironment(
+    _ overrides: [String: String]
+) -> [String: String] {
+    [
+        "HOME": FileManager.default.temporaryDirectory.path,
+        "PATH": "/usr/bin:/bin",
+        "TMPDIR": FileManager.default.temporaryDirectory.path,
+        "LANG": "en_US.UTF-8"
+    ].merging(overrides, uniquingKeysWith: { _, override in override })
 }
 
 private func writeBootstrapExecutable(_ contents: String, to url: URL) throws {

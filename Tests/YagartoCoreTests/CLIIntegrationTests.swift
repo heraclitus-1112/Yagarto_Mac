@@ -438,7 +438,11 @@ final class CLIIntegrationTests: XCTestCase {
     func testDoctorEmitsStructuredJSONReport() throws {
         let directory = try CLITemporaryDirectory()
 
-        let result = try runCLI(["doctor", "--format", "json"], in: directory.url)
+        let result = try runCLI(
+            ["doctor", "--format", "json"],
+            in: directory.url,
+            environment: ["PATH": "/usr/bin:/bin"]
+        )
 
         XCTAssertEqual(result.status, 0, result.stderr)
         let report = try JSONDecoder().decode(DoctorReport.self, from: Data(result.stdout.utf8))
@@ -1377,10 +1381,7 @@ private final class RunningCLIProcess {
         process.executableURL = cliExecutableURL()
         process.arguments = arguments
         process.currentDirectoryURL = directory
-        process.environment = ProcessInfo.processInfo.environment.merging(
-            environment,
-            uniquingKeysWith: { _, override in override }
-        )
+        process.environment = isolatedCLIEnvironment(in: directory, overrides: environment)
         process.standardOutput = stdoutHandle
         process.standardError = stderrHandle
         try process.run()
@@ -1599,12 +1600,7 @@ private func runCapturedProcess(
     process.executableURL = executable
     process.arguments = arguments
     process.currentDirectoryURL = directory
-    var isolatedEnvironment = ProcessInfo.processInfo.environment
-    isolatedEnvironment["HOME"] = directory.path
-    process.environment = isolatedEnvironment.merging(
-        environment,
-        uniquingKeysWith: { _, override in override }
-    )
+    process.environment = isolatedCLIEnvironment(in: directory, overrides: environment)
     process.standardOutput = stdoutHandle
     process.standardError = stderrHandle
     try process.run()
@@ -1642,10 +1638,7 @@ private func runCLIAndSendSignal(
     process.executableURL = cliExecutableURL()
     process.arguments = arguments
     process.currentDirectoryURL = directory
-    process.environment = ProcessInfo.processInfo.environment.merging(
-        environment,
-        uniquingKeysWith: { _, override in override }
-    )
+    process.environment = isolatedCLIEnvironment(in: directory, overrides: environment)
     process.standardOutput = stdoutHandle
     process.standardError = stderrHandle
     var descendants: [pid_t] = []
@@ -1705,6 +1698,18 @@ private func waitUntil(
         Thread.sleep(forTimeInterval: 0.02)
     }
     return condition()
+}
+
+private func isolatedCLIEnvironment(
+    in directory: URL,
+    overrides: [String: String]
+) -> [String: String] {
+    [
+        "HOME": directory.path,
+        "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+        "TMPDIR": FileManager.default.temporaryDirectory.path,
+        "LANG": "en_US.UTF-8"
+    ].merging(overrides, uniquingKeysWith: { _, override in override })
 }
 
 private func processHasExited(_ pid: pid_t) -> Bool {

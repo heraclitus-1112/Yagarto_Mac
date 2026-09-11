@@ -131,9 +131,7 @@ public struct ToolResolver {
         resourceExists: @escaping (String) -> Bool = {
             FileManager.default.fileExists(atPath: $0)
         },
-        capabilityProbe: @escaping (CommandSpec) -> Bool = { command in
-            (try? ProcessRunner().run(command).exitStatus) == 0
-        },
+        capabilityProbe: ((CommandSpec) -> Bool)? = nil,
         resolvingSymlinks: @escaping (String) -> String = {
             URL(fileURLWithPath: $0).resolvingSymlinksInPath().path
         }
@@ -141,7 +139,9 @@ public struct ToolResolver {
         self.environment = environment
         self.fileExists = fileExists
         self.resourceExists = resourceExists
-        self.capabilityProbe = capabilityProbe
+        self.capabilityProbe = capabilityProbe ?? { command in
+            TimedProcessCapabilityProbe.run(command)
+        }
         self.resolvingSymlinks = resolvingSymlinks
     }
 

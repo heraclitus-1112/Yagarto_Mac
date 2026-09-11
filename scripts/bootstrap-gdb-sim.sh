@@ -648,8 +648,23 @@ case "$HOST_SYSTEM" in
         if [ -z "$GDB_CXX" ] && command -v g++-15 >/dev/null 2>&1; then
             GDB_CXX=$(command -v g++-15)
         fi
+        if { [ -z "$GDB_CC" ] || [ -z "$GDB_CXX" ]; } \
+            && command -v brew >/dev/null 2>&1; then
+            gcc15_prefix_output="${WORK_DIRECTORY}/gcc15-prefix.txt"
+            run_supervised brew --prefix gcc@15 >"$gcc15_prefix_output" 2>/dev/null || true
+            GCC15_PREFIX=
+            IFS= read -r GCC15_PREFIX <"$gcc15_prefix_output" || true
+            if [ -n "$GCC15_PREFIX" ]; then
+                if [ -z "$GDB_CC" ] && [ -x "${GCC15_PREFIX}/bin/gcc-15" ]; then
+                    GDB_CC="${GCC15_PREFIX}/bin/gcc-15"
+                fi
+                if [ -z "$GDB_CXX" ] && [ -x "${GCC15_PREFIX}/bin/g++-15" ]; then
+                    GDB_CXX="${GCC15_PREFIX}/bin/g++-15"
+                fi
+            fi
+        fi
         if [ -z "$GDB_CC" ] || [ -z "$GDB_CXX" ]; then
-            echo "macOS 构建 GDB simulator 需要 GNU GCC 15；请运行 brew install gcc，或显式设置 CC/CXX 为 GNU GCC 可执行文件。" >&2
+            echo "macOS 构建 GDB simulator 需要 GNU GCC 15；请运行 brew install gcc@15，或显式设置 CC/CXX 为 GNU GCC 15 可执行文件。" >&2
             exit 1
         fi
         ;;
@@ -677,6 +692,12 @@ if [ "$HOST_SYSTEM" = "Darwin" ]; then
     fi
     if ! "$GDB_CXX" --version 2>&1 | grep -E '(^|[[:space:](])GCC([[:space:].)]|$)|GNU Compiler Collection' >/dev/null; then
         echo "macOS 构建 GDB simulator 的 C++ 编译器不是 GNU GCC：${GDB_CXX}" >&2
+        exit 1
+    fi
+    GDB_CC_VERSION=$("$GDB_CC" -dumpfullversion -dumpversion 2>/dev/null || true)
+    GDB_CXX_VERSION=$("$GDB_CXX" -dumpfullversion -dumpversion 2>/dev/null || true)
+    if [ "${GDB_CC_VERSION%%.*}" != "15" ] || [ "${GDB_CXX_VERSION%%.*}" != "15" ]; then
+        echo "macOS 构建 GDB simulator 所用 GNU GCC 的主版本必须为 15；当前为 C=${GDB_CC_VERSION:-未知}、C++=${GDB_CXX_VERSION:-未知}。" >&2
         exit 1
     fi
 fi
