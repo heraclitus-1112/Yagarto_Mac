@@ -6,13 +6,16 @@ import Foundation
 public struct BuildPlanner {
     private let toolPaths: [ToolIdentifier: String]
     private let linkerScriptURL: (ProfileID) throws -> URL
+    private let startupSourceURL: (ProfileID) throws -> URL
 
     public init(
         toolPaths: [ToolIdentifier: String],
-        linkerScriptURL: @escaping (ProfileID) throws -> URL = LinkerScriptStore.url(for:)
+        linkerScriptURL: @escaping (ProfileID) throws -> URL = LinkerScriptStore.url(for:),
+        startupSourceURL: @escaping (ProfileID) throws -> URL = StartupStore.url(for:)
     ) {
         self.toolPaths = toolPaths
         self.linkerScriptURL = linkerScriptURL
+        self.startupSourceURL = startupSourceURL
     }
 
     public func plan(
@@ -76,14 +79,48 @@ public struct BuildPlanner {
         let trimmedEntry = configuration.entry.trimmingCharacters(in: .whitespacesAndNewlines)
         let entry = trimmedEntry.isEmpty ? "start" : trimmedEntry
 
-        steps.append(BuildStep(command: CommandSpec(
-            executable: try toolPath(for: .linker),
-            args: [
+        let startupObjectFile: URL?
+        if let startupName = configuration.profile.startupSourceName {
+            let sourceURL = try startupSourceURL(configuration.profile)
+            let objectURL = outputDirectory.appendingPathComponent(
+                "\(URL(fileURLWithPath: startupName).deletingPathExtension().lastPathComponent).o"
+            )
+            startupObjectFile = objectURL
+            steps.append(BuildStep(command: CommandSpec(
+                executable: try toolPath(for: .assembler),
+                args: cpuArguments + ["-o", objectURL.path, sourceURL.path],
+                workingDirectory: projectDirectory
+            )))
+        } else {
+            startupObjectFile = nil
+        }
+
+        let linkEntry: String
+        var linkerArguments: [String]
+        if let startupObjectFile {
+            let userEntry = try validatedLinkerSymbol(entry)
+            linkEntry = "Reset_Handler"
+            linkerArguments = [
                 "-T", scriptURL.path,
-                "-e", entry,
+                "-e", linkEntry,
+                "--defsym=__yagarto_entry=\(userEntry)",
+                "-Map", mapFile.path,
+                "-o", elfFile.path,
+                startupObjectFile.path
+            ] + objectFiles.map(\.path)
+        } else {
+            linkEntry = entry
+            linkerArguments = [
+                "-T", scriptURL.path,
+                "-e", linkEntry,
                 "-Map", mapFile.path,
                 "-o", elfFile.path
-            ] + objectFiles.map(\.path),
+            ] + objectFiles.map(\.path)
+        }
+
+        steps.append(BuildStep(command: CommandSpec(
+            executable: try toolPath(for: .linker),
+            args: linkerArguments,
             workingDirectory: projectDirectory
         )))
         steps.append(BuildStep(command: CommandSpec(
@@ -105,6 +142,7 @@ public struct BuildPlanner {
             projectDirectory: projectDirectory,
             outputDirectory: outputDirectory,
             objectFiles: objectFiles,
+            startupObjectFile: startupObjectFile,
             elfFile: elfFile,
             mapFile: mapFile,
             binaryFile: binaryFile,
@@ -132,6 +170,14 @@ public struct BuildPlanner {
             .deletingPathExtension()
             .lastPathComponent
         return "\(stem)-\(shortHash).o"
+    }
+
+    private func validatedLinkerSymbol(_ value: String) throws -> String {
+        let pattern = #"^[\p{L}_.$][\p{L}\p{M}\p{N}_.$]*$"#
+        guard value.range(of: pattern, options: .regularExpression) != nil else {
+            throw YagartoError.invalidEntry(value)
+        }
+        return value
     }
 
     private func toolPath(for tool: ToolIdentifier) throws -> String {

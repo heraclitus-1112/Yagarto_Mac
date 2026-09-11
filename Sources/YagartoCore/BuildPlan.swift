@@ -17,6 +17,7 @@ public struct BuildPlan: Equatable, Sendable {
     public let projectDirectory: URL
     public let outputDirectory: URL
     public let objectFiles: [URL]
+    public let startupObjectFile: URL?
     public let elfFile: URL
     public let mapFile: URL
     public let binaryFile: URL
@@ -28,6 +29,7 @@ public struct BuildPlan: Equatable, Sendable {
         projectDirectory: URL,
         outputDirectory: URL,
         objectFiles: [URL],
+        startupObjectFile: URL? = nil,
         elfFile: URL,
         mapFile: URL,
         binaryFile: URL,
@@ -38,6 +40,7 @@ public struct BuildPlan: Equatable, Sendable {
         self.projectDirectory = projectDirectory.standardizedFileURL
         self.outputDirectory = outputDirectory
         self.objectFiles = objectFiles
+        self.startupObjectFile = startupObjectFile
         self.elfFile = elfFile
         self.mapFile = mapFile
         self.binaryFile = binaryFile
@@ -51,7 +54,8 @@ public struct BuildPlan: Equatable, Sendable {
 
     public var artifactFiles: [URL] {
         var seen = Set<String>()
-        return (objectFiles + [elfFile, mapFile, binaryFile, listingFile]
+        return (objectFiles + [startupObjectFile].compactMap { $0 }
+            + [elfFile, mapFile, binaryFile, listingFile]
             + steps.compactMap(\.standardOutputFile)).filter { url in
                 seen.insert(url.standardizedFileURL.path).inserted
             }

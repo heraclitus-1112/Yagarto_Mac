@@ -5,6 +5,37 @@ import XCTest
 @testable import YagartoCore
 
 final class ProcessRunnerTests: XCTestCase {
+    func testInteractiveRunnerPreservesExecutableAndArgumentsWithoutShellWrapping() throws {
+        let recorder = InteractiveExecutionRecorder(termination: ProcessTermination(
+            reason: .exit,
+            status: 0
+        ))
+        let runner = ProcessRunner(interactiveExecution: recorder.execute)
+        let command = CommandSpec(
+            executable: "/tools/GDB 中文",
+            args: ["-ex", "file /tmp/空 格/demo.elf", "$(touch /tmp/nope)"],
+            workingDirectory: URL(fileURLWithPath: "/tmp/项目", isDirectory: true)
+        )
+
+        XCTAssertEqual(try runner.runInteractive(command), 0)
+        XCTAssertEqual(recorder.commands, [command])
+    }
+
+    func testInteractiveRunnerMapsSIGINTToExit130() throws {
+        let runner = ProcessRunner(interactiveExecution: { _ in
+            ProcessTermination(reason: .uncaughtSignal, status: SIGINT)
+        })
+
+        XCTAssertEqual(
+            try runner.runInteractive(CommandSpec(
+                executable: "/tools/gdb",
+                args: [],
+                workingDirectory: URL(fileURLWithPath: "/tmp", isDirectory: true)
+            )),
+            YagartoExitCode.interrupted.rawValue
+        )
+    }
+
     func testSuccessfulProcessCapturesOutputAndUsesWorkingDirectory() throws {
         let directory = try TemporaryTestDirectory(component: "进程 空格")
         let command = CommandSpec(
@@ -73,6 +104,20 @@ final class ProcessRunnerTests: XCTestCase {
             XCTAssertEqual(error.diagnosticCode, "process.launch_failed")
             XCTAssertNotNil(error.details)
         }
+    }
+}
+
+private final class InteractiveExecutionRecorder {
+    let termination: ProcessTermination
+    private(set) var commands: [CommandSpec] = []
+
+    init(termination: ProcessTermination) {
+        self.termination = termination
+    }
+
+    func execute(_ command: CommandSpec) throws -> ProcessTermination {
+        commands.append(command)
+        return termination
     }
 }
 

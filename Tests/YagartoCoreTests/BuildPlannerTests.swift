@@ -51,7 +51,7 @@ final class BuildPlannerTests: XCTestCase {
     func testCortexM4PreprocessedAssemblyGoldenPlan() throws {
         let configuration = ProjectConfiguration(
             profile: .cortexM4,
-            entry: "Reset_Handler",
+            entry: "user_main",
             sources: ["源 代码/启动.S"],
             outputName: "固件 文件"
         )
@@ -68,18 +68,20 @@ final class BuildPlannerTests: XCTestCase {
                 source: "源 代码/启动.S",
                 assembler: .compiler,
                 cpuArguments: ["-mcpu=cortex-m4", "-mthumb", "-g", "-c", "-x", "assembler-with-cpp"],
-                entry: "Reset_Handler",
+                entry: "user_main",
                 scriptName: "mps2-an386.ld",
-                outputName: "固件 文件"
+                outputName: "固件 文件",
+                startupName: "cortex-m4-startup.s"
             )
         )
+        XCTAssertEqual(plan.startupObjectFile?.lastPathComponent, "cortex-m4-startup.o")
         XCTAssertTrue(plan.commands[0].args.contains("/tmp/项目 空格/源 代码/启动.S"))
     }
 
     func testSTM32F4DiscoveryGoldenPlan() throws {
         let configuration = ProjectConfiguration(
             profile: .stm32f4Discovery,
-            entry: "Reset_Handler",
+            entry: "main",
             sources: ["startup.s"],
             outputName: "board"
         )
@@ -96,11 +98,26 @@ final class BuildPlannerTests: XCTestCase {
                 source: "startup.s",
                 assembler: .assembler,
                 cpuArguments: ["-mcpu=cortex-m4", "-mthumb", "-g"],
-                entry: "Reset_Handler",
+                entry: "main",
                 scriptName: "stm32f4-discovery.ld",
-                outputName: "board"
+                outputName: "board",
+                startupName: "stm32f4-startup.s"
             )
         )
+        XCTAssertEqual(plan.startupObjectFile?.lastPathComponent, "stm32f4-startup.o")
+    }
+
+    func testCortexM4ConfiguredEntryAcceptsUnicodeSymbolWithoutCommandMetacharacters() throws {
+        let plan = try makePlanner().plan(
+            configuration: ProjectConfiguration(
+                profile: .cortexM4,
+                entry: "课程入口",
+                sources: ["startup.s"]
+            ),
+            projectDirectory: projectDirectory
+        )
+
+        XCTAssertTrue(plan.commands[2].args.contains("--defsym=__yagarto_entry=课程入口"))
     }
 
     func testMultipleSourcesProduceOneObjectPerSource() throws {
@@ -308,16 +325,61 @@ final class BuildPlannerTests: XCTestCase {
             let url = try LinkerScriptStore.url(for: profile)
             let script = try String(contentsOf: url, encoding: .utf8)
             XCTAssertEqual(url.lastPathComponent, filename)
-            XCTAssertTrue(script.contains("ENTRY(start)"))
             XCTAssertTrue(script.contains("MEMORY"))
             XCTAssertTrue(script.contains("SECTIONS"))
             XCTAssertTrue(script.contains(".text"))
             XCTAssertTrue(script.contains(".data"))
             XCTAssertTrue(script.contains(".bss"))
+            if profile == .arm7tdmi {
+                XCTAssertTrue(script.contains("ENTRY(start)"))
+            } else {
+                XCTAssertTrue(script.contains("ENTRY(Reset_Handler)"))
+                XCTAssertTrue(script.contains("KEEP(*(.isr_vector))"))
+                XCTAssertTrue(script.contains("__data_load__ = LOADADDR(.data)"))
+            }
             for fragment in fragments {
                 XCTAssertTrue(script.contains(fragment), "\(filename) 缺少 \(fragment)")
             }
         }
+    }
+
+    func testBundledCortexM4StartupHasVectorTableStackAndConfiguredEntryCall() throws {
+        let url = try StartupStore.url(for: .cortexM4)
+        let source = try String(contentsOf: url, encoding: .utf8)
+
+        XCTAssertEqual(url.lastPathComponent, "cortex-m4-startup.s")
+        XCTAssertTrue(source.contains(".section .isr_vector"))
+        XCTAssertTrue(source.contains(".word 0x20400000"))
+        XCTAssertTrue(source.contains(".word Reset_Handler"))
+        XCTAssertTrue(source.contains(".thumb_func"))
+        XCTAssertTrue(source.contains("__data_load__"))
+        XCTAssertTrue(source.contains("__data_start__"))
+        XCTAssertTrue(source.contains("__data_end__"))
+        XCTAssertTrue(source.contains("ldrb"))
+        XCTAssertTrue(source.contains("strb"))
+        XCTAssertTrue(source.contains("__bss_start__"))
+        XCTAssertTrue(source.contains("__bss_end__"))
+        XCTAssertTrue(source.contains("bl __yagarto_entry"))
+        XCTAssertTrue(source.contains("b ."))
+    }
+
+    func testBundledSTM32StartupHasFlashVectorStackAndConfiguredEntryCall() throws {
+        let url = try StartupStore.url(for: .stm32f4Discovery)
+        let source = try String(contentsOf: url, encoding: .utf8)
+
+        XCTAssertEqual(url.lastPathComponent, "stm32f4-startup.s")
+        XCTAssertTrue(source.contains(".section .isr_vector"))
+        XCTAssertTrue(source.contains(".word 0x20020000"))
+        XCTAssertTrue(source.contains(".word Reset_Handler"))
+        XCTAssertTrue(source.contains("__data_load__"))
+        XCTAssertTrue(source.contains("__data_start__"))
+        XCTAssertTrue(source.contains("__data_end__"))
+        XCTAssertTrue(source.contains("ldrb"))
+        XCTAssertTrue(source.contains("strb"))
+        XCTAssertTrue(source.contains("__bss_start__"))
+        XCTAssertTrue(source.contains("__bss_end__"))
+        XCTAssertTrue(source.contains("bl __yagarto_entry"))
+        XCTAssertTrue(source.contains("b ."))
     }
 
     private func makePlanner() -> BuildPlanner {
@@ -325,6 +387,9 @@ final class BuildPlannerTests: XCTestCase {
             toolPaths: tools,
             linkerScriptURL: { profile in
                 URL(fileURLWithPath: "/scripts/\(profile.linkerScriptName)")
+            },
+            startupSourceURL: { profile in
+                URL(fileURLWithPath: "/startup/\(profile.startupSourceName ?? "none")")
             }
         )
     }
@@ -336,7 +401,8 @@ final class BuildPlannerTests: XCTestCase {
         cpuArguments: [String],
         entry: String,
         scriptName: String,
-        outputName: String = "demo"
+        outputName: String = "demo",
+        startupName: String? = nil
     ) -> [CommandSpec] {
         let outputDirectory = "/tmp/项目 空格/.yagarto/build/\(profile.rawValue)"
         let expectedHashes: [String: String] = [
@@ -352,15 +418,33 @@ final class BuildPlannerTests: XCTestCase {
         let binary = "\(outputDirectory)/\(outputName).bin"
         let workingDirectory = projectDirectory.standardizedFileURL
 
-        return [
+        var commands = [
             CommandSpec(
                 executable: tools[assembler]!,
                 args: cpuArguments + ["-o", object, "/tmp/项目 空格/\(source)"],
                 workingDirectory: workingDirectory
-            ),
+            )
+        ]
+        var linkObjects = [object]
+        if let startupName {
+            let startupObject = "\(outputDirectory)/\(URL(fileURLWithPath: startupName).deletingPathExtension().lastPathComponent).o"
+            commands.append(CommandSpec(
+                executable: tools[.assembler]!,
+                args: ["-mcpu=cortex-m4", "-mthumb", "-g", "-o", startupObject, "/startup/\(startupName)"],
+                workingDirectory: workingDirectory
+            ))
+            linkObjects.insert(startupObject, at: 0)
+        }
+        let linkEntry = startupName == nil ? entry : "Reset_Handler"
+        var linkArguments = ["-T", "/scripts/\(scriptName)", "-e", linkEntry]
+        if startupName != nil {
+            linkArguments.append("--defsym=__yagarto_entry=\(entry)")
+        }
+        linkArguments += ["-Map", map, "-o", elf] + linkObjects
+        commands += [
             CommandSpec(
                 executable: tools[.linker]!,
-                args: ["-T", "/scripts/\(scriptName)", "-e", entry, "-Map", map, "-o", elf, object],
+                args: linkArguments,
                 workingDirectory: workingDirectory
             ),
             CommandSpec(
@@ -374,6 +458,7 @@ final class BuildPlannerTests: XCTestCase {
                 workingDirectory: workingDirectory
             )
         ]
+        return commands
     }
 }
 

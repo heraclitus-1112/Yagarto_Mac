@@ -22,13 +22,16 @@ final class CLIIntegrationTests: XCTestCase {
         XCTAssertEqual(result.stderr.utf8.count, 2 * 1024 * 1024)
     }
 
-    func testHelpListsTaskOneCommands() throws {
+    func testHelpListsBuildAndExecutionCommands() throws {
         let directory = try CLITemporaryDirectory()
 
         let result = try runCLI(["--help"], in: directory.url)
 
         XCTAssertEqual(result.status, 0)
-        for command in ["doctor", "init", "profile", "build", "disassemble"] {
+        for command in [
+            "doctor", "init", "profile", "build", "disassemble",
+            "run", "debug", "flash"
+        ] {
             XCTAssertTrue(result.stdout.contains(command), "help 缺少 \(command)")
         }
     }
@@ -352,6 +355,298 @@ final class CLIIntegrationTests: XCTestCase {
         XCTAssertEqual(report.entries.filter { !$0.required }.count, 3)
     }
 
+    func testDoctorTextSeparatesGDBCapabilityQEMUOpenOCDAndBoardConfig() throws {
+        let directory = try CLITemporaryDirectory()
+        let prefix = directory.url.appendingPathComponent("doctor-tools", isDirectory: true)
+        let bin = prefix.appendingPathComponent("bin", isDirectory: true)
+        for tool in ["arm-none-eabi-gdb", "qemu-system-arm", "openocd"] {
+            try writeExecutable("#!/bin/sh\nexit 0\n", to: bin.appendingPathComponent(tool))
+        }
+        let board = prefix.appendingPathComponent(
+            "share/openocd/scripts/board/stm32f4discovery.cfg"
+        )
+        try FileManager.default.createDirectory(
+            at: board.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data("# fake board config\n".utf8).write(to: board)
+
+        let result = try runCLI(
+            ["doctor", "--format", "text"],
+            in: directory.url,
+            environment: ["PATH": "\(bin.path):/usr/bin:/bin"]
+        )
+
+        XCTAssertEqual(result.status, 0, result.stderr)
+        XCTAssertTrue(result.stdout.contains("GDB 可执行文件"))
+        XCTAssertTrue(result.stdout.contains("GDB target sim：支持"))
+        XCTAssertTrue(result.stdout.contains("QEMU"))
+        XCTAssertTrue(result.stdout.contains("OpenOCD"))
+        XCTAssertTrue(result.stdout.contains("stm32f4discovery.cfg"))
+    }
+
+    func testDebugDryRunJSONUsesConfiguredELFAndGDBSimulatorPlan() throws {
+        let directory = try CLITemporaryDirectory()
+        try ConfigStore(projectDirectory: directory.url).save(ProjectConfiguration(
+            profile: .arm7tdmi,
+            entry: "课程入口",
+            sources: ["demo.s"],
+            outputName: "演示 固件"
+        ))
+        let simulator = directory.url.appendingPathComponent("工具/gdb sim")
+        try writeExecutable("#!/bin/sh\nexit 0\n", to: simulator)
+
+        let result = try runCLI(
+            ["debug", "--dry-run", "--format", "json"],
+            in: directory.url,
+            environment: ["YAGARTO_MAC_GDB_SIM": simulator.path]
+        )
+
+        XCTAssertEqual(result.status, 0, result.stderr)
+        XCTAssertEqual(result.stderr, "")
+        let plan = try JSONDecoder().decode(
+            DebugLaunchPlan.self,
+            from: Data(result.stdout.utf8)
+        )
+        XCTAssertEqual(plan.backend, .gdbSimulator)
+        XCTAssertEqual(plan.gdbExecutable, simulator.path)
+        XCTAssertEqual(plan.initCommands, [
+            "file \"\(plan.elf)\"",
+            "target sim",
+            "load",
+            "tbreak 课程入口",
+            "run"
+        ])
+    }
+
+    func testRunDryRunTextAcceptsExplicitELFAndProfileOverride() throws {
+        let directory = try CLITemporaryDirectory()
+        let tools = directory.url.appendingPathComponent("fake-tools", isDirectory: true)
+        try writeExecutable("#!/bin/sh\nexit 0\n", to: tools.appendingPathComponent("arm-none-eabi-gdb"))
+        try writeExecutable("#!/bin/sh\nexit 0\n", to: tools.appendingPathComponent("qemu-system-arm"))
+
+        let result = try runCLI(
+            [
+                "run", "固件 路径.elf",
+                "--profile", "cortex-m4",
+                "--dry-run",
+                "--format", "text"
+            ],
+            in: directory.url,
+            environment: ["PATH": "\(tools.path):/usr/bin:/bin"]
+        )
+
+        XCTAssertEqual(result.status, 0, result.stderr)
+        XCTAssertTrue(result.stdout.contains("profile：cortex-m4"))
+        XCTAssertTrue(result.stdout.contains("backend：qemu-mps2-an386"))
+        XCTAssertTrue(result.stdout.contains("固件 路径.elf"))
+        XCTAssertTrue(result.stdout.contains("  -ex continue"))
+        XCTAssertFalse(result.stdout.contains("tbreak"))
+    }
+
+    func testRunMapsInteractiveGDBInterruptToExit130JSONEnvelope() throws {
+        let directory = try CLITemporaryDirectory()
+        let tools = directory.url.appendingPathComponent("interrupt-tools", isDirectory: true)
+        try writeExecutable(
+            "#!/bin/sh\nkill -INT $$\nexit 99\n",
+            to: tools.appendingPathComponent("arm-none-eabi-gdb")
+        )
+        try writeExecutable(
+            "#!/bin/sh\nexit 0\n",
+            to: tools.appendingPathComponent("qemu-system-arm")
+        )
+
+        let result = try runCLI(
+            [
+                "run", "firmware.elf",
+                "--profile", "cortex-m4",
+                "--format", "json"
+            ],
+            in: directory.url,
+            environment: ["PATH": "\(tools.path):/usr/bin:/bin"]
+        )
+
+        XCTAssertEqual(result.status, YagartoExitCode.interrupted.rawValue)
+        XCTAssertEqual(result.stdout, "")
+        let payload = try decodeErrorEnvelope(result.stderr)
+        XCTAssertEqual(payload.exitCode, YagartoExitCode.interrupted.rawValue)
+        XCTAssertEqual(payload.error.code, "process.interrupted")
+    }
+
+    func testDebugLaunchesSelectedGDBAndReturnsItsSuccessfulStatus() throws {
+        let directory = try CLITemporaryDirectory()
+        let simulator = directory.url.appendingPathComponent("actual-tools/gdb-sim")
+        try writeExecutable("#!/bin/sh\nexit 0\n", to: simulator)
+
+        let result = try runCLI(
+            [
+                "debug", "firmware.elf",
+                "--profile", "arm7tdmi",
+                "--format", "text"
+            ],
+            in: directory.url,
+            environment: ["YAGARTO_MAC_GDB_SIM": simulator.path]
+        )
+
+        XCTAssertEqual(result.status, 0, result.stderr)
+        XCTAssertEqual(result.stdout, "")
+        XCTAssertEqual(result.stderr, "")
+    }
+
+    func testRunMapsNonzeroGDBStatusToControlledFailureEnvelope() throws {
+        let directory = try CLITemporaryDirectory()
+        let tools = directory.url.appendingPathComponent("failed-tools", isDirectory: true)
+        try writeExecutable("#!/bin/sh\nexit 7\n", to: tools.appendingPathComponent("arm-none-eabi-gdb"))
+        try writeExecutable("#!/bin/sh\nexit 0\n", to: tools.appendingPathComponent("qemu-system-arm"))
+
+        let result = try runCLI(
+            [
+                "run", "firmware.elf",
+                "--profile", "cortex-m4",
+                "--format", "json"
+            ],
+            in: directory.url,
+            environment: ["PATH": "\(tools.path):/usr/bin:/bin"]
+        )
+
+        XCTAssertEqual(result.status, YagartoExitCode.buildFailure.rawValue)
+        let payload = try decodeErrorEnvelope(result.stderr)
+        XCTAssertEqual(payload.error.code, "build.step_failed")
+        XCTAssertTrue(payload.error.message.contains("7"))
+    }
+
+    func testFlashRequiresExplicitYesBeforeResolvingToolsOrHardware() throws {
+        let directory = try CLITemporaryDirectory()
+
+        let result = try runCLI(
+            [
+                "flash", "firmware.elf",
+                "--profile", "stm32f4-discovery",
+                "--format", "json"
+            ],
+            in: directory.url,
+            environment: ["PATH": "/nonexistent"]
+        )
+
+        XCTAssertEqual(result.status, YagartoExitCode.usage.rawValue)
+        let payload = try decodeErrorEnvelope(result.stderr)
+        XCTAssertEqual(payload.error.code, "usage.confirmation_required")
+        XCTAssertTrue(payload.error.message.contains("--yes"))
+    }
+
+    func testFlashRejectsNonDiscoveryProfileAsUsageBeforeToolLookup() throws {
+        let directory = try CLITemporaryDirectory()
+
+        let result = try runCLI(
+            [
+                "flash", "firmware.elf",
+                "--profile", "arm7tdmi",
+                "--yes",
+                "--format", "json"
+            ],
+            in: directory.url,
+            environment: ["PATH": "/nonexistent"]
+        )
+
+        XCTAssertEqual(result.status, YagartoExitCode.usage.rawValue)
+        let payload = try decodeErrorEnvelope(result.stderr)
+        XCTAssertEqual(payload.error.code, "flash.unsupported_profile")
+        XCTAssertTrue(payload.error.message.contains("stm32f4-discovery"))
+    }
+
+    func testFlashRejectsConfiguredNonDiscoveryProfileWithExitTwo() throws {
+        let directory = try CLITemporaryDirectory()
+        try ConfigStore(projectDirectory: directory.url).save(.default)
+
+        let result = try runCLI(
+            ["flash", "--yes", "--format", "json"],
+            in: directory.url,
+            environment: ["PATH": "/nonexistent"]
+        )
+
+        XCTAssertEqual(result.status, YagartoExitCode.usage.rawValue)
+        let payload = try decodeErrorEnvelope(result.stderr)
+        XCTAssertEqual(payload.error.code, "flash.unsupported_profile")
+        XCTAssertTrue(payload.error.message.contains("arm7tdmi"))
+    }
+
+    func testFlashReportsExitSixWithoutProgrammingWhenProbeFindsNoBoard() throws {
+        let directory = try CLITemporaryDirectory()
+        let prefix = directory.url.appendingPathComponent("openocd-prefix", isDirectory: true)
+        let openOCD = prefix.appendingPathComponent("bin/openocd")
+        try writeExecutable("#!/bin/sh\necho 'no device found' >&2\nexit 1\n", to: openOCD)
+        let board = prefix.appendingPathComponent(
+            "share/openocd/scripts/board/stm32f4discovery.cfg"
+        )
+        try FileManager.default.createDirectory(
+            at: board.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data("# fake board config\n".utf8).write(to: board)
+
+        let result = try runCLI(
+            [
+                "flash", "固件 文件.elf",
+                "--profile", "stm32f4-discovery",
+                "--yes",
+                "--format", "json"
+            ],
+            in: directory.url,
+            environment: ["PATH": "\(prefix.appendingPathComponent("bin").path):/usr/bin:/bin"]
+        )
+
+        XCTAssertEqual(result.status, YagartoExitCode.unsupported.rawValue)
+        let payload = try decodeErrorEnvelope(result.stderr)
+        XCTAssertEqual(payload.error.code, "flash.board_not_found")
+        XCTAssertTrue(payload.error.message.contains("STM32F4 Discovery"))
+    }
+
+    func testFlashSuccessProbesThenProgramsWithSafeArgumentsAndJSONOutput() throws {
+        let directory = try CLITemporaryDirectory()
+        let prefix = directory.url.appendingPathComponent("successful-openocd", isDirectory: true)
+        let openOCD = prefix.appendingPathComponent("bin/openocd")
+        try writeExecutable(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$YAGARTO_TEST_OPENOCD_LOG\"\nexit 0\n",
+            to: openOCD
+        )
+        let board = prefix.appendingPathComponent(
+            "share/openocd/scripts/board/stm32f4discovery.cfg"
+        )
+        try FileManager.default.createDirectory(
+            at: board.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data("# fake board config\n".utf8).write(to: board)
+        let log = directory.url.appendingPathComponent("openocd-arguments.log")
+
+        let result = try runCLI(
+            [
+                "flash", "固件; shutdown.elf",
+                "--profile", "stm32f4-discovery",
+                "--yes",
+                "--format", "json"
+            ],
+            in: directory.url,
+            environment: [
+                "PATH": "\(prefix.appendingPathComponent("bin").path):/usr/bin:/bin",
+                "YAGARTO_TEST_OPENOCD_LOG": log.path
+            ]
+        )
+
+        XCTAssertEqual(result.status, 0, result.stderr)
+        let payload = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(result.stdout.utf8)) as? [String: Any]
+        )
+        XCTAssertEqual(payload["status"] as? String, "ok")
+        XCTAssertEqual(payload["profile"] as? String, "stm32f4-discovery")
+        XCTAssertTrue((payload["elf"] as? String)?.hasSuffix("/固件; shutdown.elf") == true)
+        let arguments = try String(contentsOf: log, encoding: .utf8)
+        XCTAssertTrue(arguments.contains("\ninit\n"))
+        XCTAssertTrue(arguments.contains("\nshutdown\n"))
+        XCTAssertTrue(arguments.contains("program {"))
+        XCTAssertTrue(arguments.contains("固件; shutdown.elf} verify reset exit"))
+    }
+
     func testBuildWithoutConfigurationOrSourceUsesConfigurationExitCode() throws {
         let directory = try CLITemporaryDirectory()
 
@@ -406,6 +701,39 @@ final class CLIIntegrationTests: XCTestCase {
             JSONSerialization.jsonObject(with: Data(disassembly.stdout.utf8)) as? [String: Any]
         )
         XCTAssertTrue((payload["disassembly"] as? String)?.contains("<start>") == true)
+    }
+
+    func testCortexBuildWithOnlyPreprocessedSourceResolvesStartupAssemblerAndReportsArtifact() throws {
+        let directory = try CLITemporaryDirectory()
+        try Data(".global user_main\nuser_main:\n  bx lr\n".utf8).write(
+            to: directory.url.appendingPathComponent("demo.S")
+        )
+        try ConfigStore(projectDirectory: directory.url).save(ProjectConfiguration(
+            profile: .cortexM4,
+            entry: "user_main",
+            sources: ["demo.S"],
+            outputName: "firmware"
+        ))
+        let tools = directory.url.appendingPathComponent("build-tools", isDirectory: true)
+        for tool in [
+            "arm-none-eabi-as", "arm-none-eabi-gcc", "arm-none-eabi-ld",
+            "arm-none-eabi-objcopy", "arm-none-eabi-objdump"
+        ] {
+            try writeExecutable("#!/bin/sh\nexit 0\n", to: tools.appendingPathComponent(tool))
+        }
+
+        let result = try runCLI(
+            ["build", "--format", "json"],
+            in: directory.url,
+            environment: ["PATH": "\(tools.path):/usr/bin:/bin"]
+        )
+
+        XCTAssertEqual(result.status, 0, result.stderr)
+        let payload = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(result.stdout.utf8)) as? [String: Any]
+        )
+        let artifacts = try XCTUnwrap(payload["artifacts"] as? [String])
+        XCTAssertTrue(artifacts.contains(where: { $0.hasSuffix("/cortex-m4-startup.o") }))
     }
 
     func testRealBuildRejectsPreexistingMapSymlinkWithoutChangingVictim() throws {
@@ -485,18 +813,24 @@ private func requireARMBuildTools() throws {
     }
 }
 
-private func runCLI(_ arguments: [String], in directory: URL) throws -> CLIResult {
+private func runCLI(
+    _ arguments: [String],
+    in directory: URL,
+    environment: [String: String] = [:]
+) throws -> CLIResult {
     try runCapturedProcess(
         executable: cliExecutableURL(),
         arguments: arguments,
-        in: directory
+        in: directory,
+        environment: environment
     )
 }
 
 private func runCapturedProcess(
     executable: URL,
     arguments: [String],
-    in directory: URL
+    in directory: URL,
+    environment: [String: String] = [:]
 ) throws -> CLIResult {
     let captureDirectory = FileManager.default.temporaryDirectory
         .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -515,6 +849,10 @@ private func runCapturedProcess(
     process.executableURL = executable
     process.arguments = arguments
     process.currentDirectoryURL = directory
+    process.environment = ProcessInfo.processInfo.environment.merging(
+        environment,
+        uniquingKeysWith: { _, override in override }
+    )
     process.standardOutput = stdoutHandle
     process.standardError = stderrHandle
     try process.run()
@@ -527,6 +865,18 @@ private func runCapturedProcess(
         status: process.terminationStatus,
         stdout: String(decoding: stdout, as: UTF8.self),
         stderr: String(decoding: stderr, as: UTF8.self)
+    )
+}
+
+private func writeExecutable(_ contents: String, to url: URL) throws {
+    try FileManager.default.createDirectory(
+        at: url.deletingLastPathComponent(),
+        withIntermediateDirectories: true
+    )
+    try Data(contents.utf8).write(to: url)
+    try FileManager.default.setAttributes(
+        [.posixPermissions: 0o755],
+        ofItemAtPath: url.path
     )
 }
 

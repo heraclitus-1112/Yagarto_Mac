@@ -44,6 +44,9 @@ struct BuildCommand: ParsableCommand {
         for source in configuration.sources {
             requiredTools.insert(source.hasSuffix(".S") ? .compiler : .assembler)
         }
+        if configuration.profile.startupSourceName != nil {
+            requiredTools.insert(.assembler)
+        }
         var toolPaths: [ToolIdentifier: String] = [:]
         for tool in ToolIdentifier.allCases where requiredTools.contains(tool) {
             toolPaths[tool] = try resolver.resolve(tool)
@@ -58,12 +61,7 @@ struct BuildCommand: ParsableCommand {
         let output = BuildOutput(
             status: "ok",
             profile: configuration.profile,
-            artifacts: [
-                plan.elfFile.path,
-                plan.mapFile.path,
-                plan.binaryFile.path,
-                plan.listingFile.path
-            ] + plan.objectFiles.map(\.path)
+            artifacts: plan.artifactFiles.map(\.path)
         )
         switch format {
         case .json:

@@ -50,11 +50,42 @@ public protocol ProcessRunning {
     func run(_ command: CommandSpec) throws -> ProcessResult
 }
 
+public struct ProcessTermination: Codable, Equatable, Sendable {
+    public enum Reason: String, Codable, Sendable {
+        case exit
+        case uncaughtSignal
+    }
+
+    public let reason: Reason
+    public let status: Int32
+
+    public init(reason: Reason, status: Int32) {
+        self.reason = reason
+        self.status = status
+    }
+}
+
 public struct ProcessRunner: ProcessRunning {
     private let temporaryDirectory: URL
+    private let interactiveExecution: (CommandSpec) throws -> ProcessTermination
 
-    public init(temporaryDirectory: URL = FileManager.default.temporaryDirectory) {
+    public init(
+        temporaryDirectory: URL = FileManager.default.temporaryDirectory,
+        interactiveExecution: ((CommandSpec) throws -> ProcessTermination)? = nil
+    ) {
         self.temporaryDirectory = temporaryDirectory
+        self.interactiveExecution = interactiveExecution ?? Self.executeInteractively
+    }
+
+    public func runInteractive(_ command: CommandSpec) throws -> Int32 {
+        let termination = try interactiveExecution(command)
+        if termination.reason == .uncaughtSignal && termination.status == SIGINT {
+            return YagartoExitCode.interrupted.rawValue
+        }
+        if termination.reason == .uncaughtSignal {
+            return 128 + termination.status
+        }
+        return termination.status
     }
 
     public func run(_ command: CommandSpec) throws -> ProcessResult {
@@ -128,5 +159,30 @@ public struct ProcessRunner: ProcessRunning {
             stdout: String(decoding: stdoutData, as: UTF8.self),
             stderr: String(decoding: stderrData, as: UTF8.self)
         )
+    }
+
+    private static func executeInteractively(_ command: CommandSpec) throws -> ProcessTermination {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: command.executable)
+        process.arguments = command.args
+        process.currentDirectoryURL = command.workingDirectory
+        process.standardInput = FileHandle.standardInput
+        process.standardOutput = FileHandle.standardOutput
+        process.standardError = FileHandle.standardError
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            throw YagartoError.processLaunchFailed(
+                command.executable,
+                error.localizedDescription
+            )
+        }
+
+        let reason: ProcessTermination.Reason = process.terminationReason == .uncaughtSignal
+            ? .uncaughtSignal
+            : .exit
+        return ProcessTermination(reason: reason, status: process.terminationStatus)
     }
 }

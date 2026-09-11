@@ -150,6 +150,26 @@ private struct CLIUsageDiagnostic {
             return
         }
 
+        if supplied.first == "flash", !supplied.contains("--yes") {
+            diagnostic = Diagnostic(
+                code: "usage.confirmation_required",
+                message: "flash 会写入真实硬件；请确认目标后显式提供 --yes。",
+                details: "缺少参数：--yes"
+            )
+            return
+        }
+
+        if supplied.first == "flash",
+           let profile = Self.optionValue("--profile", in: supplied),
+           profile != ProfileID.stm32f4Discovery.rawValue {
+            diagnostic = Diagnostic(
+                code: "usage.unsupported_profile",
+                message: "flash 仅支持 stm32f4-discovery profile。",
+                details: "输入 profile：\(profile)"
+            )
+            return
+        }
+
         let joined = supplied.joined(separator: " ")
         diagnostic = Diagnostic(
             code: "usage.invalid_invocation",
@@ -172,6 +192,10 @@ private struct CLIUsageDiagnostic {
             return common.union(["--profile"])
         case "doctor", "build", "disassemble":
             return common
+        case "run", "debug":
+            return common.union(["--profile", "--dry-run"])
+        case "flash":
+            return common.union(["--profile", "--yes"])
         case "profile":
             return common
         default:
@@ -185,5 +209,16 @@ private struct CLIUsageDiagnostic {
             message: "参数 --profile 的值“\(value)”无效；可选值：\(profileChoices)。请修改后重试。",
             details: "参数：--profile；输入：\(value)"
         )
+    }
+
+    private static func optionValue(_ option: String, in arguments: [String]) -> String? {
+        if let attached = arguments.first(where: { $0.hasPrefix("\(option)=") }) {
+            return String(attached.dropFirst(option.count + 1))
+        }
+        guard let index = arguments.firstIndex(of: option),
+              arguments.indices.contains(index + 1) else {
+            return nil
+        }
+        return arguments[index + 1]
     }
 }

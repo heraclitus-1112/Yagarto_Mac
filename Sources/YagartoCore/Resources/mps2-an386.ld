@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
-ENTRY(start)
+ENTRY(Reset_Handler)
 
 MEMORY
 {
@@ -23,6 +23,7 @@ SECTIONS
         *(.data*)
         __data_end__ = .;
     } > RAM AT > CODE
+    __data_load__ = LOADADDR(.data);
 
     .bss (NOLOAD) :
     {

@@ -20,6 +20,12 @@ struct DisassemblyOutput: Encodable {
     let disassembly: String
 }
 
+struct FlashOutput: Encodable {
+    let status: String
+    let profile: ProfileID
+    let elf: String
+}
+
 func currentDirectory() -> URL {
     URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
 }

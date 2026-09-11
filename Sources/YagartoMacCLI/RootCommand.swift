@@ -13,7 +13,10 @@ struct YagartoCLI: ParsableCommand {
             InitCommand.self,
             ProfileCommand.self,
             BuildCommand.self,
-            DisassembleCommand.self
+            DisassembleCommand.self,
+            RunCommand.self,
+            DebugCommand.self,
+            FlashCommand.self
         ]
     )
 }

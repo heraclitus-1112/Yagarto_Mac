@@ -109,6 +109,45 @@ enum ProjectPathGuard {
         }
     }
 
+    static func createExclusiveArtifact(
+        _ artifact: URL,
+        outputDirectory: URL
+    ) throws {
+        try validateArtifactPaths([artifact], outputDirectory: outputDirectory)
+        let candidate = artifact.standardizedFileURL
+        let descriptor = candidate.withUnsafeFileSystemRepresentation { path in
+            guard let path else { return Int32(-1) }
+            return Darwin.open(
+                path,
+                O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
+                S_IRUSR | S_IWUSR
+            )
+        }
+        guard descriptor >= 0 else {
+            let errorCode = errno
+            if errorCode == EEXIST || errorCode == ELOOP {
+                if let existing = try metadata(at: candidate), isSymbolicLink(existing) {
+                    throw YagartoError.outputSymlink(candidate.path)
+                }
+                throw YagartoError.outputArtifactExists(candidate.path)
+            }
+            throw YagartoError.cannotWriteOutput(
+                candidate.path,
+                String(cString: strerror(errorCode))
+            )
+        }
+        defer { Darwin.close(descriptor) }
+
+        guard let created = try metadata(at: candidate),
+              (created.st_mode & S_IFMT) == S_IFREG,
+              created.st_nlink == 1 else {
+            _ = candidate.withUnsafeFileSystemRepresentation { path in
+                path.map(Darwin.unlink) ?? Int32(-1)
+            }
+            throw YagartoError.outputArtifactExists(candidate.path)
+        }
+    }
+
     private static func outputComponents(
         projectDirectory: URL,
         outputDirectory: URL
