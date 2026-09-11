@@ -70,6 +70,25 @@ if $INSTALLER --install --yes --init-file "$NON_FILE" >/dev/null 2>&1; then
     fail '非普通文件目标应被拒绝'
 fi
 
+HARDLINK_INIT=$TEMP_ROOT/hardlink.el
+HARDLINK_ALIAS=$TEMP_ROOT/hardlink-alias.el
+printf '%s\n' ';; hardlink original' >"$HARDLINK_INIT"
+ln "$HARDLINK_INIT" "$HARDLINK_ALIAS"
+if $INSTALLER --install --yes --init-file "$HARDLINK_INIT" >/dev/null 2>&1; then
+    fail '具有多个硬链接的 init 文件应被拒绝'
+fi
+[ "$(cat "$HARDLINK_ALIAS")" = ';; hardlink original' ] \
+    || fail '拒绝硬链接目标时修改了共享 inode'
+
+WRITABLE_INIT=$TEMP_ROOT/world-writable.el
+printf '%s\n' ';; unsafe permissions' >"$WRITABLE_INIT"
+chmod 0666 "$WRITABLE_INIT"
+if $INSTALLER --install --yes --init-file "$WRITABLE_INIT" >/dev/null 2>&1; then
+    fail '组或其他用户可写的 init 文件应被拒绝'
+fi
+[ "$(cat "$WRITABLE_INIT")" = ';; unsafe permissions' ] \
+    || fail '拒绝不安全权限时修改了 init 文件'
+
 if $INSTALLER --install --yes --init-file / >/dev/null 2>&1; then
     fail '危险根路径应被拒绝'
 fi

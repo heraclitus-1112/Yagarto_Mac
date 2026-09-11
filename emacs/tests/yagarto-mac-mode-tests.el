@@ -53,6 +53,19 @@
      (elf . "/tmp/中文 项目/演示.elf")
      (projectDirectory . "/tmp/中文 项目"))))
 
+(defun yagarto-mac-test--debug-json-with-arrays
+    (gdb-arguments init-commands warnings)
+  "Return debug JSON using raw array values supplied by the caller."
+  (json-encode
+   `((profile . "arm7tdmi")
+     (backend . "gdb-simulator")
+     (gdbExecutable . "/tmp/中文 工具/fake-gdb")
+     (gdbArguments . ,gdb-arguments)
+     (initCommands . ,init-commands)
+     (warnings . ,warnings)
+     (elf . "/tmp/中文 项目/演示.elf")
+     (projectDirectory . "/tmp/中文 项目"))))
+
 (defun yagarto-mac-test--user-error-message (function)
   "Call FUNCTION and return its `user-error' message."
   (condition-case error-data
@@ -312,6 +325,62 @@
     (should-error (yagarto-mac--parse-debug-plan missing) :type 'user-error)
     (should-error (yagarto-mac--parse-debug-plan wrong-type) :type 'user-error)))
 
+(ert-deftest yagarto-mac-debug-distinguishes-null-from-empty-arrays ()
+  (should-not (eq yagarto-mac--json-null nil))
+  (let ((empty-plan
+         (yagarto-mac--parse-debug-plan
+          (yagarto-mac-test--debug-json-with-arrays [] [] []))))
+    (should-not (plist-get empty-plan :gdb-arguments))
+    (should-not (plist-get empty-plan :init-commands))
+    (should-not (plist-get empty-plan :warnings)))
+  (dolist (values '((nil [] []) ([] nil []) ([] [] nil)))
+    (should-error
+     (yagarto-mac--parse-debug-plan
+      (apply #'yagarto-mac-test--debug-json-with-arrays values))
+     :type 'user-error))
+  (dolist (values '(([nil] [] []) ([] [nil] []) ([] [] [nil])))
+    (should-error
+     (yagarto-mac--parse-debug-plan
+      (apply #'yagarto-mac-test--debug-json-with-arrays values))
+     :type 'user-error)))
+
+(ert-deftest yagarto-mac-debug-rejects-trailing-json-content ()
+  (let ((json (yagarto-mac-test--debug-json nil)))
+    (should (yagarto-mac--parse-debug-plan (concat json " \t\r\n")))
+    (should-error (yagarto-mac--parse-debug-plan (concat json " garbage"))
+                  :type 'user-error)
+    (should-error (yagarto-mac--parse-debug-plan (concat json " {}"))
+                  :type 'user-error)))
+
+(ert-deftest yagarto-mac-gdb-command-normalizes-ex-options-and-round-trips ()
+  (let* ((file-command
+          "file \"/tmp/中文 路径/a\\\\b \\\"quoted\\\".elf\"")
+         (set-command
+          "set substitute-path \"C:\\\\课程 源码\" \"/tmp/新 路径\"")
+         (plan (list :gdb-executable "/tmp/工具 \\\"目录/fake\\\\gdb"
+                     :gdb-arguments
+                     (list "-q" "-nx"
+                           "-ex" file-command
+                           (concat "-ex=" set-command)
+                           "-ex" "tbreak 课程入口")
+                     :init-commands '("DO NOT EXECUTE")))
+         (expected (list "/tmp/工具 \\\"目录/fake\\\\gdb"
+                         "-i=mi" "-q" "-nx"
+                         (concat "-ex=" file-command)
+                         (concat "-ex=" set-command)
+                         "-ex=tbreak 课程入口"))
+         (command (yagarto-mac--gdb-command plan)))
+    (should (equal (split-string-and-unquote command) expected))
+    (should-not (string-match-p "DO NOT EXECUTE" command))))
+
+(ert-deftest yagarto-mac-gdb-command-rejects-isolated-ex-option ()
+  (should-error
+   (yagarto-mac--gdb-command
+    (list :gdb-executable "/tmp/fake-gdb"
+          :gdb-arguments '("-q" "-ex")
+          :init-commands nil))
+   :type 'user-error))
+
 (ert-deftest yagarto-mac-debug-runs-dry-plan-in-gdb-mi-many-windows-after-warning ()
   (let* ((root (yagarto-mac-test--project))
          (source (expand-file-name "课程 示例.s" root))
@@ -346,15 +415,81 @@
           (should (eq (car (nth 3 process-call)) t))
           (should (stringp (cadr (nth 3 process-call))))
           (should many-windows)
-          (should (equal gdb-command
-                         (mapconcat
-                          #'shell-quote-argument
-                          '("/opt/工具 套件/arm-none-eabi-gdb"
-                            "-i=mi" "-q" "-nx" "-ex"
-                            "file \"/tmp/中文 项目/演示.elf\""
-                            "-ex" "tbreak start" "-ex" "continue")
-                          " ")))
+          (should
+           (equal
+            (split-string-and-unquote gdb-command)
+            '("/opt/工具 套件/arm-none-eabi-gdb"
+              "-i=mi" "-q" "-nx"
+              "-ex=file \"/tmp/中文 项目/演示.elf\""
+              "-ex=tbreak start" "-ex=continue")))
           (should (equal (mapcar #'car (nreverse events)) '(warning gdb))))
+      (delete-directory root t))))
+
+(ert-deftest yagarto-mac-gdb-command-survives-real-gud-common-init ()
+  (skip-unless (file-executable-p "/bin/sh"))
+  (let* ((root (make-temp-file "yagarto GUD 中文 " t))
+         (fake-gdb (expand-file-name "fake \\\"gdb\\\\工具" root))
+         (argument-log (expand-file-name "收到 argv.txt" root))
+         (file-command
+          "file \"/tmp/中文 路径/a\\\\b \\\"quoted\\\".elf\"")
+         (set-command
+          "set substitute-path \"C:\\\\课程\" \"/tmp/新 路径\"")
+         (plan (list :gdb-executable fake-gdb
+                     :gdb-arguments
+                     (list "-q" "-nx" "-ex" file-command
+                           "-ex" set-command "-ex=tbreak 课程入口")
+                     :init-commands '("DO NOT EXECUTE")))
+         (expected (list "-i=mi" "-q" "-nx"
+                         (concat "-ex=" file-command)
+                         (concat "-ex=" set-command)
+                         "-ex=tbreak 课程入口"))
+         (buffers-before (buffer-list))
+         debugger-buffer debugger-process actual)
+    (unwind-protect
+        (progn
+          (with-temp-file fake-gdb
+            (insert "#!/bin/sh\n"
+                    "printf '%s\\n' \"$@\" >\"$YAGARTO_FAKE_GDB_ARGS\"\n"
+                    "printf '%s\\n' '(gdb)'\n"
+                    "sleep 0.2\n"))
+          (set-file-modes fake-gdb #o700)
+          (let ((process-environment (copy-sequence process-environment))
+                (default-directory (file-name-as-directory root)))
+            (setenv "YAGARTO_FAKE_GDB_ARGS" argument-log)
+            (condition-case error-data
+                (save-window-excursion
+                  (gud-common-init (yagarto-mac--gdb-command plan)
+                                   nil #'identity)
+                  (setq debugger-buffer (current-buffer)
+                        debugger-process (get-buffer-process
+                                          debugger-buffer)))
+              (end-of-file
+               (ert-fail (format "GUD command line raised end-of-file: %S"
+                                 error-data))))
+            (when debugger-process
+              (set-process-query-on-exit-flag debugger-process nil))
+            (let ((deadline (+ (float-time) 1.0)))
+              (while (and (not (file-exists-p argument-log))
+                          (< (float-time) deadline))
+                (accept-process-output debugger-process 0.05)))
+            (should (file-exists-p argument-log))
+            (with-temp-buffer
+              (let ((coding-system-for-read 'utf-8-unix))
+                (insert-file-contents argument-log))
+              (setq actual (split-string (buffer-string) "\n" t)))
+            (should (equal actual expected))))
+      (when debugger-process
+        (set-process-query-on-exit-flag debugger-process nil)
+        (when (process-live-p debugger-process)
+          (delete-process debugger-process)))
+      (dolist (buffer (buffer-list))
+        (when (and (not (memq buffer buffers-before))
+                   (buffer-live-p buffer))
+          (with-current-buffer buffer
+            (when-let ((process (get-buffer-process buffer)))
+              (set-process-query-on-exit-flag process nil))
+            (let ((kill-buffer-query-functions nil))
+              (kill-buffer buffer)))))
       (delete-directory root t))))
 
 (ert-deftest yagarto-mac-debug-keeps-wrapper-stderr-out-of-success-json ()

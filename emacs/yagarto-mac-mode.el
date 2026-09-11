@@ -60,6 +60,9 @@
     "qemu-mps2-an386"
     "openocd-stm32f4-discovery"))
 
+(defconst yagarto-mac--json-null (make-symbol "yagarto-mac-json-null")
+  "用于区分 JSON null 与空数组的私有哨兵值。")
+
 (defconst yagarto-mac--gnu-error-regexp
   '(yagarto-mac-gnu
     "^\\(.+\\):\\([0-9]+\\):\\(?:\\([0-9]+\\):\\)?[[:space:]]*\\(?:[Ff]atal error\\|[Ee]rror\\|[Ww]arning\\|[Nn]ote\\):"
@@ -143,23 +146,30 @@
   (and (listp value)
        (cl-every #'yagarto-mac--nonempty-string-p value)))
 
-(defun yagarto-mac--parse-json-string (text context)
-  "把 TEXT 解析为 JSON alist，并在错误中说明 CONTEXT。"
+(defun yagarto-mac--parse-json-buffer (context)
+  "严格解析当前缓冲区中的 JSON，并在错误中说明 CONTEXT。"
   (condition-case error-data
-      (with-temp-buffer
-        (insert text)
-        (goto-char (point-min))
-        (let ((value (json-parse-buffer
-                      :object-type 'alist
-                      :array-type 'list
-                      :null-object nil
-                      :false-object :json-false)))
-          (unless (listp value)
-            (user-error "%s JSON 顶层必须是对象" context))
-          value))
+      (let ((value (json-parse-buffer
+                    :object-type 'alist
+                    :array-type 'list
+                    :null-object yagarto-mac--json-null
+                    :false-object :json-false)))
+        (skip-chars-forward " \t\r\n")
+        (unless (eobp)
+          (user-error "%s JSON 含有尾随内容或第二个对象" context))
+        (unless (listp value)
+          (user-error "%s JSON 顶层必须是对象" context))
+        value)
     (json-error
      (user-error "%s JSON 无法解析：%s" context
                  (error-message-string error-data)))))
+
+(defun yagarto-mac--parse-json-string (text context)
+  "把 TEXT 严格解析为 JSON alist，并在错误中说明 CONTEXT。"
+  (with-temp-buffer
+    (insert text)
+    (goto-char (point-min))
+    (yagarto-mac--parse-json-buffer context)))
 
 (defun yagarto-mac--configuration-mtime (file)
   "返回 FILE 的修改时间；无法读取时返回 nil。"
@@ -173,20 +183,11 @@
         (with-temp-buffer
           (insert-file-contents file)
           (goto-char (point-min))
-          (setq object
-                (json-parse-buffer
-                 :object-type 'alist
-                 :array-type 'list
-                 :null-object nil
-                 :false-object :json-false)))
-      (json-error
-       (user-error "项目配置 JSON 无法解析（%s）：%s"
-                   file (error-message-string error-data)))
+          (setq object (yagarto-mac--parse-json-buffer
+                        (format "项目配置（%s）" file))))
       (file-error
        (user-error "无法读取项目配置（%s）：%s"
                    file (error-message-string error-data))))
-    (unless (listp object)
-      (user-error "项目配置 JSON 顶层必须是对象：%s" file))
     (let ((schema (yagarto-mac--required-json-field
                    object 'schemaVersion #'integerp "整数"))
           (profile (yagarto-mac--required-json-field
@@ -536,13 +537,30 @@ QUIET 非 nil 时把错误保存为模式行状态而不触发错误。"
           :elf elf
           :project-directory project-directory)))
 
+(defun yagarto-mac--normalize-gdb-arguments (arguments)
+  "把 ARGUMENTS 中的 `-ex CMD' 规范化为单个 `-ex=CMD' argv。"
+  (let (normalized)
+    (while arguments
+      (let ((argument (pop arguments)))
+        (if (equal argument "-ex")
+            (progn
+              (unless arguments
+                (user-error "调试计划 gdbArguments 含有孤立的 `-ex'"))
+              (push (concat "-ex=" (pop arguments)) normalized))
+          (push argument normalized))))
+    (nreverse normalized)))
+
 (defun yagarto-mac--gdb-command (plan)
-  "把规范化 PLAN 转换为 Emacs GDB/MI 安全命令字符串。"
-  (let* ((arguments (plist-get plan :gdb-arguments))
+  "把规范化 PLAN 转换为 Emacs GDB/MI 可逆命令字符串。"
+  (let* ((arguments (yagarto-mac--normalize-gdb-arguments
+                     (copy-sequence (plist-get plan :gdb-arguments))))
          (mi-arguments (if (member "-i=mi" arguments)
                            arguments
                          (cons "-i=mi" arguments))))
-    (yagarto-mac--shell-command
+    ;; `gud-common-init' 用 `split-string-and-unquote' 逆向解析此字符串；
+    ;; combine-and-quote-strings 是对应的编码器。不要在这里执行 initCommands：
+    ;; CLI 已把每条初始化指令放入 gdbArguments 的 -ex 参数。
+    (combine-and-quote-strings
      (cons (plist-get plan :gdb-executable) mi-arguments))))
 
 ;;;###autoload

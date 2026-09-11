@@ -29,7 +29,7 @@ scripts/install-emacs.sh --install --yes \
   --init-file "/Users/me/配置 目录/init.el"
 ```
 
-安装器拒绝相对路径、符号链接、非普通文件和危险目录目标；首次修改已有文件时保留 `.yagarto-mac.bak`，再以同目录临时文件原子替换。带完整 begin/end 标记的重复安装不会再次写入。没有确认、输入非 `yes` 或安全检查失败时不会修改 init 文件。
+安装器拒绝相对路径、符号链接、非普通文件、多个硬链接、非当前用户所有、组/其他用户可写和危险目录目标；首次修改已有文件时保留 `.yagarto-mac.bak`，再以同目录临时文件原子替换。它会在第一次读取标记前取得 init 同目录的排他锁，并持有到备份及原子替换完成；并发调用者等待后重新检查，带完整 begin/end 标记的重复安装不会再次写入。等待默认最多 15 秒，超时会区分仍存活的 owner 与可能的陈旧锁；确需测试或自动化缩短等待时可显式设置正整数环境变量 `YAGARTO_EMACS_INSTALL_LOCK_TIMEOUT_SECONDS`。信号或写入失败只释放本进程 token 所拥有的锁。没有确认、输入非 `yes` 或安全检查失败时不会修改 init 文件。
 
 也可以手动使用 `--print` 的四行片段。若 CLI 不在 `PATH`，在 init 中加入绝对路径：
 
@@ -89,7 +89,7 @@ Emacs 不自行开启 TCP 监听端口。它先在项目根执行：
 yagarto-mac debug --dry-run --format json
 ```
 
-解析器严格验证当前成功 schema 的 `profile`、`backend`、`gdbExecutable`、`gdbArguments`、`initCommands`、`warnings`、`elf`、`projectDirectory` 类型。CLI 返回非零时则读取现有错误 envelope。验证成功后，Emacs 为 GDB 参数加入 `-i=mi`，对每个 argv 单独安全引用，设置 `gdb-many-windows` 为 `t`，再交给内置 `gdb`。
+解析器严格验证当前成功 schema 的 `profile`、`backend`、`gdbExecutable`、`gdbArguments`、`initCommands`、`warnings`、`elf`、`projectDirectory` 类型；`null` 不会被误当作空数组，JSON 后也只允许空白，拒绝尾随垃圾或第二个对象。CLI 返回非零时则读取现有错误 envelope。验证成功后，Emacs 为 GDB 参数加入 `-i=mi`，把每对 `-ex`、`CMD` 规范化为单个 `-ex=CMD` argv，再用与 GUD `split-string-and-unquote` 对应的编码器生成命令字符串；这可避免 GUD 把 CMD 误判为 inferior。`initCommands` 只用于 schema 校验，不会被 Emacs 重复执行，因为 CLI 已把它们纳入 `gdbArguments`。最后设置 `gdb-many-windows` 为 `t`，再交给内置 `gdb`。
 
 入口临时断点由 CLI 计划提供。ARM7 若回退到 ARM926/QEMU，`ARM926 是 ARM7TDMI 兼容超集，非精确模型` 会在 GDB 启动前以醒目 warning 显示。
 
@@ -108,6 +108,7 @@ yagarto-mac debug --dry-run --format json
 ```sh
 scripts/test-emacs.sh
 scripts/test-install-emacs.sh
+scripts/test-install-emacs-concurrency.sh
 ```
 
 测试脚本优先使用 `$EMACS`，否则自动发现 `/Applications/Emacs.app/Contents/MacOS/Emacs` 或 `PATH` 中的 `emacs`。
