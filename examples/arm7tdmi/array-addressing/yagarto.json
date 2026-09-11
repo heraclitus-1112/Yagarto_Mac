@@ -1,0 +1,9 @@
+{
+  "entry": "start",
+  "outputName": "array-addressing",
+  "profile": "arm7tdmi",
+  "schemaVersion": 1,
+  "sources": [
+    "array-addressing.s"
+  ]
+}

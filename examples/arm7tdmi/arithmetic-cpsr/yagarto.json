@@ -1,0 +1,9 @@
+{
+  "entry": "start",
+  "outputName": "arithmetic-cpsr",
+  "profile": "arm7tdmi",
+  "schemaVersion": 1,
+  "sources": [
+    "arithmetic-cpsr.s"
+  ]
+}

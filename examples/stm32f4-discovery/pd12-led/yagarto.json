@@ -1,0 +1,9 @@
+{
+  "entry": "main",
+  "outputName": "pd12-led",
+  "profile": "stm32f4-discovery",
+  "schemaVersion": 1,
+  "sources": [
+    "pd12-led.s"
+  ]
+}

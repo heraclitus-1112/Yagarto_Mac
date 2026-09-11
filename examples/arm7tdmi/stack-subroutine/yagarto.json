@@ -1,0 +1,9 @@
+{
+  "entry": "start",
+  "outputName": "stack-subroutine",
+  "profile": "arm7tdmi",
+  "schemaVersion": 1,
+  "sources": [
+    "stack-subroutine.s"
+  ]
+}

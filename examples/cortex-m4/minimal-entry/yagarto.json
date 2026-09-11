@@ -1,0 +1,9 @@
+{
+  "entry": "main",
+  "outputName": "minimal-entry",
+  "profile": "cortex-m4",
+  "schemaVersion": 1,
+  "sources": [
+    "minimal-entry.s"
+  ]
+}

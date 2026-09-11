@@ -1,0 +1,9 @@
+{
+  "entry": "start",
+  "outputName": "conditional-branch",
+  "profile": "arm7tdmi",
+  "schemaVersion": 1,
+  "sources": [
+    "conditional-branch.s"
+  ]
+}

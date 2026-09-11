@@ -2,7 +2,20 @@
 
 YAGARTO Mac 是一个面向 macOS 的非官方 YAGARTO 兼容命令行层，不隶属于原 YAGARTO 项目或 Arm，也不分发旧版 YAGARTO 二进制。
 
+> **非官方兼容实现：** 本项目不是原 YAGARTO 的 macOS 版本，也不隶属于 YAGARTO、Arm、STMicroelectronics 或 GNU。它通过当前工具链复现课程所需工作流，但不会把近似模拟写成精确硬件行为。
+
 它提供 `yagarto.json` 项目配置、Arm GNU Toolchain 构建、ELF 反汇编，以及 `run`、`debug`、`flash`。三个 profile 都使用参数数组启动工具；GDB 与 QEMU/OpenOCD 通过 stdio pipe 连接，不占用固定 TCP 端口。
+
+## 文档与示例
+
+- [中文快速入门](docs/quick-start.zh-CN.md)：安装、doctor、项目命令、产物与退出码。
+- [Emacs 30.2 集成指南](docs/emacs.zh-CN.md)：安全安装、快捷键、GDB/MI、内存与进程清理。
+- [目标差异与排障](docs/targets-and-troubleshooting.zh-CN.md)：AArch64/ARM32、CPSR/xPSR、各后端边界和环境验收。
+- [原创示例](examples/)：四个 ARM7、一个 Cortex-M4、一个 STM32F4-Discovery 项目。
+
+Apple Silicon Mac 使用 AArch64，不能直接运行课程的 ARM32 ELF；Arm GNU Toolchain 能编译并不等于能模拟。选择后端前先运行 `yagarto-mac doctor`。
+
+Emacs 集成不会静默修改 init 文件。先审阅 `scripts/install-emacs.sh --print`，再由用户明确执行 `--install` 并在 TTY 输入 `yes`；完整行为见 Emacs 指南。
 
 ## 后端与边界
 
