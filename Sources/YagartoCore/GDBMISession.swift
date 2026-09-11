@@ -172,7 +172,7 @@ public actor GDBMISession {
             // A GDB command or filename may itself begin with "--interpreter" (or
             // any other option spelling). Consume value-taking options atomically.
             if optionsWithSeparateValues.contains(argument) {
-                guard index + 1 < arguments.count else {
+                guard index + 1 < arguments.count, !arguments[index + 1].isEmpty else {
                     throw GDBMISessionError.missingOptionValue(option: argument)
                 }
                 normalized.append(argument)
@@ -183,7 +183,7 @@ public actor GDBMISession {
 
             if let equalsIndex = argument.firstIndex(of: "=") {
                 let option = String(argument[..<equalsIndex])
-                if option.hasPrefix("--"), optionsWithSeparateValues.contains(option) {
+                if optionsWithSeparateValues.contains(option) {
                     let valueStart = argument.index(after: equalsIndex)
                     guard valueStart < argument.endIndex else {
                         throw GDBMISessionError.missingOptionValue(option: option)

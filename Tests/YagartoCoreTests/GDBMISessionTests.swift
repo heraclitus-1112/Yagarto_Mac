@@ -51,14 +51,7 @@ final class GDBMISessionTests: XCTestCase {
     }
 
     func testArgumentNormalizerPreservesEverySupportedValueTakingOptionPair() throws {
-        let options = [
-            "-b", "--baud", "-c", "--core", "-cd", "--cd", "-d", "--directory",
-            "-D", "--data-directory", "-e", "--exec", "-ex", "--eval-command",
-            "-iex", "--init-eval-command", "-ix", "--init-command", "-l", "-p", "--pid",
-            "-s", "--symbols", "-se", "--se", "-tty", "--tty", "-x", "--command"
-        ]
-
-        for option in options {
+        for option in supportedValueTakingOptions {
             let value = "--interpreter=value-for-\(option)"
             XCTAssertEqual(
                 try GDBMISession.normalizedArguments([option, value]),
@@ -71,21 +64,33 @@ final class GDBMISessionTests: XCTestCase {
                     .missingOptionValue(option: option)
                 )
             }
-            if option.hasPrefix("--") {
+            XCTAssertEqual(
+                try GDBMISession.normalizedArguments(["\(option)=\(value)"]),
+                ["--interpreter=mi3", "\(option)=\(value)"],
+                option
+            )
+        }
+    }
+
+    func testArgumentNormalizerRejectsEmptySeparatedAndAttachedOptionValues() throws {
+        for option in supportedValueTakingOptions + ["--interpreter", "-i"] {
+            XCTAssertThrowsError(
+                try GDBMISession.normalizedArguments([option, ""]),
+                option
+            ) { error in
                 XCTAssertEqual(
-                    try GDBMISession.normalizedArguments(["\(option)=\(value)"]),
-                    ["--interpreter=mi3", "\(option)=\(value)"],
-                    option
+                    error as? GDBMISessionError,
+                    .missingOptionValue(option: option)
                 )
-                XCTAssertThrowsError(
-                    try GDBMISession.normalizedArguments(["\(option)="]),
-                    option
-                ) { error in
-                    XCTAssertEqual(
-                        error as? GDBMISessionError,
-                        .missingOptionValue(option: option)
-                    )
-                }
+            }
+            XCTAssertThrowsError(
+                try GDBMISession.normalizedArguments(["\(option)="]),
+                option
+            ) { error in
+                XCTAssertEqual(
+                    error as? GDBMISessionError,
+                    .missingOptionValue(option: option)
+                )
             }
         }
     }
@@ -114,6 +119,14 @@ final class GDBMISessionTests: XCTestCase {
                 "--interpreter=mi3", "-q", "--", "/tmp/program",
                 "--interpreter=program-argument"
             ]
+        )
+        XCTAssertEqual(
+            try GDBMISession.normalizedArguments(["--args", "-ex", ""]),
+            ["--interpreter=mi3", "--args", "-ex", ""]
+        )
+        XCTAssertEqual(
+            try GDBMISession.normalizedArguments(["--", "-x", ""]),
+            ["--interpreter=mi3", "--", "-x", ""]
         )
     }
 
@@ -161,6 +174,38 @@ final class GDBMISessionTests: XCTestCase {
         }
         let processIdentifier = await session.processIdentifier
         XCTAssertNil(processIdentifier)
+    }
+
+    func testEmptyOptionValuesFailBeforeTheExecutableCanSpawn() async throws {
+        let fixture = try FakeGDBFixture()
+        let invalidArguments: [([String], String)] = [
+            (["-ex", ""], "-ex"),
+            (["-x", ""], "-x"),
+            (["-D", ""], "-D"),
+            (["-l", ""], "-l"),
+            (["-ex="], "-ex"),
+            (["-D="], "-D"),
+            (["-l="], "-l")
+        ]
+
+        for (index, item) in invalidArguments.enumerated() {
+            let marker = fixture.directory.appendingPathComponent("spawned-\(index)")
+            let session = GDBMISession(
+                executable: fixture.script.path,
+                arguments: item.0 + ["--spawn-marker", marker.path],
+                workingDirectory: fixture.directory
+            )
+            do {
+                try await session.start()
+                await session.shutdown(timeout: .milliseconds(100))
+                XCTFail("expected typed configuration error for \(item.1)")
+            } catch let error as GDBMISessionError {
+                XCTAssertEqual(error, .missingOptionValue(option: item.1))
+            }
+            let processIdentifier = await session.processIdentifier
+            XCTAssertNil(processIdentifier, item.1)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path), item.1)
+        }
     }
 
     func testRealProcessPreservesUnicodeWorkingDirectoryAndArgumentBoundaries() async throws {
@@ -572,6 +617,13 @@ private struct FakeGDBCapture: Codable {
     let arguments: [String]
 }
 
+private let supportedValueTakingOptions = [
+    "-b", "--baud", "-c", "--core", "-cd", "--cd", "-d", "--directory",
+    "-D", "--data-directory", "-e", "--exec", "-ex", "--eval-command",
+    "-iex", "--init-eval-command", "-ix", "--init-command", "-l", "-p", "--pid",
+    "-s", "--symbols", "-se", "--se", "-tty", "--tty", "-x", "--command"
+]
+
 private enum FakeGDBTestError: Error {
     case timeout
 }
@@ -611,6 +663,11 @@ if "--capture" in sys.argv:
     index = sys.argv.index("--capture")
     with open(sys.argv[index + 1], "w", encoding="utf-8") as handle:
         json.dump({"cwd": os.getcwd(), "arguments": sys.argv[1:]}, handle, ensure_ascii=False)
+
+if "--spawn-marker" in sys.argv:
+    index = sys.argv.index("--spawn-marker")
+    with open(sys.argv[index + 1], "w", encoding="utf-8") as handle:
+        handle.write("spawned")
 
 def out(value):
     sys.stdout.write(value + "\n")

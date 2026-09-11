@@ -33,7 +33,7 @@ MI C-string 按字节解释 `\\`、`\"`、`\n`、`\r`、`\t`、GDB 用于 ESC（
 
 ## 进程与并发语义
 
-`GDBMISession` 使用 executable、argv 数组和 cwd 直接启动进程，不经过 shell。底层用 `posix_spawn` file actions 把三根 `Pipe` 接到标准流，并用 `POSIX_SPAWN_SETPGROUP` 在 exec 前原子建立独立进程组。argv 归一化器按 GDB 参数语义扫描：只在顶层位置移除 `--interpreter`/`-i` 的分离或等号形式，再插入恰好一个 `--interpreter=mi3`；`-ex`/`--eval-command`、`-x`/`--command` 等需值选项及其紧随值作为不可拆分的一对原样保留，`--args` 或 `--` 后的参数也完全保留。因此即使命令文本或文件名长得像 `--interpreter=...`，也不会被误删。孤立的需值选项（包括空的长选项等号形式）会在启动前返回 `.missingOptionValue` 配置错误。`DebugLaunchPlan` 的所有 `-ex` 与 pipe 命令仍是原始独立 argv 元素。
+`GDBMISession` 使用 executable、argv 数组和 cwd 直接启动进程，不经过 shell。底层用 `posix_spawn` file actions 把三根 `Pipe` 接到标准流，并用 `POSIX_SPAWN_SETPGROUP` 在 exec 前原子建立独立进程组。argv 归一化器按 GDB 参数语义扫描：只在顶层位置移除 `--interpreter`/`-i` 的分离或等号形式，再插入恰好一个 `--interpreter=mi3`；`-ex`/`--eval-command`、`-x`/`--command` 等需值选项及其紧随值作为不可拆分的一对原样保留，`--args` 或 `--` 后的参数也完全保留。因此即使命令文本或文件名长得像 `--interpreter=...`，也不会被误删。孤立或空值的需值选项（包括短、长选项的空等号形式）会在启动前返回 `.missingOptionValue` 配置错误。`DebugLaunchPlan` 的所有 `-ex` 与 pipe 命令仍是原始独立 argv 元素。
 
 每个 `send(_:)` 分配单调递增 token。并发请求可以乱序完成而不会串线；`^error` 抛出含 token、原命令、GDB message 与原始记录的 `GDBMISessionError.commandFailed`。取消一个调用只恢复该请求，EOF 或进程退出会恢复所有剩余请求一次。
 
