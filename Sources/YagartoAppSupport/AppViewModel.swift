@@ -25,6 +25,7 @@ public final class AppViewModel {
     private let stopTimeout: Duration
     private var breakpointIdentifiers: [Int: String] = [:]
     private var eventTask: Task<Void, Never>?
+    private var stopTask: Task<Void, Never>?
 
     public init(
         documentService: any DocumentServicing,
@@ -42,7 +43,8 @@ public final class AppViewModel {
     public var state: DebuggerState { machine.state }
 
     public var currentExecutionLine: Int? {
-        guard let document,
+        guard state == .stopped,
+              let document,
               let location = snapshot?.location,
               SourceLocationMatcher.matches(
                   debuggerFile: location.fullName ?? location.file,
@@ -94,6 +96,8 @@ public final class AppViewModel {
         self.document = document.changingProfile(to: profile)
         latestBuild = nil
         machine = DebuggerStateMachine()
+        breakpointIdentifiers = [:]
+        clearRuntimePresentation()
     }
 
     public func save() async {
@@ -110,6 +114,8 @@ public final class AppViewModel {
         guard isEnabled(.build), let currentDocument = document else { return }
         do {
             try machine.apply(.buildStarted)
+            breakpointIdentifiers = [:]
+            clearRuntimePresentation()
             errorMessage = nil
             buildDiagnostics = []
             var buildDocument = currentDocument
@@ -121,9 +127,11 @@ public final class AppViewModel {
             latestBuild = result
             buildDiagnostics = result.diagnostics
             try machine.apply(.buildSucceeded)
+            clearRuntimePresentation()
         } catch {
             if state == .building { try? machine.apply(.buildFailed) }
             latestBuild = nil
+            clearRuntimePresentation()
             if let failure = error as? BuildServiceFailure {
                 buildDiagnostics = failure.diagnostics
             }
@@ -132,16 +140,37 @@ public final class AppViewModel {
     }
 
     public func start(_ mode: DebugMode) async {
-        guard isEnabled(mode == .run ? .run : .debug), let latestBuild else { return }
+        guard isEnabled(mode == .run ? .run : .debug),
+              let latestBuild,
+              let document else { return }
         do {
             try machine.apply(.launchStarted)
-            snapshot = nil
-            registerRows = []
+            breakpointIdentifiers = [:]
+            clearRuntimePresentation()
             try await debugService.prepare(latestBuild)
-            try await debugService.launch(mode: mode)
+            let requests = breakpoints.lines.sorted().map {
+                DebugSourceBreakpoint(file: document.sourceURL, line: $0)
+            }
+            let result = try await debugService.launch(mode: mode, breakpoints: requests)
+            breakpointIdentifiers = result.breakpointIdentifiers
+            for failure in result.failures {
+                breakpoints = breakpoints.toggling(failure.breakpoint.line)
+                debugDiagnostics.append(DebugDiagnostic(
+                    pane: .session,
+                    isCritical: false,
+                    message: "第 \(failure.breakpoint.line) 行断点同步失败，已恢复本地状态：\(failure.message)"
+                ))
+            }
+            if state == .launching {
+                try machine.apply(mode == .run ? .inferiorRunning : .inferiorStopped)
+            } else if mode == .run, state == .stopped {
+                try machine.apply(.inferiorRunning)
+            }
             errorMessage = nil
         } catch {
             if state == .launching { try? machine.apply(.launchFailed) }
+            breakpointIdentifiers = [:]
+            clearRuntimePresentation()
             present(error)
         }
     }
@@ -152,29 +181,16 @@ public final class AppViewModel {
     public func resume() async { await performDebugCommand { try await debugService.resume() } }
 
     public func stop() async {
-        guard isEnabled(.stop) else { return }
-        if state != .terminating { try? machine.apply(.terminationStarted) }
-        let completion = CompletionFlag()
-        let service = debugService
-        Task {
-            do {
-                try await service.stop()
-                await completion.finish(error: nil)
-            } catch {
-                await completion.finish(error: error.localizedDescription)
-            }
-        }
+        guard isEnabled(.stop) || state == .terminating else { return }
+        beginStopIfNeeded()
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: stopTimeout)
-        while clock.now < deadline, !(await completion.isFinished()) {
+        while clock.now < deadline, state == .terminating {
             try? await Task.sleep(for: .milliseconds(10))
         }
-        if let stopError = await completion.errorMessage() {
-            errorMessage = "停止调试器失败：\(stopError)"
-        } else if !(await completion.isFinished()) {
+        if state == .terminating {
             errorMessage = "停止调试器超时；后台清理仍在继续。"
         }
-        if state == .terminating { try? machine.apply(.terminationCompleted) }
     }
 
     public func readMemory(address: String, length: String) async {
@@ -221,8 +237,13 @@ public final class AppViewModel {
         selectedRange = diagnostic.sourceSelection(in: document.text)
     }
 
+    public func reportOperationError(_ error: Error) {
+        present(error)
+    }
+
     public func close() async {
-        if isEnabled(.stop) { await stop() }
+        if isEnabled(.stop) || state == .terminating { beginStopIfNeeded() }
+        if let stopTask { await stopTask.value }
         eventTask?.cancel()
         eventTask = nil
     }
@@ -243,6 +264,7 @@ public final class AppViewModel {
         case .stateChanged(let newState):
             transitionFromDebugger(to: newState)
         case .snapshot(let newSnapshot):
+            guard state == .stopped else { return }
             let previous = snapshot?.registers ?? []
             snapshot = newSnapshot
             registerRows = RegisterPresentation.rows(current: newSnapshot.registers, previous: previous)
@@ -252,6 +274,7 @@ public final class AppViewModel {
             console.append(entry)
         case .diagnostic(let diagnostic):
             debugDiagnostics.append(diagnostic)
+            if diagnostic.isCritical { errorMessage = diagnostic.message }
         case .eventsDropped(let total):
             debugDiagnostics.append(DebugDiagnostic(
                 pane: .session,
@@ -273,7 +296,13 @@ public final class AppViewModel {
         case (.terminating, .ready): lifecycle = .terminationCompleted
         default: lifecycle = nil
         }
-        if let lifecycle { try? machine.apply(lifecycle) }
+        if let lifecycle {
+            try? machine.apply(lifecycle)
+            if newState == .ready {
+                breakpointIdentifiers = [:]
+                clearRuntimePresentation()
+            }
+        }
     }
 
     private func performDebugCommand(_ operation: () async throws -> Void) async {
@@ -288,17 +317,33 @@ public final class AppViewModel {
     private func present(_ error: Error) {
         errorMessage = error.localizedDescription
     }
-}
 
-private actor CompletionFlag {
-    private var finished = false
-    private var error: String?
-
-    func finish(error: String?) {
-        self.error = error
-        finished = true
+    private func beginStopIfNeeded() {
+        guard stopTask == nil else { return }
+        if state != .terminating { try? machine.apply(.terminationStarted) }
+        guard state == .terminating else { return }
+        let service = debugService
+        stopTask = Task { [weak self] in
+            do {
+                try await service.stop()
+                self?.completeStop(error: nil)
+            } catch {
+                self?.completeStop(error: error.localizedDescription)
+            }
+        }
     }
 
-    func isFinished() -> Bool { finished }
-    func errorMessage() -> String? { error }
+    private func completeStop(error: String?) {
+        if state == .terminating { try? machine.apply(.terminationCompleted) }
+        breakpointIdentifiers = [:]
+        clearRuntimePresentation()
+        stopTask = nil
+        if let error { errorMessage = "停止调试器失败：\(error)" }
+    }
+
+    private func clearRuntimePresentation() {
+        snapshot = nil
+        registerRows = []
+        memory = []
+    }
 }

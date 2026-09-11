@@ -20,6 +20,8 @@ Apple Silicon Mac 使用 AArch64，不能直接运行课程的 ARM32 ELF；Arm G
 
 Phase 4 已提供 macOS 15+ 的 `YagartoMacApp`：上部为 AppKit 源码编辑器与 profile 寄存器，下部为控制台、栈、内存和反汇编。应用通过 `YagartoAppSupport` 直接复用 Core 的构建与 GDB/MI 控制器；寄存器变化、断点和当前执行行都提供非颜色标识与辅助功能文本。
 
+空状态可直接打开随应用打包的原创 ARM7 数组寻址示例；应用会先将它复制到用户的 Application Support 工作区，重复打开不会覆盖用户修改。
+
 ```sh
 scripts/build-app.sh Debug
 open dist/Debug/YagartoMacApp.app

@@ -10,6 +10,9 @@
 		A10000000000000000000002 /* WorkbenchView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000002 /* WorkbenchView.swift */; };
 		A10000000000000000000003 /* YagartoMacApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000003 /* YagartoMacApp.swift */; };
 		A10000000000000000000006 /* WindowCloseGuard.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000005 /* WindowCloseGuard.swift */; };
+		A10000000000000000000007 /* array-addressing.s in Copy Bundled Example */ = {isa = PBXBuildFile; fileRef = A20000000000000000000006 /* array-addressing.s */; };
+		A10000000000000000000008 /* yagarto.json in Copy Bundled Example */ = {isa = PBXBuildFile; fileRef = A20000000000000000000007 /* yagarto.json */; };
+		A10000000000000000000009 /* README.md in Copy Bundled Example */ = {isa = PBXBuildFile; fileRef = A20000000000000000000008 /* README.md */; };
 		A10000000000000000000004 /* YagartoAppSupport in Frameworks */ = {isa = PBXBuildFile; productRef = A90000000000000000000001 /* YagartoAppSupport */; };
 		A10000000000000000000005 /* YagartoCore in Frameworks */ = {isa = PBXBuildFile; productRef = A90000000000000000000002 /* YagartoCore */; };
 		B10000000000000000000001 /* YagartoMacAppUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000001 /* YagartoMacAppUITests.swift */; };
@@ -26,12 +29,31 @@
 		};
 /* End PBXContainerItemProxy section */
 
+/* Begin PBXCopyFilesBuildPhase section */
+		A60000000000000000000003 /* Copy Bundled Example */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "examples/arm7tdmi/array-addressing";
+			dstSubfolderSpec = 7;
+			files = (
+				A10000000000000000000007 /* array-addressing.s in Copy Bundled Example */,
+				A10000000000000000000008 /* yagarto.json in Copy Bundled Example */,
+				A10000000000000000000009 /* README.md in Copy Bundled Example */,
+			);
+			name = "Copy Bundled Example";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
 /* Begin PBXFileReference section */
 		A20000000000000000000001 /* AppRuntime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/YagartoMacApp/AppRuntime.swift; sourceTree = "<group>"; };
 		A20000000000000000000002 /* WorkbenchView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/YagartoMacApp/WorkbenchView.swift; sourceTree = "<group>"; };
 		A20000000000000000000003 /* YagartoMacApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/YagartoMacApp/YagartoMacApp.swift; sourceTree = "<group>"; };
 		A20000000000000000000004 /* YagartoMacApp.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = YagartoMacApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A20000000000000000000005 /* WindowCloseGuard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/YagartoMacApp/WindowCloseGuard.swift; sourceTree = "<group>"; };
+		A20000000000000000000006 /* array-addressing.s */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.asm; name = array-addressing.s; path = examples/arm7tdmi/array-addressing/array-addressing.s; sourceTree = SOURCE_ROOT; };
+		A20000000000000000000007 /* yagarto.json */ = {isa = PBXFileReference; lastKnownFileType = text.json; name = yagarto.json; path = examples/arm7tdmi/array-addressing/yagarto.json; sourceTree = SOURCE_ROOT; };
+		A20000000000000000000008 /* README.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; name = README.md; path = examples/arm7tdmi/array-addressing/README.md; sourceTree = SOURCE_ROOT; };
 		B20000000000000000000001 /* YagartoMacAppUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = YagartoMacAppUITests/YagartoMacAppUITests.swift; sourceTree = "<group>"; };
 		B20000000000000000000002 /* XCTest.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = XCTest.framework; path = System/Library/Frameworks/XCTest.framework; sourceTree = SDKROOT; };
 		B20000000000000000000003 /* YagartoMacAppUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = YagartoMacAppUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -62,6 +84,7 @@
 			isa = PBXGroup;
 			children = (
 				A50000000000000000000002 /* App Sources */,
+				A50000000000000000000006 /* Bundled Example */,
 				A50000000000000000000003 /* UI Tests */,
 				A50000000000000000000004 /* Frameworks */,
 				A50000000000000000000005 /* Products */,
@@ -77,6 +100,16 @@
 				A20000000000000000000005 /* WindowCloseGuard.swift */,
 			);
 			name = "App Sources";
+			sourceTree = "<group>";
+		};
+		A50000000000000000000006 /* Bundled Example */ = {
+			isa = PBXGroup;
+			children = (
+				A20000000000000000000006 /* array-addressing.s */,
+				A20000000000000000000007 /* yagarto.json */,
+				A20000000000000000000008 /* README.md */,
+			);
+			name = "Bundled Example";
 			sourceTree = "<group>";
 		};
 		A50000000000000000000003 /* UI Tests */ = {
@@ -114,6 +147,7 @@
 				A60000000000000000000001 /* Sources */,
 				A40000000000000000000001 /* Frameworks */,
 				A60000000000000000000002 /* Resources */,
+				A60000000000000000000003 /* Copy Bundled Example */,
 			);
 			buildRules = ();
 			dependencies = ();
@@ -176,7 +210,12 @@
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
-		A60000000000000000000002 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		A60000000000000000000002 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = ();
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		B60000000000000000000002 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXResourcesBuildPhase section */
 

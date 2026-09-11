@@ -83,13 +83,13 @@ public actor CoreDebugAdapter: DebugServicing {
         preparedBackend = debug.backend
     }
 
-    public func launch(mode: DebugMode) async throws {
-        let plan: DebugLaunchPlan?
-        switch mode {
-        case .debug: plan = debugPlan
-        case .run: plan = runPlan
-        }
-        guard let plan else { throw DebuggerControllerError.missingLaunchPlan }
+    public func launch(
+        mode: DebugMode,
+        breakpoints: [DebugSourceBreakpoint]
+    ) async throws -> DebugLaunchResult {
+        // Always enter through the stopped debug plan so source breakpoints exist
+        // before a user-requested run is allowed to continue.
+        guard let plan = debugPlan else { throw DebuggerControllerError.missingLaunchPlan }
         forwardingTask?.cancel()
         let newController = DebuggerController(plan: plan)
         controller = newController
@@ -100,7 +100,20 @@ public actor CoreDebugAdapter: DebugServicing {
                 await self?.publish(event)
             }
         }
-        try await newController.launch()
+        do {
+            try await newController.launch()
+            try await waitUntilStopped(newController)
+            let synchronization = await synchronize(
+                breakpoints,
+                controller: newController,
+                projectDirectory: URL(fileURLWithPath: plan.projectDirectory, isDirectory: true)
+            )
+            if mode == .run { try await newController.continue() }
+            return synchronization
+        } catch {
+            await stopAfterFailedLaunch(newController)
+            throw error
+        }
     }
 
     public func pause() async throws { try await requiredController().pause() }
@@ -114,6 +127,11 @@ public actor CoreDebugAdapter: DebugServicing {
         if state == .launching || state == .stopped || state == .running {
             try await controller.stop()
         }
+        self.controller = nil
+        let task = forwardingTask
+        forwardingTask = nil
+        task?.cancel()
+        await task?.value
     }
 
     public func readMemory(_ request: DebugMemoryRequest) async throws -> [MIMemoryBlock] {
@@ -140,5 +158,77 @@ public actor CoreDebugAdapter: DebugServicing {
 
     private func removeSubscriber(_ identifier: UUID) {
         subscribers[identifier] = nil
+    }
+
+    private func waitUntilStopped(_ controller: DebuggerController) async throws {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(5))
+        while clock.now < deadline {
+            switch await controller.currentState {
+            case .stopped:
+                return
+            case .ready, .idle, .building, .terminating:
+                throw DebuggerControllerError.commandTimedOut("等待调试入口停止")
+            case .launching, .running:
+                try await Task.sleep(for: .milliseconds(10))
+            }
+        }
+        throw DebuggerControllerError.commandTimedOut("等待调试入口停止")
+    }
+
+    private func synchronize(
+        _ breakpoints: [DebugSourceBreakpoint],
+        controller: DebuggerController,
+        projectDirectory: URL
+    ) async -> DebugLaunchResult {
+        var identifiers: [Int: String] = [:]
+        var failures: [DebugBreakpointSyncFailure] = []
+        for breakpoint in breakpoints.sorted(by: { $0.line < $1.line }) {
+            do {
+                let location = try Self.safeLocation(
+                    for: breakpoint,
+                    projectDirectory: projectDirectory
+                )
+                let remote = try await controller.setBreakpoint(location)
+                identifiers[breakpoint.line] = remote.id
+            } catch {
+                failures.append(DebugBreakpointSyncFailure(
+                    breakpoint: breakpoint,
+                    message: error.localizedDescription
+                ))
+            }
+        }
+        return DebugLaunchResult(
+            breakpointIdentifiers: identifiers,
+            failures: failures
+        )
+    }
+
+    private static func safeLocation(
+        for breakpoint: DebugSourceBreakpoint,
+        projectDirectory: URL
+    ) throws -> String {
+        guard breakpoint.line > 0 else {
+            throw DebuggerControllerError.invalidBreakpointLocation
+        }
+        let project = projectDirectory.resolvingSymlinksInPath().standardizedFileURL
+        let source = breakpoint.file.resolvingSymlinksInPath().standardizedFileURL
+        let prefix = project.path.hasSuffix("/") ? project.path : project.path + "/"
+        guard source.path.hasPrefix(prefix) else {
+            throw DebuggerControllerError.invalidBreakpointLocation
+        }
+        return "\(source.path):\(breakpoint.line)"
+    }
+
+    private func stopAfterFailedLaunch(_ failedController: DebuggerController) async {
+        let state = await failedController.currentState
+        if state == .launching || state == .stopped || state == .running {
+            try? await failedController.stop()
+        }
+        if controller === failedController { controller = nil }
+        let task = forwardingTask
+        forwardingTask = nil
+        task?.cancel()
+        await task?.value
     }
 }

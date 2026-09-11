@@ -51,6 +51,11 @@ elif grep -Eq 'required plug-in failed to load|xcodebuild failed to load a requi
   if [ -d "$resource_bundle" ]; then
     ditto "$resource_bundle" "$staging_app/Contents/Resources/YagartoMac_YagartoCore.bundle"
   fi
+  bundled_example="$staging_app/Contents/Resources/examples/arm7tdmi/array-addressing"
+  mkdir -p "$bundled_example"
+  cp "$project_root/examples/arm7tdmi/array-addressing/array-addressing.s" "$bundled_example/array-addressing.s"
+  cp "$project_root/examples/arm7tdmi/array-addressing/yagarto.json" "$bundled_example/yagarto.json"
+  cp "$project_root/examples/arm7tdmi/array-addressing/README.md" "$bundled_example/README.md"
   chmod 0755 "$staging_app/Contents/MacOS/YagartoMacApp"
   rm -rf -- "$app_path"
   mv "$staging_app" "$app_path"
@@ -66,4 +71,5 @@ plutil -lint "$app_path/Contents/Info.plist" >/dev/null
 test "$(plutil -extract CFBundleIdentifier raw -o - "$app_path/Contents/Info.plist")" = "org.yagarto.mac.app"
 test "$(plutil -extract CFBundleShortVersionString raw -o - "$app_path/Contents/Info.plist")" = "0.4.0"
 test -x "$app_path/Contents/MacOS/YagartoMacApp"
+test -f "$app_path/Contents/Resources/examples/arm7tdmi/array-addressing/yagarto.json"
 echo "$app_path"

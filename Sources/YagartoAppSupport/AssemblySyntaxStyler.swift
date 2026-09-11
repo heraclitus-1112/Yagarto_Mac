@@ -5,6 +5,7 @@ import AppKit
 @MainActor
 public enum AssemblySyntaxStyler {
     public static func apply(to textView: NSTextView) {
+        guard !textView.hasMarkedText() else { return }
         guard let storage = textView.textStorage else { return }
         let selectedRanges = textView.selectedRanges
         let fullRange = NSRange(location: 0, length: storage.length)

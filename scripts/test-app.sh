@@ -21,6 +21,18 @@ swift test --package-path "$project_root" -c debug \
 swift test --package-path "$project_root" -c release \
   -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors
 
+developer_directory=$(xcode-select -p)
+xcrun --sdk macosx swiftc \
+  -typecheck \
+  -swift-version 6 \
+  -strict-concurrency=complete \
+  -warnings-as-errors \
+  -target arm64-apple-macos15.0 \
+  -I "$developer_directory/Platforms/MacOSX.platform/Developer/usr/lib" \
+  -F "$developer_directory/Platforms/MacOSX.platform/Developer/Library/Frameworks" \
+  "$project_root/YagartoMacAppUITests/YagartoMacAppUITests.swift"
+echo "XCUITest 源码严格编译：PASS"
+
 xcode_status=0
 xcodebuild \
   -project "$project_root/YagartoMacApp.xcodeproj" \

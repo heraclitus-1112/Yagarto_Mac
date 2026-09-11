@@ -19,8 +19,16 @@ struct YagartoMacApp: App {
 
     var body: some Scene {
         WindowGroup("YAGARTO Mac") {
-            WorkbenchView(model: model, exampleURL: runtime.exampleURL)
-                .task { lifecycle.model = model }
+            WorkbenchView(
+                model: model,
+                openExample: runtime.canOpenExample ? {
+                    Task { await runtime.openExample() }
+                } : nil
+            )
+            .task {
+                lifecycle.model = model
+                lifecycle.cleanup = { runtime.cleanup() }
+            }
         }
         .defaultSize(width: 1_280, height: 820)
         .commands {
@@ -43,6 +51,11 @@ struct YagartoMacApp: App {
 @MainActor
 final class AppLifecycleDelegate: NSObject, NSApplicationDelegate {
     weak var model: AppViewModel?
+    var cleanup: (@MainActor () -> Void)?
+
+    func applicationWillTerminate(_ notification: Notification) {
+        cleanup?()
+    }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         true

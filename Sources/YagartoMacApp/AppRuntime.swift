@@ -7,22 +7,61 @@ import YagartoCore
 @MainActor
 struct AppRuntime {
     let model: AppViewModel
-    let exampleURL: URL?
     let isUITesting: Bool
+    private let exampleInstaller: ExampleWorkspaceInstaller?
+    private let uiFixture: UITestFixture?
+
+    var canOpenExample: Bool { exampleInstaller != nil || uiFixture != nil }
 
     static func make() -> AppRuntime {
         let uiTesting = ProcessInfo.processInfo.arguments.contains { $0 == "--ui-testing" }
         if uiTesting {
-            let fixture = try! UITestFixture()
-            return AppRuntime(
-                model: AppViewModel(
-                    documentService: LocalDocumentService(),
-                    buildService: UITestBuildService(),
-                    debugService: UITestDebugService()
-                ),
-                exampleURL: fixture.directory,
-                isUITesting: true
+            let recoveryScenario = ProcessInfo.processInfo.arguments.contains {
+                $0 == "--ui-testing-recovery"
+            }
+            let model = AppViewModel(
+                documentService: LocalDocumentService(),
+                buildService: UITestBuildService(),
+                debugService: UITestDebugService(recoveryScenario: recoveryScenario)
             )
+            do {
+                return AppRuntime(
+                    model: model,
+                    isUITesting: true,
+                    exampleInstaller: nil,
+                    uiFixture: try UITestFixture()
+                )
+            } catch {
+                model.reportOperationError(error)
+                return AppRuntime(
+                    model: model,
+                    isUITesting: true,
+                    exampleInstaller: nil,
+                    uiFixture: nil
+                )
+            }
+        }
+        let bundledProject = Bundle.main.resourceURL?
+            .appendingPathComponent("examples/arm7tdmi/array-addressing", isDirectory: true)
+        let applicationSupport = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first?
+            .appendingPathComponent("YAGARTO Mac", isDirectory: true)
+            .appendingPathComponent("Examples", isDirectory: true)
+        let installer: ExampleWorkspaceInstaller?
+        if let bundledProject,
+           let applicationSupport,
+           FileManager.default.fileExists(
+               atPath: bundledProject.appendingPathComponent("yagarto.json").path
+           ) {
+            installer = ExampleWorkspaceInstaller(
+                bundledProject: bundledProject,
+                applicationSupportDirectory: applicationSupport,
+                destinationName: "ARM7 数组寻址示例"
+            )
+        } else {
+            installer = nil
         }
         return AppRuntime(
             model: AppViewModel(
@@ -30,28 +69,54 @@ struct AppRuntime {
                 buildService: CoreBuildService(),
                 debugService: CoreDebugAdapter()
             ),
-            exampleURL: nil,
-            isUITesting: false
+            isUITesting: false,
+            exampleInstaller: installer,
+            uiFixture: nil
         )
+    }
+
+    func openExample() async {
+        do {
+            if let uiFixture {
+                await model.open(uiFixture.directory)
+            } else if let exampleInstaller {
+                await model.open(try await exampleInstaller.install())
+            }
+        } catch {
+            model.reportOperationError(error)
+        }
+    }
+
+    func cleanup() {
+        uiFixture?.cleanup()
     }
 }
 
-private struct UITestFixture {
-    let directory: URL
+@MainActor
+private final class UITestFixture {
+    private let owner: OwnedTemporaryWorkspace
+    var directory: URL { owner.directory }
 
     init() throws {
-        directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("YagartoMacApp-UI-\(ProcessInfo.processInfo.processIdentifier)", isDirectory: true)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let configuration = ProjectConfiguration(
-            profile: .arm7tdmi,
-            entry: "start",
-            sources: ["main.s"],
-            outputName: "ui-fixture"
-        )
-        try ConfigStore(projectDirectory: directory).save(configuration)
-        try Data("MOV r0, #1\nMOV r1, #2\n".utf8)
-            .write(to: directory.appendingPathComponent("main.s"), options: .atomic)
+        owner = try OwnedTemporaryWorkspace.create(prefix: "YagartoMacApp-UI")
+        do {
+            let configuration = ProjectConfiguration(
+                profile: .arm7tdmi,
+                entry: "start",
+                sources: ["main.s"],
+                outputName: "ui-fixture"
+            )
+            try ConfigStore(projectDirectory: directory).save(configuration)
+            try Data("MOV r0, #1\nMOV r1, #2\n".utf8)
+                .write(to: directory.appendingPathComponent("main.s"), options: .atomic)
+        } catch {
+            _ = try? owner.cleanup()
+            throw error
+        }
+    }
+
+    func cleanup() {
+        _ = try? owner.cleanup()
     }
 }
 
@@ -95,20 +160,39 @@ private actor UITestDebugService: DebugServicing {
     private let stream: AsyncStream<DebuggerEvent>
     private let continuation: AsyncStream<DebuggerEvent>.Continuation
     private var build: AppBuildResult?
+    private let recoveryScenario: Bool
+    private var launchAttempt = 0
 
-    init() {
+    init(recoveryScenario: Bool = false) {
         let pair = AsyncStream<DebuggerEvent>.makeStream(bufferingPolicy: .bufferingNewest(32))
         stream = pair.stream
         continuation = pair.continuation
+        self.recoveryScenario = recoveryScenario
     }
 
     func events() -> AsyncStream<DebuggerEvent> { stream }
     func prepare(_ build: AppBuildResult) async throws { self.build = build }
 
-    func launch(mode: DebugMode) async throws {
+    func launch(
+        mode: DebugMode,
+        breakpoints: [DebugSourceBreakpoint]
+    ) async throws -> DebugLaunchResult {
         guard build != nil else { throw DebuggerControllerError.missingLaunchPlan }
+        launchAttempt += 1
+        if recoveryScenario, launchAttempt == 1 {
+            throw UITestBackendError.launchFailed
+        }
         continuation.yield(.stateChanged(.stopped))
         continuation.yield(.snapshot(snapshot(line: 1, r0: 1)))
+        let identifiers = Dictionary(uniqueKeysWithValues: breakpoints.map { ($0.line, "\($0.line)") })
+        if recoveryScenario, launchAttempt == 2 {
+            Task { [weak self] in
+                try? await Task.sleep(for: .milliseconds(150))
+                await self?.emitUnexpectedExit()
+            }
+        }
+        if mode == .run { continuation.yield(.stateChanged(.running)) }
+        return DebugLaunchResult(breakpointIdentifiers: identifiers)
     }
 
     func pause() async throws { continuation.yield(.stateChanged(.stopped)) }
@@ -131,6 +215,16 @@ private actor UITestDebugService: DebugServicing {
         DebugBreakpoint(id: "\(line)", location: "\(file.path):\(line)")
     }
     func removeBreakpoint(identifier: String) async throws {}
+
+    private func emitUnexpectedExit() {
+        continuation.yield(.diagnostic(DebugDiagnostic(
+            pane: .session,
+            isCritical: true,
+            message: "测试调试器意外退出"
+        )))
+        continuation.yield(.stateChanged(.terminating))
+        continuation.yield(.stateChanged(.ready))
+    }
 
     private func snapshot(line: UInt64, r0: UInt64) -> DebugSnapshot {
         let source = build?.projectDirectory.appendingPathComponent("main.s")
@@ -163,5 +257,13 @@ private actor UITestDebugService: DebugServicing {
             console: [DebugConsoleEntry(channel: .console, text: "确定性 UI 调试后端")],
             diagnostics: []
         )
+    }
+}
+
+private enum UITestBackendError: Error, LocalizedError {
+    case launchFailed
+
+    var errorDescription: String? {
+        "测试后端启动失败；可以修正后重新构建并启动。"
     }
 }

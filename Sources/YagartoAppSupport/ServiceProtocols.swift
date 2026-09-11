@@ -45,10 +45,46 @@ public protocol BuildServicing: Sendable {
     func build(projectDirectory: URL) async throws -> AppBuildResult
 }
 
+public struct DebugSourceBreakpoint: Equatable, Sendable {
+    public let file: URL
+    public let line: Int
+
+    public init(file: URL, line: Int) {
+        self.file = file.standardizedFileURL
+        self.line = line
+    }
+}
+
+public struct DebugBreakpointSyncFailure: Equatable, Sendable {
+    public let breakpoint: DebugSourceBreakpoint
+    public let message: String
+
+    public init(breakpoint: DebugSourceBreakpoint, message: String) {
+        self.breakpoint = breakpoint
+        self.message = message
+    }
+}
+
+public struct DebugLaunchResult: Equatable, Sendable {
+    public let breakpointIdentifiers: [Int: String]
+    public let failures: [DebugBreakpointSyncFailure]
+
+    public init(
+        breakpointIdentifiers: [Int: String] = [:],
+        failures: [DebugBreakpointSyncFailure] = []
+    ) {
+        self.breakpointIdentifiers = breakpointIdentifiers
+        self.failures = failures
+    }
+}
+
 public protocol DebugServicing: Sendable {
     func events() async -> AsyncStream<DebuggerEvent>
     func prepare(_ build: AppBuildResult) async throws
-    func launch(mode: DebugMode) async throws
+    func launch(
+        mode: DebugMode,
+        breakpoints: [DebugSourceBreakpoint]
+    ) async throws -> DebugLaunchResult
     func pause() async throws
     func stepInstruction() async throws
     func stepOver() async throws

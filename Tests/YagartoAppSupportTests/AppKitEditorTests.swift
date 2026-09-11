@@ -29,6 +29,79 @@ final class AppKitEditorTests: XCTestCase {
         XCTAssertEqual(textView.string, "MOV r0, #1\n")
     }
 
+    func testSyntaxStylingDoesNotTouchRealMarkedTextComposition() throws {
+        let textView = NSTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))
+        textView.allowsUndo = true
+        textView.string = "MOV r0, #1"
+        textView.setSelectedRange(NSRange(location: 3, length: 0))
+        textView.setMarkedText(
+            "中文",
+            selectedRange: NSRange(location: 2, length: 0),
+            replacementRange: NSRange(location: NSNotFound, length: 0)
+        )
+        XCTAssertTrue(textView.hasMarkedText())
+        let before = NSAttributedString(attributedString: try XCTUnwrap(textView.textStorage))
+        let selection = textView.selectedRange()
+        let canUndo = textView.undoManager?.canUndo
+
+        AssemblySyntaxStyler.apply(to: textView)
+
+        XCTAssertEqual(textView.attributedString(), before)
+        XCTAssertEqual(textView.selectedRange(), selection)
+        XCTAssertEqual(textView.undoManager?.canUndo, canUndo)
+    }
+
+    func testHostedEditorDefersHighlightUntilRealCompositionEnds() throws {
+        let editor = AssemblyEditorView(
+            text: "MOV r0, #1\n",
+            breakpoints: [],
+            currentLine: nil,
+            selectionRequest: nil,
+            isEditable: true,
+            onTextChange: { _ in },
+            onToggleBreakpoint: { _ in }
+        )
+        let hosting = NSHostingView(rootView: editor.frame(width: 600, height: 300))
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 600, height: 300),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.contentView = hosting
+        defer { window.contentView = nil }
+        hosting.layoutSubtreeIfNeeded()
+        let textView = try XCTUnwrap(findTextView(in: hosting))
+        let insertion = (textView.string as NSString).length
+        textView.setSelectedRange(NSRange(location: insertion, length: 0))
+        textView.setMarkedText(
+            ".word",
+            selectedRange: NSRange(location: 5, length: 0),
+            replacementRange: NSRange(location: NSNotFound, length: 0)
+        )
+        XCTAssertTrue(textView.hasMarkedText())
+        let compositionRange = textView.markedRange()
+        textView.delegate?.textDidChange?(Notification(name: NSText.didChangeNotification, object: textView))
+        XCTAssertTrue(textView.hasMarkedText())
+        let whileMarked = textView.textStorage?.attribute(
+            .foregroundColor,
+            at: compositionRange.location,
+            effectiveRange: nil
+        ) as? NSColor
+        XCTAssertNotEqual(whileMarked, NSColor.systemPurple)
+
+        textView.unmarkText()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+
+        let afterComposition = textView.textStorage?.attribute(
+            .foregroundColor,
+            at: insertion,
+            effectiveRange: nil
+        ) as? NSColor
+        XCTAssertEqual(afterComposition, NSColor.systemPurple)
+    }
+
     func testLineEditTransformFeedsOneBasedBreakpointStrategy() {
         let insertion = LineEditTransform.between(
             oldText: "a\nb\nc\n",

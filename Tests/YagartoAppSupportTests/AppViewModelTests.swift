@@ -142,6 +142,225 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertTrue(model.debugDiagnostics.contains { $0.message.contains("断点") })
     }
 
+    func testPrelaunchBreakpointsSynchronizeOnEverySessionAndRemovalUsesCurrentRemoteID() async throws {
+        let fixture = try ViewModelFixture()
+        let debug = FakeDebugService()
+        await debug.setEmitStoppedOnLaunch(true)
+        let model = AppViewModel(
+            documentService: FakeDocumentService(document: fixture.document),
+            buildService: FakeBuildService(result: fixture.buildResult),
+            debugService: debug
+        )
+        await model.open(fixture.document.sourceURL)
+        await model.toggleBreakpoint(line: 1)
+        await model.toggleBreakpoint(line: 2)
+        await model.build()
+
+        await model.start(.debug)
+        await waitUntil { model.state == .stopped }
+        await model.stop()
+        await model.start(.debug)
+        await waitUntil { model.state == .stopped }
+        await model.toggleBreakpoint(line: 2)
+
+        let calls = await debug.calls()
+        XCTAssertEqual(calls.filter { $0.hasPrefix("setBreakpoint:") }, [
+            "setBreakpoint:1", "setBreakpoint:2",
+            "setBreakpoint:1", "setBreakpoint:2"
+        ])
+        XCTAssertTrue(calls.contains("removeBreakpoint:session-2-line-2"))
+        XCTAssertEqual(model.breakpoints.lines, [1])
+    }
+
+    func testPrelaunchBreakpointFailureRollsBackOnlyFailedLine() async throws {
+        let fixture = try ViewModelFixture()
+        let debug = FakeDebugService()
+        await debug.setEmitStoppedOnLaunch(true)
+        await debug.setBreakpointFailureLines([2])
+        let model = AppViewModel(
+            documentService: FakeDocumentService(document: fixture.document),
+            buildService: FakeBuildService(result: fixture.buildResult),
+            debugService: debug
+        )
+        await model.open(fixture.document.sourceURL)
+        await model.toggleBreakpoint(line: 1)
+        await model.toggleBreakpoint(line: 2)
+        await model.build()
+
+        await model.start(.debug)
+        await waitUntil { model.state == .stopped }
+
+        XCTAssertEqual(model.breakpoints.lines, [1])
+        XCTAssertTrue(model.debugDiagnostics.contains {
+            $0.message.contains("第 2 行") && $0.message.contains("已恢复")
+        })
+    }
+
+    func testStopTimeoutStaysTerminatingUntilBackendActuallyFinishes() async throws {
+        let fixture = try ViewModelFixture()
+        let debug = SuspendedStopDebugService()
+        let model = AppViewModel(
+            documentService: FakeDocumentService(document: fixture.document),
+            buildService: FakeBuildService(result: fixture.buildResult),
+            debugService: debug,
+            stopTimeout: .milliseconds(20)
+        )
+        await model.open(fixture.document.sourceURL)
+        await model.build()
+        await model.start(.debug)
+        await debug.emit(.stateChanged(.stopped))
+        await waitUntil { model.state == .stopped }
+
+        await model.stop()
+
+        XCTAssertEqual(model.state, .terminating)
+        XCTAssertFalse(model.isEnabled(.build))
+        XCTAssertTrue(model.errorMessage?.contains("后台清理") == true)
+        await debug.finishStop()
+        await waitUntil { model.state == .ready }
+    }
+
+    func testCloseDoesNotFinishBeforeSuspendedDebuggerCleanup() async throws {
+        let fixture = try ViewModelFixture()
+        let debug = SuspendedStopDebugService()
+        let model = AppViewModel(
+            documentService: FakeDocumentService(document: fixture.document),
+            buildService: FakeBuildService(result: fixture.buildResult),
+            debugService: debug,
+            stopTimeout: .milliseconds(20)
+        )
+        await model.open(fixture.document.sourceURL)
+        await model.build()
+        await model.start(.debug)
+        await debug.emit(.stateChanged(.stopped))
+        await waitUntil { model.state == .stopped }
+        let completion = CompletionProbe()
+
+        let closing = Task {
+            await model.close()
+            await completion.finish()
+        }
+        await debug.waitUntilStopStarted()
+        try await Task.sleep(for: .milliseconds(40))
+
+        let finishedBeforeCleanup = await completion.isFinished()
+        XCTAssertFalse(finishedBeforeCleanup)
+        XCTAssertEqual(model.state, .terminating)
+        await debug.finishStop()
+        await closing.value
+        let finishedAfterCleanup = await completion.isFinished()
+        XCTAssertTrue(finishedAfterCleanup)
+        XCTAssertEqual(model.state, .ready)
+    }
+
+    func testRuntimeDerivedStateClearsAcrossRunningStopBuildAndProfileChange() async throws {
+        let fixture = try ViewModelFixture()
+        let debug = FakeDebugService()
+        let model = AppViewModel(
+            documentService: FakeDocumentService(document: fixture.document),
+            buildService: FakeBuildService(result: fixture.buildResult),
+            debugService: debug
+        )
+        await model.open(fixture.document.sourceURL)
+        await model.build()
+        await model.start(.debug)
+        await debug.emit(.stateChanged(.stopped))
+        await debug.emit(.snapshot(fixture.snapshot(line: 1, r0: 1)))
+        await waitUntil { model.snapshot != nil }
+
+        await debug.emit(.stateChanged(.running))
+        await waitUntil { model.state == .running }
+        XCTAssertNil(model.currentExecutionLine)
+
+        await debug.emit(.stateChanged(.stopped))
+        await waitUntil { model.state == .stopped }
+        await model.stop()
+        XCTAssertNil(model.snapshot)
+        XCTAssertTrue(model.registerRows.isEmpty)
+        XCTAssertTrue(model.memory.isEmpty)
+
+        await model.build()
+        model.changeProfile(to: .cortexM4)
+        XCTAssertNil(model.snapshot)
+        XCTAssertFalse(model.registerRows.contains { $0.name == "CPSR" })
+        XCTAssertTrue(model.memory.isEmpty)
+    }
+
+    func testLaunchFailureDoesNotAllowLateSnapshotToRepopulateDerivedState() async throws {
+        let fixture = try ViewModelFixture()
+        let debug = FakeDebugService()
+        await debug.setLaunchFailure(snapshotBeforeFailure: fixture.snapshot(line: 1, r0: 1))
+        let model = AppViewModel(
+            documentService: FakeDocumentService(document: fixture.document),
+            buildService: FakeBuildService(result: fixture.buildResult),
+            debugService: debug
+        )
+        await model.open(fixture.document.sourceURL)
+        await model.build()
+
+        await model.start(.debug)
+        await Task.yield()
+
+        XCTAssertEqual(model.state, .ready)
+        XCTAssertNil(model.snapshot)
+        XCTAssertTrue(model.registerRows.isEmpty)
+        XCTAssertTrue(model.memory.isEmpty)
+    }
+
+    func testCriticalUnexpectedExitDiagnosticStaysVisibleAfterRecoveryToReady() async throws {
+        let fixture = try ViewModelFixture()
+        let debug = FakeDebugService()
+        let model = AppViewModel(
+            documentService: FakeDocumentService(document: fixture.document),
+            buildService: FakeBuildService(result: fixture.buildResult),
+            debugService: debug
+        )
+        await model.open(fixture.document.sourceURL)
+        await model.build()
+        await model.start(.debug)
+        await debug.emit(.stateChanged(.stopped))
+        await waitUntil { model.state == .stopped }
+
+        await debug.emit(.diagnostic(DebugDiagnostic(
+            pane: .session,
+            isCritical: true,
+            message: "测试调试器意外退出"
+        )))
+        await debug.emit(.stateChanged(.terminating))
+        await debug.emit(.stateChanged(.ready))
+        await waitUntil { model.state == .ready }
+
+        XCTAssertEqual(model.errorMessage, "测试调试器意外退出")
+        XCTAssertTrue(model.isEnabled(.build))
+        XCTAssertNil(model.snapshot)
+    }
+
+    func testBuildLifecycleIgnoresDebuggerSnapshotAndLeavesDerivedStateClear() async throws {
+        let fixture = try ViewModelFixture()
+        let debug = FakeDebugService()
+        let build = SuspendedBuildService(result: fixture.buildResult)
+        let model = AppViewModel(
+            documentService: FakeDocumentService(document: fixture.document),
+            buildService: build,
+            debugService: debug
+        )
+        await model.open(fixture.document.sourceURL)
+        let building = Task { await model.build() }
+        await build.waitUntilStarted()
+
+        await debug.emit(.snapshot(fixture.snapshot(line: 1, r0: 1)))
+        await Task.yield()
+        XCTAssertEqual(model.state, .building)
+        XCTAssertNil(model.snapshot)
+        XCTAssertTrue(model.registerRows.isEmpty)
+
+        await build.finish()
+        await building.value
+        XCTAssertEqual(model.state, .ready)
+        XCTAssertNil(model.snapshot)
+        XCTAssertTrue(model.memory.isEmpty)
+    }
+
     func testMemoryValidationRecoveryAndCloseStopAreBounded() async throws {
         let fixture = try ViewModelFixture()
         let debug = FakeDebugService()
@@ -245,6 +464,35 @@ private actor FakeBuildService: BuildServicing {
     }
 }
 
+private actor SuspendedBuildService: BuildServicing {
+    private let result: AppBuildResult
+    private var started = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var buildContinuation: CheckedContinuation<Void, Never>?
+
+    init(result: AppBuildResult) {
+        self.result = result
+    }
+
+    func build(projectDirectory: URL) async throws -> AppBuildResult {
+        started = true
+        startWaiters.forEach { $0.resume() }
+        startWaiters.removeAll()
+        await withCheckedContinuation { buildContinuation = $0 }
+        return result
+    }
+
+    func waitUntilStarted() async {
+        if started { return }
+        await withCheckedContinuation { startWaiters.append($0) }
+    }
+
+    func finish() {
+        buildContinuation?.resume()
+        buildContinuation = nil
+    }
+}
+
 private actor FakeDebugService: DebugServicing {
     private let stream: AsyncStream<DebuggerEvent>
     private let continuation: AsyncStream<DebuggerEvent>.Continuation
@@ -252,7 +500,11 @@ private actor FakeDebugService: DebugServicing {
     private var requests: [DebugMemoryRequest] = []
     private var shouldFailBreakpoint = false
     private var shouldFailBreakpointRemoval = false
+    private var breakpointFailureLines: Set<Int> = []
+    private var emitStoppedOnLaunch = false
+    private var launchCount = 0
     private var stepSnapshot: DebugSnapshot?
+    private var launchFailureSnapshot: DebugSnapshot?
 
     init() {
         let pair = AsyncStream<DebuggerEvent>.makeStream()
@@ -262,7 +514,37 @@ private actor FakeDebugService: DebugServicing {
 
     func events() -> AsyncStream<DebuggerEvent> { stream }
     func prepare(_ build: AppBuildResult) async throws { recordedCalls.append("prepare") }
-    func launch(mode: DebugMode) async throws { recordedCalls.append("launch:\(mode.rawValue)") }
+    func launch(
+        mode: DebugMode,
+        breakpoints: [DebugSourceBreakpoint]
+    ) async throws -> DebugLaunchResult {
+        launchCount += 1
+        recordedCalls.append("launch:\(mode.rawValue)")
+        if let launchFailureSnapshot {
+            continuation.yield(.snapshot(launchFailureSnapshot))
+            await Task.yield()
+            throw FakeFailure.launch
+        }
+        if emitStoppedOnLaunch { continuation.yield(.stateChanged(.stopped)) }
+        var identifiers: [Int: String] = [:]
+        var failures: [DebugBreakpointSyncFailure] = []
+        for breakpoint in breakpoints {
+            recordedCalls.append("setBreakpoint:\(breakpoint.line)")
+            if shouldFailBreakpoint || breakpointFailureLines.contains(breakpoint.line) {
+                failures.append(DebugBreakpointSyncFailure(
+                    breakpoint: breakpoint,
+                    message: FakeFailure.breakpoint.localizedDescription
+                ))
+            } else {
+                identifiers[breakpoint.line] = "session-\(launchCount)-line-\(breakpoint.line)"
+            }
+        }
+        if mode == .run, emitStoppedOnLaunch { continuation.yield(.stateChanged(.running)) }
+        return DebugLaunchResult(
+            breakpointIdentifiers: identifiers,
+            failures: failures
+        )
+    }
     func pause() async throws { recordedCalls.append("pause") }
     func stepInstruction() async throws {
         recordedCalls.append("stepInstruction")
@@ -277,8 +559,11 @@ private actor FakeDebugService: DebugServicing {
     }
     func setBreakpoint(file: URL, line: Int) async throws -> DebugBreakpoint {
         recordedCalls.append("setBreakpoint:\(line)")
-        if shouldFailBreakpoint { throw FakeFailure.breakpoint }
-        return DebugBreakpoint(id: "\(line)", location: "\(file.path):\(line)")
+        if shouldFailBreakpoint || breakpointFailureLines.contains(line) { throw FakeFailure.breakpoint }
+        return DebugBreakpoint(
+            id: "session-\(launchCount)-line-\(line)",
+            location: "\(file.path):\(line)"
+        )
     }
     func removeBreakpoint(identifier: String) async throws {
         recordedCalls.append("removeBreakpoint:\(identifier)")
@@ -292,11 +577,68 @@ private actor FakeDebugService: DebugServicing {
         shouldFailBreakpoint = value
         shouldFailBreakpointRemoval = removeFailure
     }
+    func setBreakpointFailureLines(_ lines: Set<Int>) { breakpointFailureLines = lines }
+    func setEmitStoppedOnLaunch(_ value: Bool) { emitStoppedOnLaunch = value }
     func setStepSnapshot(_ snapshot: DebugSnapshot) { stepSnapshot = snapshot }
+    func setLaunchFailure(snapshotBeforeFailure: DebugSnapshot) {
+        launchFailureSnapshot = snapshotBeforeFailure
+    }
+}
+
+private actor SuspendedStopDebugService: DebugServicing {
+    private let stream: AsyncStream<DebuggerEvent>
+    private let continuation: AsyncStream<DebuggerEvent>.Continuation
+    private var stopStarted = false
+    private var stopWaiters: [CheckedContinuation<Void, Never>] = []
+    private var stopContinuation: CheckedContinuation<Void, Never>?
+
+    init() {
+        let pair = AsyncStream<DebuggerEvent>.makeStream()
+        stream = pair.stream
+        continuation = pair.continuation
+    }
+
+    func events() -> AsyncStream<DebuggerEvent> { stream }
+    func prepare(_ build: AppBuildResult) async throws {}
+    func launch(
+        mode: DebugMode,
+        breakpoints: [DebugSourceBreakpoint]
+    ) async throws -> DebugLaunchResult { DebugLaunchResult() }
+    func pause() async throws {}
+    func stepInstruction() async throws {}
+    func stepOver() async throws {}
+    func resume() async throws {}
+    func stop() async throws {
+        stopStarted = true
+        stopWaiters.forEach { $0.resume() }
+        stopWaiters.removeAll()
+        await withCheckedContinuation { stopContinuation = $0 }
+    }
+    func readMemory(_ request: DebugMemoryRequest) async throws -> [MIMemoryBlock] { [] }
+    func setBreakpoint(file: URL, line: Int) async throws -> DebugBreakpoint {
+        DebugBreakpoint(id: "\(line)", location: "\(file.path):\(line)")
+    }
+    func removeBreakpoint(identifier: String) async throws {}
+    func emit(_ event: DebuggerEvent) { continuation.yield(event) }
+    func waitUntilStopStarted() async {
+        if stopStarted { return }
+        await withCheckedContinuation { stopWaiters.append($0) }
+    }
+    func finishStop() {
+        stopContinuation?.resume()
+        stopContinuation = nil
+    }
+}
+
+private actor CompletionProbe {
+    private var finished = false
+    func finish() { finished = true }
+    func isFinished() -> Bool { finished }
 }
 
 private enum FakeFailure: Error, Sendable {
     case breakpoint
+    case launch
 }
 
 private actor SuspendedPrepareDebugService: DebugServicing {
@@ -321,7 +663,10 @@ private actor SuspendedPrepareDebugService: DebugServicing {
         await withCheckedContinuation { startWaiters.append($0) }
     }
     func resumePrepare() { prepareContinuation?.resume(); prepareContinuation = nil }
-    func launch(mode: DebugMode) async throws {}
+    func launch(
+        mode: DebugMode,
+        breakpoints: [DebugSourceBreakpoint]
+    ) async throws -> DebugLaunchResult { DebugLaunchResult() }
     func pause() async throws {}
     func stepInstruction() async throws {}
     func stepOver() async throws {}

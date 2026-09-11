@@ -132,13 +132,17 @@ public struct AssemblyEditorView: NSViewRepresentable {
         fileprivate func applyPresentation() {
             guard let textView else { return }
             highlightTask?.cancel()
-            AssemblySyntaxStyler.apply(to: textView)
-            applyExecutionLine(to: textView)
             ruler?.source = textView.string
             ruler?.breakpoints = parent.breakpoints
             ruler?.currentLine = parent.currentLine
             ruler?.updateAccessibility()
             ruler?.needsDisplay = true
+            if textView.hasMarkedText() {
+                scheduleHighlight()
+                return
+            }
+            AssemblySyntaxStyler.apply(to: textView)
+            applyExecutionLine(to: textView)
             if let currentLine = parent.currentLine,
                let range = SourceLineMap(textView.string).range(forLine: currentLine) {
                 textView.scrollRangeToVisible(range)
@@ -148,8 +152,17 @@ public struct AssemblyEditorView: NSViewRepresentable {
         private func scheduleHighlight() {
             highlightTask?.cancel()
             highlightTask = Task { @MainActor [weak self] in
-                try? await Task.sleep(for: .milliseconds(80))
-                guard !Task.isCancelled, let self, let textView = self.textView else { return }
+                guard let self else { return }
+                repeat {
+                    do {
+                        try await Task.sleep(for: .milliseconds(80))
+                    } catch {
+                        return
+                    }
+                    guard !Task.isCancelled, let textView = self.textView else { return }
+                    if !textView.hasMarkedText() { break }
+                } while true
+                guard let textView = self.textView else { return }
                 AssemblySyntaxStyler.apply(to: textView)
                 self.applyExecutionLine(to: textView)
             }

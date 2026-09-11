@@ -8,7 +8,7 @@ import YagartoCore
 @MainActor
 struct WorkbenchView: View {
     @Bindable var model: AppViewModel
-    let exampleURL: URL?
+    let openExample: (() -> Void)?
 
     @State private var memoryAddress = "$sp"
     @State private var memoryLength = "64"
@@ -32,16 +32,22 @@ struct WorkbenchView: View {
         HStack(spacing: 14) {
             Text(stateLabel)
                 .font(.caption.weight(.semibold))
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(stateLabel)
                 .accessibilityIdentifier("debugger-state")
             if let current = model.currentExecutionLine {
                 Label("当前执行第 \(current) 行", systemImage: "arrow.right")
                     .font(.caption)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("当前执行第 \(current) 行")
                     .accessibilityIdentifier("current-line-status")
             }
             if let range = model.selectedRange, let document = model.document {
                 let line = SourceLineMap(document.text).lineNumber(atUTF16Offset: range.location)
                 Text("已定位到第 \(line) 行")
                     .font(.caption)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("已定位到第 \(line) 行")
                     .accessibilityIdentifier("source-location-status")
             }
             Spacer()
@@ -50,6 +56,8 @@ struct WorkbenchView: View {
                     .font(.caption)
                     .lineLimit(2)
                     .foregroundStyle(.red)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(error)
                     .accessibilityIdentifier("operation-error")
             }
         }
@@ -72,8 +80,8 @@ struct WorkbenchView: View {
                 Button("打开工程…") { OpenProjectAction.choose(for: model) }
                     .keyboardShortcut("o", modifiers: .command)
                     .accessibilityIdentifier("empty-open-project")
-                if let exampleURL {
-                    Button("打开示例") { Task { await model.open(exampleURL) } }
+                if let openExample {
+                    Button("打开示例", action: openExample)
                         .accessibilityIdentifier("open-example")
                 }
             }
@@ -147,8 +155,8 @@ struct WorkbenchView: View {
                         }
                         .padding(.horizontal, 10)
                         .frame(minHeight: 30)
-                        .accessibilityIdentifier("register-row-\(row.name.lowercased())")
                         .accessibilityElement(children: .combine)
+                        .accessibilityIdentifier("register-row-\(row.name.lowercased())")
                         Divider()
                     }
                 }
