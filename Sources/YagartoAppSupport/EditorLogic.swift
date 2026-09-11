@@ -86,8 +86,66 @@ struct AssemblySyntaxScanResult: Equatable, Sendable {
     let metrics: AssemblySyntaxScanMetrics
 }
 
+struct AssemblySyntaxStyleRun: Equatable, Sendable {
+    var range: NSRange
+    let kind: AssemblySyntaxKind?
+}
+
+struct AssemblySyntaxStylePlan: Equatable, Sendable {
+    let utf16Length: Int
+    let runs: [AssemblySyntaxStyleRun]
+}
+
+enum AssemblySyntaxStylePlanner {
+    static func make(spans: [AssemblySyntaxSpan], utf16Length: Int) -> AssemblySyntaxStylePlan {
+        let fullRange = NSRange(location: 0, length: utf16Length)
+        var runs: [AssemblySyntaxStyleRun] = []
+        var cursor = 0
+        for span in spans {
+            let range = NSIntersectionRange(span.range, fullRange)
+            guard range.length > 0, range.location >= cursor else { continue }
+            if range.location > cursor {
+                append(
+                    AssemblySyntaxStyleRun(
+                        range: NSRange(location: cursor, length: range.location - cursor),
+                        kind: nil
+                    ),
+                    to: &runs
+                )
+            }
+            append(AssemblySyntaxStyleRun(range: range, kind: span.kind), to: &runs)
+            cursor = NSMaxRange(range)
+        }
+        if cursor < utf16Length {
+            append(
+                AssemblySyntaxStyleRun(
+                    range: NSRange(location: cursor, length: utf16Length - cursor),
+                    kind: nil
+                ),
+                to: &runs
+            )
+        }
+        return AssemblySyntaxStylePlan(utf16Length: utf16Length, runs: runs)
+    }
+
+    private static func append(
+        _ run: AssemblySyntaxStyleRun,
+        to runs: inout [AssemblySyntaxStyleRun]
+    ) {
+        guard run.range.length > 0 else { return }
+        if let last = runs.last,
+           last.kind == run.kind,
+           NSMaxRange(last.range) == run.range.location {
+            runs[runs.count - 1].range.length += run.range.length
+        } else {
+            runs.append(run)
+        }
+    }
+}
+
 struct AssemblySyntaxBackgroundResult: Equatable, Sendable {
     let spans: [AssemblySyntaxSpan]
+    let stylePlan: AssemblySyntaxStylePlan
     let metrics: AssemblySyntaxScanMetrics
     let executedOnMainThread: Bool
 }
@@ -98,6 +156,10 @@ enum AssemblySyntaxBackgroundScanner {
             let result = AssemblySyntaxScanner.scan(in: source)
             return AssemblySyntaxBackgroundResult(
                 spans: result.spans,
+                stylePlan: AssemblySyntaxStylePlanner.make(
+                    spans: result.spans,
+                    utf16Length: (source as NSString).length
+                ),
                 metrics: result.metrics,
                 executedOnMainThread: pthread_main_np() != 0
             )

@@ -37,7 +37,9 @@ public final class AppViewModel {
     private var breakpointRequestGenerations: [BreakpointKey: UInt64] = [:]
     private var reconcilingBreakpoints: Set<BreakpointKey> = []
     private var debugSessionGeneration: UInt64 = 0
+    private var startGeneration: UInt64 = 0
     private var eventTask: Task<Void, Never>?
+    private var startTask: Task<Void, Never>?
     private var stopTask: Task<Void, Never>?
     private var documentIdentifier: UUID?
     private var documentRevision: UInt64 = 0
@@ -83,6 +85,7 @@ public final class AppViewModel {
 
     public func open(_ url: URL) async {
         guard isEnabled(.open) else { return }
+        retireStart()
         openGeneration &+= 1
         let generation = openGeneration
         do {
@@ -121,6 +124,7 @@ public final class AppViewModel {
 
     public func changeProfile(to profile: ProfileID) {
         guard isEnabled(.changeProfile), let document else { return }
+        retireStart()
         self.document = document.changingProfile(to: profile)
         documentRevision &+= 1
         latestBuild = nil
@@ -182,69 +186,32 @@ public final class AppViewModel {
         guard isEnabled(mode == .run ? .run : .debug),
               let latestBuild,
               let document else { return }
+        startGeneration &+= 1
+        let generation = startGeneration
         do {
             try machine.apply(.launchStarted)
-            breakpointIdentifiers = [:]
-            debugSessionGeneration &+= 1
-            let sessionGeneration = debugSessionGeneration
-            clearRuntimePresentation()
-            try await debugService.prepare(latestBuild)
-            let requests = breakpoints.lines.sorted().map {
-                DebugSourceBreakpoint(file: document.sourceURL, line: $0)
-            }
-            let result = try await debugService.launch(mode: mode, breakpoints: requests)
-            guard sessionGeneration == debugSessionGeneration,
-                  documentIdentifier != nil,
-                  self.document?.sourceURL == document.sourceURL else { return }
-            let sourcePath = canonicalPath(document.sourceURL)
-            for (line, identifier) in result.breakpointIdentifiers {
-                let key = BreakpointKey(canonicalPath: sourcePath, line: line)
-                if breakpointIsDesired(key) {
-                    breakpointIdentifiers[key] = identifier
-                } else {
-                    do {
-                        try await debugService.removeBreakpoint(identifier: identifier)
-                    } catch {
-                        breakpointIdentifiers[key] = identifier
-                        setBreakpointDesired(true, for: key)
-                        appendBreakpointDiagnostic(
-                            line: line,
-                            message: "启动期间取消的断点移除失败，已恢复本地状态：\(error.localizedDescription)"
-                        )
-                    }
-                }
-            }
-            for failure in result.failures {
-                let key = BreakpointKey(
-                    canonicalPath: canonicalPath(failure.breakpoint.file),
-                    line: failure.breakpoint.line
-                )
-                if breakpointIsDesired(key) {
-                    setBreakpointDesired(false, for: key)
-                    appendBreakpointDiagnostic(
-                        line: failure.breakpoint.line,
-                        message: "断点同步失败，已恢复本地状态：\(failure.message)"
-                    )
-                }
-            }
-            if state == .launching {
-                try machine.apply(mode == .run ? .inferiorRunning : .inferiorStopped)
-            } else if mode == .run, state == .stopped {
-                try machine.apply(.inferiorRunning)
-            }
-            if state == .stopped {
-                for line in breakpoints.lines.sorted() {
-                    let key = BreakpointKey(canonicalPath: sourcePath, line: line)
-                    await reconcileBreakpoint(key, sourceURL: document.sourceURL, session: sessionGeneration)
-                }
-            }
-            errorMessage = nil
         } catch {
-            if state == .launching { try? machine.apply(.launchFailed) }
-            breakpointIdentifiers = [:]
-            debugSessionGeneration &+= 1
-            clearRuntimePresentation()
             present(error)
+            return
+        }
+        breakpointIdentifiers = [:]
+        debugSessionGeneration &+= 1
+        let sessionGeneration = debugSessionGeneration
+        clearRuntimePresentation()
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.performStart(
+                mode,
+                build: latestBuild,
+                document: document,
+                generation: generation,
+                session: sessionGeneration
+            )
+        }
+        startTask = task
+        await task.value
+        if generation == startGeneration {
+            startTask = nil
         }
     }
 
@@ -255,6 +222,7 @@ public final class AppViewModel {
 
     public func stop() async {
         guard isEnabled(.stop) || state == .terminating else { return }
+        retireStart()
         beginStopIfNeeded()
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: stopTimeout)
@@ -282,7 +250,12 @@ public final class AppViewModel {
         breakpoints = breakpoints.toggling(line)
         breakpointRequestGenerations[key, default: 0] &+= 1
         guard state == .stopped else { return }
-        await reconcileBreakpoint(key, sourceURL: document.sourceURL, session: debugSessionGeneration)
+        await reconcileBreakpoint(
+            key,
+            sourceURL: document.sourceURL,
+            session: debugSessionGeneration,
+            preservesDeferredIntent: false
+        )
     }
 
     public func selectDiagnostic(_ diagnostic: BuildDiagnostic) {
@@ -300,6 +273,7 @@ public final class AppViewModel {
     }
 
     public func close() async {
+        retireStart()
         invalidateDocumentOperations()
         if isEnabled(.stop) || state == .terminating { beginStopIfNeeded() }
         if let stopTask { await stopTask.value }
@@ -357,7 +331,11 @@ public final class AppViewModel {
         }
         if let lifecycle {
             try? machine.apply(lifecycle)
+            if newState == .stopped {
+                scheduleStoppedBreakpointReconciliation()
+            }
             if newState == .ready {
+                retireStart()
                 breakpointIdentifiers = [:]
                 debugSessionGeneration &+= 1
                 clearRuntimePresentation()
@@ -408,6 +386,105 @@ public final class AppViewModel {
         memory = []
     }
 
+    private func performStart(
+        _ mode: DebugMode,
+        build: AppBuildResult,
+        document: WorkspaceDocument,
+        generation: UInt64,
+        session: UInt64
+    ) async {
+        do {
+            try await debugService.prepare(build)
+            guard isCurrentStart(generation, session: session, document: document) else { return }
+            let requests = breakpoints.lines.sorted().map {
+                DebugSourceBreakpoint(file: document.sourceURL, line: $0)
+            }
+            let result = try await debugService.launch(mode: mode, breakpoints: requests)
+            guard isCurrentStart(generation, session: session, document: document) else { return }
+            let sourcePath = canonicalPath(document.sourceURL)
+            for (line, identifier) in result.breakpointIdentifiers {
+                guard isCurrentStart(generation, session: session, document: document) else { return }
+                let key = BreakpointKey(canonicalPath: sourcePath, line: line)
+                if breakpointIsDesired(key) {
+                    breakpointIdentifiers[key] = identifier
+                } else {
+                    do {
+                        try await debugService.removeBreakpoint(identifier: identifier)
+                        guard isCurrentStart(generation, session: session, document: document) else { return }
+                    } catch {
+                        guard isCurrentStart(generation, session: session, document: document) else { return }
+                        breakpointIdentifiers[key] = identifier
+                        setBreakpointDesired(true, for: key)
+                        appendBreakpointDiagnostic(
+                            line: line,
+                            message: "启动期间取消的断点移除失败，已恢复本地状态：\(error.localizedDescription)"
+                        )
+                    }
+                }
+            }
+            for failure in result.failures {
+                guard isCurrentStart(generation, session: session, document: document) else { return }
+                let key = BreakpointKey(
+                    canonicalPath: canonicalPath(failure.breakpoint.file),
+                    line: failure.breakpoint.line
+                )
+                if breakpointIsDesired(key) {
+                    setBreakpointDesired(false, for: key)
+                    appendBreakpointDiagnostic(
+                        line: failure.breakpoint.line,
+                        message: "断点同步失败，已恢复本地状态：\(failure.message)"
+                    )
+                }
+            }
+            guard isCurrentStart(generation, session: session, document: document) else { return }
+            if state == .launching {
+                try machine.apply(mode == .run ? .inferiorRunning : .inferiorStopped)
+            } else if mode == .run, state == .stopped {
+                try machine.apply(.inferiorRunning)
+            }
+            if state == .stopped {
+                for line in breakpoints.lines.sorted() {
+                    let key = BreakpointKey(canonicalPath: sourcePath, line: line)
+                    await reconcileBreakpoint(
+                        key,
+                        sourceURL: document.sourceURL,
+                        session: session,
+                        preservesDeferredIntent: false
+                    )
+                    guard isCurrentStart(generation, session: session, document: document) else { return }
+                }
+            }
+            guard isCurrentStart(generation, session: session, document: document) else { return }
+            errorMessage = nil
+        } catch {
+            guard isCurrentStart(generation, session: session, document: document) else { return }
+            if state == .launching { try? machine.apply(.launchFailed) }
+            breakpointIdentifiers = [:]
+            debugSessionGeneration &+= 1
+            clearRuntimePresentation()
+            present(error)
+        }
+    }
+
+    private func isCurrentStart(
+        _ generation: UInt64,
+        session: UInt64,
+        document: WorkspaceDocument
+    ) -> Bool {
+        generation == startGeneration
+            && session == debugSessionGeneration
+            && documentIdentifier != nil
+            && canonicalPath(self.document?.sourceURL) == canonicalPath(document.sourceURL)
+            && state != .ready
+            && state != .terminating
+    }
+
+    private func retireStart() {
+        startGeneration &+= 1
+        startTask?.cancel()
+        startTask = nil
+    }
+
     private var currentDocumentVersion: DocumentVersion? {
         guard let documentIdentifier else { return nil }
         return DocumentVersion(identifier: documentIdentifier, revision: documentRevision)
@@ -425,7 +502,8 @@ public final class AppViewModel {
     private func reconcileBreakpoint(
         _ key: BreakpointKey,
         sourceURL: URL,
-        session: UInt64
+        session: UInt64,
+        preservesDeferredIntent: Bool
     ) async {
         guard !reconcilingBreakpoints.contains(key) else { return }
         reconcilingBreakpoints.insert(key)
@@ -452,11 +530,19 @@ public final class AppViewModel {
                             guard debugSessionGeneration == session,
                                   canonicalPath(document?.sourceURL) == key.canonicalPath else { return }
                             breakpointIdentifiers[key] = remote.id
-                            setBreakpointDesired(true, for: key)
-                            appendBreakpointDiagnostic(
-                                line: key.line,
-                                message: "取消后的远端断点移除失败，已恢复本地状态：\(error.localizedDescription)"
-                            )
+                            if preservesDeferredIntent {
+                                appendBreakpointDiagnostic(
+                                    line: key.line,
+                                    message: "断点移除失败，将在下次暂停时重试：\(error.localizedDescription)"
+                                )
+                                return
+                            } else {
+                                setBreakpointDesired(true, for: key)
+                                appendBreakpointDiagnostic(
+                                    line: key.line,
+                                    message: "取消后的远端断点移除失败，已恢复本地状态：\(error.localizedDescription)"
+                                )
+                            }
                         }
                     } else {
                         breakpointIdentifiers[key] = remote.id
@@ -470,11 +556,19 @@ public final class AppViewModel {
                     guard debugSessionGeneration == session,
                           canonicalPath(document?.sourceURL) == key.canonicalPath else { return }
                     if breakpointIdentifiers[key] == nil, breakpointIsDesired(key) {
-                        setBreakpointDesired(false, for: key)
-                        appendBreakpointDiagnostic(
-                            line: key.line,
-                            message: "断点设置失败，已恢复本地状态：\(error.localizedDescription)"
-                        )
+                        if preservesDeferredIntent {
+                            appendBreakpointDiagnostic(
+                                line: key.line,
+                                message: "断点设置失败，将在下次暂停时重试：\(error.localizedDescription)"
+                            )
+                            return
+                        } else {
+                            setBreakpointDesired(false, for: key)
+                            appendBreakpointDiagnostic(
+                                line: key.line,
+                                message: "断点设置失败，已恢复本地状态：\(error.localizedDescription)"
+                            )
+                        }
                     }
                 }
             } else if !desired, let remoteIdentifier {
@@ -497,15 +591,47 @@ public final class AppViewModel {
                           canonicalPath(document?.sourceURL) == key.canonicalPath else { return }
                     guard breakpointIdentifiers[key] == remoteIdentifier else { continue }
                     if !breakpointIsDesired(key) {
-                        setBreakpointDesired(true, for: key)
-                        appendBreakpointDiagnostic(
-                            line: key.line,
-                            message: "断点移除失败，已恢复本地状态：\(error.localizedDescription)"
-                        )
+                        if preservesDeferredIntent {
+                            appendBreakpointDiagnostic(
+                                line: key.line,
+                                message: "断点移除失败，将在下次暂停时重试：\(error.localizedDescription)"
+                            )
+                            return
+                        } else {
+                            setBreakpointDesired(true, for: key)
+                            appendBreakpointDiagnostic(
+                                line: key.line,
+                                message: "断点移除失败，已恢复本地状态：\(error.localizedDescription)"
+                            )
+                        }
                     }
                 }
             } else {
                 return
+            }
+        }
+    }
+
+    private func scheduleStoppedBreakpointReconciliation() {
+        guard state == .stopped, startTask == nil, let document else { return }
+        let sourceURL = document.sourceURL
+        let sourcePath = canonicalPath(sourceURL)
+        let session = debugSessionGeneration
+        let desiredKeys = breakpoints.lines.map { BreakpointKey(canonicalPath: sourcePath, line: $0) }
+        let knownRemoteKeys = breakpointIdentifiers.keys.filter { $0.canonicalPath == sourcePath }
+        let keys = Set(desiredKeys).union(knownRemoteKeys).sorted { $0.line < $1.line }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            for key in keys {
+                guard self.state == .stopped,
+                      self.debugSessionGeneration == session,
+                      self.canonicalPath(self.document?.sourceURL) == sourcePath else { return }
+                await self.reconcileBreakpoint(
+                    key,
+                    sourceURL: sourceURL,
+                    session: session,
+                    preservesDeferredIntent: true
+                )
             }
         }
     }

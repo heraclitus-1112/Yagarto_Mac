@@ -485,6 +485,98 @@ final class AppViewModelTests: XCTestCase {
         await model.stop()
     }
 
+    func testBreakpointAddedWhileRunningSynchronizesOnNextStop() async throws {
+        let fixture = try ViewModelFixture()
+        let debug = ControlledBreakpointDebugService()
+        let model = try await stoppedModel(fixture: fixture, debug: debug)
+        await debug.emitState(.running)
+        await waitUntil { model.state == .running }
+
+        await model.toggleBreakpoint(line: 2)
+        XCTAssertEqual(model.breakpoints.lines, [2])
+        let remoteBeforeStop = await debug.remoteBreakpointIDs()
+        XCTAssertTrue(remoteBeforeStop.isEmpty)
+
+        await debug.emitState(.stopped)
+        await waitUntilRemoteBreakpoints(debug, count: 1)
+
+        XCTAssertEqual(model.state, .stopped)
+        XCTAssertEqual(model.breakpoints.lines, [2])
+    }
+
+    func testBreakpointRemovedWhileRunningSynchronizesOnNextStop() async throws {
+        let fixture = try ViewModelFixture()
+        let debug = ControlledBreakpointDebugService()
+        let model = try await stoppedModel(fixture: fixture, debug: debug)
+        await model.toggleBreakpoint(line: 2)
+        let initialRemote = await debug.remoteBreakpointIDs()
+        XCTAssertEqual(initialRemote.count, 1)
+        await debug.emitState(.running)
+        await waitUntil { model.state == .running }
+
+        await model.toggleBreakpoint(line: 2)
+        XCTAssertTrue(model.breakpoints.lines.isEmpty)
+        let remoteBeforeStop = await debug.remoteBreakpointIDs()
+        XCTAssertEqual(remoteBeforeStop.count, 1)
+
+        await debug.emitState(.stopped)
+        await waitUntilRemoteBreakpoints(debug, count: 0)
+
+        XCTAssertEqual(model.state, .stopped)
+        XCTAssertTrue(model.breakpoints.lines.isEmpty)
+    }
+
+    func testDeferredBreakpointFailureKeepsIntentAndRetriesAtFollowingStop() async throws {
+        let fixture = try ViewModelFixture()
+        let debug = ControlledBreakpointDebugService()
+        let model = try await stoppedModel(fixture: fixture, debug: debug)
+        await debug.emitState(.running)
+        await waitUntil { model.state == .running }
+        await model.toggleBreakpoint(line: 2)
+        await debug.failNextSet()
+
+        await debug.emitState(.stopped)
+        await waitUntil { !model.debugDiagnostics.isEmpty }
+
+        XCTAssertEqual(model.breakpoints.lines, [2])
+        let remoteAfterFailure = await debug.remoteBreakpointIDs()
+        XCTAssertTrue(remoteAfterFailure.isEmpty)
+        XCTAssertTrue(model.debugDiagnostics.contains { $0.message.contains("断点") })
+
+        await debug.emitState(.running)
+        await waitUntil { model.state == .running }
+        await debug.emitState(.stopped)
+        await waitUntilRemoteBreakpoints(debug, count: 1)
+
+        XCTAssertEqual(model.breakpoints.lines, [2])
+    }
+
+    func testDeferredBreakpointRemovalFailureKeepsIntentAndRetriesAtFollowingStop() async throws {
+        let fixture = try ViewModelFixture()
+        let debug = ControlledBreakpointDebugService()
+        let model = try await stoppedModel(fixture: fixture, debug: debug)
+        await model.toggleBreakpoint(line: 2)
+        await debug.emitState(.running)
+        await waitUntil { model.state == .running }
+        await model.toggleBreakpoint(line: 2)
+        await debug.failNextRemove()
+
+        await debug.emitState(.stopped)
+        await waitUntil { !model.debugDiagnostics.isEmpty }
+
+        XCTAssertTrue(model.breakpoints.lines.isEmpty)
+        let remoteAfterFailure = await debug.remoteBreakpointIDs()
+        XCTAssertEqual(remoteAfterFailure.count, 1)
+        XCTAssertTrue(model.debugDiagnostics.contains { $0.message.contains("断点") })
+
+        await debug.emitState(.running)
+        await waitUntil { model.state == .running }
+        await debug.emitState(.stopped)
+        await waitUntilRemoteBreakpoints(debug, count: 0)
+
+        XCTAssertTrue(model.breakpoints.lines.isEmpty)
+    }
+
     func testPrelaunchBreakpointsSynchronizeOnEverySessionAndRemovalUsesCurrentRemoteID() async throws {
         let fixture = try ViewModelFixture()
         let debug = FakeDebugService()
@@ -537,6 +629,86 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertTrue(model.debugDiagnostics.contains {
             $0.message.contains("第 2 行") && $0.message.contains("已恢复")
         })
+    }
+
+    func testRetiredPrepareFailureCannotMutateNewLaunchGeneration() async throws {
+        let fixture = try ViewModelFixture()
+        let debug = ControlledStartDebugService(suspendsLaunch: true)
+        let model = AppViewModel(
+            documentService: FakeDocumentService(document: fixture.document),
+            buildService: FakeBuildService(result: fixture.buildResult),
+            debugService: debug
+        )
+        await model.open(fixture.document.sourceURL)
+        await model.build()
+
+        let firstStart = Task { await model.start(.debug) }
+        await debug.waitUntilPrepareStarted(1)
+        await model.stop()
+
+        let secondStart = Task { await model.start(.debug) }
+        await debug.waitUntilPrepareStarted(2)
+        await debug.finishPrepare(2)
+        await debug.waitUntilLaunchStarted(1)
+
+        await debug.failPrepare(1)
+        await firstStart.value
+
+        XCTAssertEqual(model.state, .launching)
+        XCTAssertNil(model.errorMessage)
+        let launchesWhileSecondIsSuspended = await debug.launchCallCount()
+        XCTAssertEqual(launchesWhileSecondIsSuspended, 1, "已退役的 A 不得进入 launch")
+
+        await debug.finishLaunch(1)
+        await secondStart.value
+
+        XCTAssertEqual(model.state, .stopped)
+        XCTAssertNil(model.errorMessage)
+    }
+
+    func testRetiredSuccessfulPrepareDoesNotCallLaunch() async throws {
+        let fixture = try ViewModelFixture()
+        let debug = ControlledStartDebugService(suspendsLaunch: false)
+        let model = AppViewModel(
+            documentService: FakeDocumentService(document: fixture.document),
+            buildService: FakeBuildService(result: fixture.buildResult),
+            debugService: debug
+        )
+        await model.open(fixture.document.sourceURL)
+        await model.build()
+
+        let start = Task { await model.start(.debug) }
+        await debug.waitUntilPrepareStarted(1)
+        await model.stop()
+        await debug.finishPrepare(1)
+        await start.value
+
+        let launchCount = await debug.launchCallCount()
+        XCTAssertEqual(launchCount, 0)
+        XCTAssertEqual(model.state, .ready)
+        XCTAssertNil(model.errorMessage)
+    }
+
+    func testCurrentStartFailureStillReturnsToReadyWithError() async throws {
+        let fixture = try ViewModelFixture()
+        let debug = ControlledStartDebugService(suspendsLaunch: false)
+        let model = AppViewModel(
+            documentService: FakeDocumentService(document: fixture.document),
+            buildService: FakeBuildService(result: fixture.buildResult),
+            debugService: debug
+        )
+        await model.open(fixture.document.sourceURL)
+        await model.build()
+
+        let start = Task { await model.start(.debug) }
+        await debug.waitUntilPrepareStarted(1)
+        await debug.failPrepare(1)
+        await start.value
+
+        XCTAssertEqual(model.state, .ready)
+        XCTAssertNotNil(model.errorMessage)
+        let launchCount = await debug.launchCallCount()
+        XCTAssertEqual(launchCount, 0)
     }
 
     func testStopTimeoutStaysTerminatingUntilBackendActuallyFinishes() async throws {
@@ -1239,6 +1411,79 @@ private actor SuspendedPrepareDebugService: DebugServicing {
     func removeBreakpoint(identifier: String) async throws {}
 }
 
+private actor ControlledStartDebugService: DebugServicing {
+    private let stream: AsyncStream<DebuggerEvent>
+    private let suspendsLaunch: Bool
+    private var prepareCount = 0
+    private var launchCount = 0
+    private var prepareContinuations: [Int: CheckedContinuation<Void, any Error>] = [:]
+    private var launchContinuations: [Int: CheckedContinuation<Void, any Error>] = [:]
+    private var prepareWaiters: [Int: [CheckedContinuation<Void, Never>]] = [:]
+    private var launchWaiters: [Int: [CheckedContinuation<Void, Never>]] = [:]
+
+    init(suspendsLaunch: Bool) {
+        self.suspendsLaunch = suspendsLaunch
+        stream = AsyncStream { _ in }
+    }
+
+    func events() -> AsyncStream<DebuggerEvent> { stream }
+
+    func prepare(_ build: AppBuildResult) async throws {
+        prepareCount += 1
+        let call = prepareCount
+        prepareWaiters.removeValue(forKey: call)?.forEach { $0.resume() }
+        try await withCheckedThrowingContinuation { prepareContinuations[call] = $0 }
+    }
+
+    func launch(
+        mode: DebugMode,
+        breakpoints: [DebugSourceBreakpoint]
+    ) async throws -> DebugLaunchResult {
+        launchCount += 1
+        let call = launchCount
+        launchWaiters.removeValue(forKey: call)?.forEach { $0.resume() }
+        if suspendsLaunch {
+            try await withCheckedThrowingContinuation { launchContinuations[call] = $0 }
+        }
+        return DebugLaunchResult()
+    }
+
+    func pause() async throws {}
+    func stepInstruction() async throws {}
+    func stepOver() async throws {}
+    func resume() async throws {}
+    func stop() async throws {}
+    func readMemory(_ request: DebugMemoryRequest) async throws -> [MIMemoryBlock] { [] }
+    func setBreakpoint(file: URL, line: Int) async throws -> DebugBreakpoint {
+        DebugBreakpoint(id: "\(line)", location: "\(file.path):\(line)")
+    }
+    func removeBreakpoint(identifier: String) async throws {}
+
+    func waitUntilPrepareStarted(_ call: Int) async {
+        if prepareContinuations[call] != nil { return }
+        await withCheckedContinuation { prepareWaiters[call, default: []].append($0) }
+    }
+
+    func waitUntilLaunchStarted(_ call: Int) async {
+        if launchCount >= call { return }
+        await withCheckedContinuation { launchWaiters[call, default: []].append($0) }
+    }
+
+    func finishPrepare(_ call: Int) {
+        prepareContinuations.removeValue(forKey: call)?.resume()
+    }
+
+    func failPrepare(_ call: Int) {
+        prepareContinuations.removeValue(forKey: call)?.resume(throwing: FakeFailure.launch)
+    }
+
+    func finishLaunch(_ call: Int) {
+        launchContinuations.removeValue(forKey: call)?.resume()
+    }
+
+    func launchCallCount() -> Int { launchCount }
+}
+
 private struct ViewModelFixture {
     let directory: URL
     let document: WorkspaceDocument
@@ -1309,4 +1554,18 @@ private func waitUntil(
         await Task.yield()
     }
     XCTAssertTrue(condition())
+}
+
+private func waitUntilRemoteBreakpoints(
+    _ debug: ControlledBreakpointDebugService,
+    count: Int,
+    timeout: Duration = .seconds(1)
+) async {
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: timeout)
+    while await debug.remoteBreakpointIDs().count != count, clock.now < deadline {
+        await Task.yield()
+    }
+    let finalCount = await debug.remoteBreakpointIDs().count
+    XCTAssertEqual(finalCount, count)
 }

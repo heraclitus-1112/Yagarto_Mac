@@ -30,6 +30,21 @@ final class EditorLogicTests: XCTestCase {
         }
     }
 
+    func testSyntaxStylePlannerCoalescesAdjacentEqualRuns() {
+        let plan = AssemblySyntaxStylePlanner.make(
+            spans: [
+                AssemblySyntaxSpan(range: NSRange(location: 0, length: 2), kind: .mnemonic),
+                AssemblySyntaxSpan(range: NSRange(location: 2, length: 2), kind: .mnemonic)
+            ],
+            utf16Length: 8
+        )
+
+        XCTAssertEqual(plan.runs, [
+            AssemblySyntaxStyleRun(range: NSRange(location: 0, length: 4), kind: .mnemonic),
+            AssemblySyntaxStyleRun(range: NSRange(location: 4, length: 4), kind: nil)
+        ])
+    }
+
     func testSyntaxOverlapResolutionGrowthIsNearLinearForThousandAndLargeInputs() {
         let thousand = assemblerSource(lineCount: 1_000)
         let twoThousand = assemblerSource(lineCount: 2_000)

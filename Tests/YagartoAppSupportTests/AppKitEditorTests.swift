@@ -127,7 +127,7 @@ final class AppKitEditorTests: XCTestCase {
         XCTAssertTrue(Set(identifiers).isSubset(of: actual), "AX identifiers: \(actual.sorted())")
     }
 
-    func testApplyingHighlightPreservesStringSelectionAndUndoHistory() throws {
+    func testApplyingHighlightPreservesStringSelectionAndUndoHistory() async throws {
         let textView = NSTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))
         let window = NSWindow(contentRect: textView.frame, styleMask: [.titled], backing: .buffered, defer: false)
         window.contentView = textView
@@ -141,7 +141,7 @@ final class AppKitEditorTests: XCTestCase {
         let canUndo = try XCTUnwrap(textView.undoManager).canUndo
 
         let snapshot = textView.string
-        AssemblySyntaxStyler.apply(
+        await AssemblySyntaxStyler.apply(
             spans: AssemblySyntaxScanner.spans(in: snapshot),
             for: snapshot,
             to: textView
@@ -154,7 +154,7 @@ final class AppKitEditorTests: XCTestCase {
         XCTAssertEqual(textView.string, "MOV r0, #1\n")
     }
 
-    func testSyntaxStylingDoesNotTouchRealMarkedTextComposition() throws {
+    func testSyntaxStylingDoesNotTouchRealMarkedTextComposition() async throws {
         let textView = NSTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))
         textView.allowsUndo = true
         textView.string = "MOV r0, #1"
@@ -169,7 +169,7 @@ final class AppKitEditorTests: XCTestCase {
         let selection = textView.selectedRange()
         let canUndo = textView.undoManager?.canUndo
 
-        let applied = AssemblySyntaxStyler.apply(
+        let applied = await AssemblySyntaxStyler.apply(
             spans: AssemblySyntaxScanner.spans(in: textView.string),
             for: textView.string,
             to: textView
@@ -179,6 +179,135 @@ final class AppKitEditorTests: XCTestCase {
         XCTAssertEqual(textView.attributedString(), before)
         XCTAssertEqual(textView.selectedRange(), selection)
         XCTAssertEqual(textView.undoManager?.canUndo, canUndo)
+    }
+
+    func testLargeSyntaxCommitUsesBoundedAttributeTransactionsAndSkipsUnchangedRuns() async throws {
+        let source = String(repeating: "x", count: 4 * 1_024 * 1_024 + 1)
+        XCTAssertGreaterThan((source as NSString).length, 4 * 1_024 * 1_024)
+        let textView = NSTextView(frame: NSRect(x: 0, y: 0, width: 600, height: 300))
+        textView.string = source
+        let spans: [AssemblySyntaxSpan] = []
+        let storage = try XCTUnwrap(textView.textStorage)
+        let recorder = EditedRangeRecorder()
+        let observer = NotificationCenter.default.addObserver(
+            forName: NSTextStorage.didProcessEditingNotification,
+            object: storage,
+            queue: nil
+        ) { notification in
+            if let observed = notification.object as? NSTextStorage {
+                recorder.append(observed.editedRange)
+            }
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
+
+        _ = await AssemblySyntaxStyler.apply(spans: spans, for: source, to: textView)
+
+        XCTAssertGreaterThan(recorder.ranges.count, 1)
+        XCTAssertLessThanOrEqual(recorder.ranges.map(\.length).max() ?? 0, 32 * 1_024)
+
+        recorder.removeAll()
+        _ = await AssemblySyntaxStyler.apply(spans: spans, for: source, to: textView)
+
+        XCTAssertTrue(recorder.ranges.isEmpty, "相同语法结果不应重复提交属性")
+        let tailColor = textView.textStorage?.attribute(
+            .foregroundColor,
+            at: (source as NSString).length - 1,
+            effectiveRange: nil
+        ) as? NSColor
+        XCTAssertEqual(tailColor, NSColor.labelColor, "空闲完成后全文尾部也必须具有正确样式")
+    }
+
+    func testSyntaxCommitPrioritizesVisibleOrEditedRangeBeforeDocumentRemainder() async throws {
+        let source = String(repeating: "x", count: 128 * 1_024)
+        let priority = NSRange(location: 96 * 1_024, length: 80)
+        let textView = NSTextView(frame: NSRect(x: 0, y: 0, width: 600, height: 300))
+        textView.string = source
+        let storage = try XCTUnwrap(textView.textStorage)
+        let recorder = EditedRangeRecorder()
+        let observer = NotificationCenter.default.addObserver(
+            forName: NSTextStorage.didProcessEditingNotification,
+            object: storage,
+            queue: nil
+        ) { notification in
+            if let observed = notification.object as? NSTextStorage {
+                recorder.append(observed.editedRange)
+            }
+        }
+        defer { NotificationCenter.default.removeObserver(observer) }
+
+        _ = await AssemblySyntaxStyler.apply(
+            spans: [],
+            for: source,
+            to: textView,
+            priorityRanges: [priority]
+        )
+
+        let firstCommit = try XCTUnwrap(recorder.ranges.first)
+        XCTAssertGreaterThan(NSIntersectionRange(firstCommit, priority).length, 0)
+    }
+
+    func testCancelledSyntaxCommitStopsBeforeStylingWholeDocument() async throws {
+        let source = String(repeating: "x", count: 256 * 1_024)
+        let textView = NSTextView(frame: NSRect(x: 0, y: 0, width: 600, height: 300))
+        textView.string = source
+        let spans: [AssemblySyntaxSpan] = []
+        let tailLocation = (source as NSString).length - 8
+        let colorBeforeCancellation = textView.textStorage?.attribute(
+            .foregroundColor,
+            at: tailLocation,
+            effectiveRange: nil
+        ) as? NSColor
+
+        let task = Task { @MainActor in
+            await AssemblySyntaxStyler.apply(spans: spans, for: source, to: textView)
+        }
+        task.cancel()
+        let applied = await task.value
+
+        XCTAssertFalse(applied)
+        let tailColor = textView.textStorage?.attribute(
+            .foregroundColor,
+            at: tailLocation,
+            effectiveRange: nil
+        ) as? NSColor
+        XCTAssertEqual(tailColor, colorBeforeCancellation)
+    }
+
+    func testSyntaxCommitCanBePreemptedBetweenChunks() async throws {
+        let source = String(repeating: "x", count: 128 * 1_024)
+        let textView = NSTextView(frame: NSRect(x: 0, y: 0, width: 600, height: 300))
+        textView.string = source
+        let tailLocation = (source as NSString).length - 1
+        let tailColorBefore = textView.textStorage?.attribute(
+            .foregroundColor,
+            at: tailLocation,
+            effectiveRange: nil
+        ) as? NSColor
+        var continuationChecks = 0
+
+        let applied = await AssemblySyntaxStyler.apply(
+            spans: [],
+            for: source,
+            to: textView,
+            shouldContinue: {
+                continuationChecks += 1
+                return continuationChecks <= 4
+            }
+        )
+
+        XCTAssertFalse(applied)
+        let firstColor = textView.textStorage?.attribute(
+            .foregroundColor,
+            at: 0,
+            effectiveRange: nil
+        ) as? NSColor
+        let tailColorAfter = textView.textStorage?.attribute(
+            .foregroundColor,
+            at: tailLocation,
+            effectiveRange: nil
+        ) as? NSColor
+        XCTAssertEqual(firstColor, NSColor.labelColor)
+        XCTAssertEqual(tailColorAfter, tailColorBefore)
     }
 
     func testHostedEditorDefersHighlightUntilRealCompositionEnds() throws {
@@ -488,10 +617,10 @@ final class AppKitEditorTests: XCTestCase {
 }
 
 private actor ControlledSyntaxScanOperation {
-    private var continuations: [String: CheckedContinuation<[AssemblySyntaxSpan], Never>] = [:]
+    private var continuations: [String: CheckedContinuation<AssemblySyntaxStylePlan, Never>] = [:]
     private var waiters: [String: [CheckedContinuation<Void, Never>]] = [:]
 
-    func scan(_ source: String) async -> [AssemblySyntaxSpan] {
+    func scan(_ source: String) async -> AssemblySyntaxStylePlan {
         waiters.removeValue(forKey: source)?.forEach { $0.resume() }
         return await withCheckedContinuation { continuations[source] = $0 }
     }
@@ -502,7 +631,33 @@ private actor ControlledSyntaxScanOperation {
     }
 
     func finish(_ source: String, spans: [AssemblySyntaxSpan]) {
-        continuations.removeValue(forKey: source)?.resume(returning: spans)
+        continuations.removeValue(forKey: source)?.resume(returning: AssemblySyntaxStylePlanner.make(
+            spans: spans,
+            utf16Length: (source as NSString).length
+        ))
+    }
+}
+
+private final class EditedRangeRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedRanges: [NSRange] = []
+
+    var ranges: [NSRange] {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedRanges
+    }
+
+    func append(_ range: NSRange) {
+        lock.lock()
+        defer { lock.unlock() }
+        storedRanges.append(range)
+    }
+
+    func removeAll() {
+        lock.lock()
+        defer { lock.unlock() }
+        storedRanges.removeAll()
     }
 }
 

@@ -3,7 +3,7 @@
 import AppKit
 import SwiftUI
 
-typealias AssemblySyntaxScanOperation = @Sendable (String) async -> [AssemblySyntaxSpan]
+typealias AssemblySyntaxScanOperation = @Sendable (String) async -> AssemblySyntaxStylePlan
 
 public struct AssemblyEditorView: NSViewRepresentable {
     private let text: String
@@ -33,7 +33,7 @@ public struct AssemblyEditorView: NSViewRepresentable {
             onTextChange: onTextChange,
             onToggleBreakpoint: onToggleBreakpoint,
             scanOperation: { source in
-                await AssemblySyntaxBackgroundScanner.scan(in: source).spans
+                await AssemblySyntaxBackgroundScanner.scan(in: source).stylePlan
             }
         )
     }
@@ -142,6 +142,7 @@ public struct AssemblyEditorView: NSViewRepresentable {
         fileprivate var previousText: String
         private var highlightTask: Task<Void, Never>?
         private var highlightRevision: UInt64 = 0
+        private var pendingEditedRange: NSRange?
 
         fileprivate init(parent: AssemblyEditorView) {
             self.parent = parent
@@ -155,6 +156,7 @@ public struct AssemblyEditorView: NSViewRepresentable {
             parent.onTextChange(updated)
             ruler?.source = updated
             ruler?.needsDisplay = true
+            pendingEditedRange = editedLineRange(in: textView)
             scheduleHighlight()
         }
 
@@ -185,6 +187,7 @@ public struct AssemblyEditorView: NSViewRepresentable {
             guard let textView else { return }
             let snapshot = textView.string
             let scan = parent.scanOperation
+            let priorityRanges = syntaxPriorityRanges(in: textView)
             highlightTask = Task { @MainActor [weak self] in
                 guard let self else { return }
                 if afterDelay {
@@ -210,7 +213,7 @@ public struct AssemblyEditorView: NSViewRepresentable {
                     self.scheduleHighlight(afterDelay: false)
                     return
                 }
-                let spans = await scan(snapshot)
+                let plan = await scan(snapshot)
                 guard !Task.isCancelled,
                       revision == self.highlightRevision,
                       let textView = self.textView,
@@ -219,11 +222,52 @@ public struct AssemblyEditorView: NSViewRepresentable {
                     self.scheduleHighlight(afterDelay: true)
                     return
                 }
-                guard AssemblySyntaxStyler.apply(spans: spans, for: snapshot, to: textView) else {
+                let applied = await AssemblySyntaxStyler.apply(
+                    plan: plan,
+                    for: snapshot,
+                    to: textView,
+                    priorityRanges: priorityRanges,
+                    shouldContinue: { [weak self, weak textView] in
+                        guard let self, let textView else { return false }
+                        return !Task.isCancelled
+                            && revision == self.highlightRevision
+                            && !textView.hasMarkedText()
+                    }
+                )
+                guard applied else {
                     return
+                }
+                if revision == self.highlightRevision {
+                    self.pendingEditedRange = nil
                 }
                 self.applyExecutionLine(to: textView)
             }
+        }
+
+        private func syntaxPriorityRanges(in textView: NSTextView) -> [NSRange] {
+            var ranges: [NSRange] = []
+            if let layoutManager = textView.layoutManager,
+               let textContainer = textView.textContainer {
+                let glyphRange = layoutManager.glyphRange(
+                    forBoundingRect: textView.visibleRect,
+                    in: textContainer
+                )
+                let characterRange = layoutManager.characterRange(
+                    forGlyphRange: glyphRange,
+                    actualGlyphRange: nil
+                )
+                if characterRange.length > 0 { ranges.append(characterRange) }
+            }
+            if let pendingEditedRange { ranges.append(pendingEditedRange) }
+            return ranges
+        }
+
+        private func editedLineRange(in textView: NSTextView) -> NSRange? {
+            let source = textView.string as NSString
+            guard source.length > 0 else { return nil }
+            let selection = textView.selectedRange()
+            let location = min(selection.location, source.length - 1)
+            return source.lineRange(for: NSRange(location: location, length: 0))
         }
 
         private func applyExecutionLine(to textView: NSTextView) {
