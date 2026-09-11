@@ -7,7 +7,8 @@ enum CLIOutput {
     static func rejectDuplicateFormatIfPresent(
         arguments: [String] = CommandLine.arguments
     ) -> Bool {
-        let count = arguments.dropFirst().reduce(into: 0) { result, argument in
+        let optionArguments = arguments.dropFirst().prefix { $0 != "--" }
+        let count = optionArguments.reduce(into: 0) { result, argument in
             if argument == "--format" || argument.hasPrefix("--format=") {
                 result += 1
             }
@@ -86,9 +87,10 @@ enum CLIOutput {
     }
 
     private static func requestedJSON(_ arguments: [String]) -> Bool {
-        arguments.enumerated().contains { index, argument in
+        let optionArguments = Array(arguments.dropFirst().prefix { $0 != "--" })
+        return optionArguments.enumerated().contains { index, argument in
             argument == "--format=json"
-                || (argument == "json" && index > 0 && arguments[index - 1] == "--format")
+                || (argument == "json" && index > 0 && optionArguments[index - 1] == "--format")
         }
     }
 }

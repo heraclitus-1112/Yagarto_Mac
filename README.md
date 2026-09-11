@@ -13,7 +13,7 @@ YAGARTO Mac 是一个面向 macOS 的非官方 YAGARTO 兼容命令行层，不�
 | `cortex-m4` | QEMU `mps2-an386` | 适合运行本项目生成的 Cortex-M4 裸机 ELF；它不是 STM32F407 外设模型。 |
 | `stm32f4-discovery` | OpenOCD + `stm32f4discovery.cfg` | 面向连接到 Mac 的真实开发板和调试器，不是 STM32 外设模拟器。`run`/`debug` 只 attach/reset，不写 Flash；烧录只能通过带确认门的 `flash`。 |
 
-`cortex-m4` 和 `stm32f4-discovery` 构建会自动加入内置向量表与 `Reset_Handler`。前者链接到 MPS2 的 0 地址代码区并使用链接器定义的 `0x20400000` 初始栈顶；后者链接到 `0x08000000` Flash 并使用链接器定义的 `0x20020000` 初始栈顶。两者都为栈显式保留至少 4 KiB，并在链接期拒绝 `.data`/`.bss` 侵入该区域。启动代码会复制 `.data`、清零 `.bss`，再调用 `yagarto.json` 中的用户 `entry`。
+`cortex-m4` 和 `stm32f4-discovery` 构建会自动加入内置向量表与 `Reset_Handler`。前者链接到 MPS2 的 0 地址代码区并使用链接器定义的 `0x20400000` 初始栈顶；后者链接到 `0x08000000` Flash 并使用链接器定义的 `0x20020000` 初始栈顶。两套链接脚本都把可用 RAM 与独立 4 KiB `STACK` MEMORY region 物理拆开，因此 `.data`、`.bss`、`.noinit` 及未显式列出的 writable section 都不能侵入栈。启动代码会复制 `.data`、清零 `.bss`，再调用 `yagarto.json` 中的用户 `entry`。
 
 ## 使用
 
@@ -40,7 +40,9 @@ swift run yagarto-mac flash firmware.elf --profile stm32f4-discovery --dry-run -
 swift run yagarto-mac flash firmware.elf --profile stm32f4-discovery --yes
 ```
 
-对 `stm32f4-discovery`，请先通过 `flash --yes` 明确完成写入，再使用 `run`/`debug` attach。OpenOCD 的诊断直接写入继承的标准错误流；GDB remote 协议仍独占管道标准输出，不会在项目目录创建或重开日志路径。
+对 `stm32f4-discovery`，请先通过 `flash --yes` 明确完成写入，再使用 `run`/`debug` attach。OpenOCD 的诊断直接写入继承的标准错误流；GDB remote 协议仍独占管道标准输出，不会在项目目录创建或重开日志路径。debug 只启用 pipe GDB 端口，flash/probe 则禁用 GDB、Tcl、telnet 全部网络服务，不监听默认的 3333/4444/6666 端口。
+
+构建先在同卷私有 staging 目录完成并验证所有产物，再以原子目录交换发布；文件系统不支持该能力时会在启动工具前失败。发布前会把 `.map`/`.lst` 中的 staging 路径改回稳定最终路径，并只清理当前 profile 且严格匹配 UUID 命名的陈旧 staging/old 目录。
 
 实际烧录前会先通过 macOS `system_profiler` 只读枚举 ST-Link USB VID/PID。明确没有匹配设备时返回 6，且不会启动 OpenOCD；枚举失败，或已有 ST-Link 候选但 OpenOCD 报告 open/权限/占用/配置等错误时返回 4 并保留原始诊断。`flash --dry-run` 不会执行 USB 枚举、OpenOCD 探测或烧录。
 
@@ -74,7 +76,7 @@ export YAGARTO_MAC_GDB_SIM="$PWD/.tools/gdb-sim/bin/arm-none-eabi-gdb-sim"
 scripts/bootstrap-gdb-sim.sh --verify-gdb /absolute/path/to/arm-none-eabi-gdb
 ```
 
-完整 GDB 自测默认限时 30 秒；需要在较慢机器上调整时，可设置正整数环境变量 `YAGARTO_GDB_VERIFY_TIMEOUT_SECONDS`。脚本收到 `SIGHUP`、`SIGINT` 或 `SIGTERM` 时会把原信号转发给当前 configure/make/GDB 子进程组，经过短暂宽限后有界升级并清理临时目录。
+完整 GDB 自测默认限时 30 秒；需要在较慢机器上调整时，可设置正整数环境变量 `YAGARTO_GDB_VERIFY_TIMEOUT_SECONDS`。源码校验、依赖探测、configure/make/install 与 GDB 自测等可能阻塞的阶段都在独立受控进程组运行；脚本收到 `SIGHUP`、`SIGINT` 或 `SIGTERM` 时会转发原信号，经过短暂宽限后有界升级并清理临时目录。
 
 内置链接脚本、启动文件通过 SwiftPM 的 `Bundle.module` 资源包加载。请通过 `swift run` 或完整 SwiftPM 构建产物运行；不要只复制裸可执行文件而遗漏资源包。
 

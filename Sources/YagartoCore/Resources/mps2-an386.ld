@@ -4,11 +4,12 @@ ENTRY(Reset_Handler)
 MEMORY
 {
     CODE (rx)  : ORIGIN = 0x00000000, LENGTH = 4M
-    RAM  (rwx) : ORIGIN = 0x20000000, LENGTH = 4M
+    RAM (rwx)   : ORIGIN = 0x20000000, LENGTH = 0x003FF000
+    STACK (rw)  : ORIGIN = 0x203FF000, LENGTH = 4K
 }
 
-_estack = ORIGIN(RAM) + LENGTH(RAM);
-__stack_limit__ = _estack - 0x1000;
+_estack = ORIGIN(STACK) + LENGTH(STACK);
+__stack_limit__ = ORIGIN(STACK);
 
 SECTIONS
 {
@@ -36,5 +37,8 @@ SECTIONS
         __bss_end__ = .;
     } > RAM
 
-    ASSERT(__bss_end__ <= __stack_limit__, "RAM overflow into reserved 4 KiB stack")
+    .noinit (NOLOAD) :
+    {
+        *(.noinit*)
+    } > RAM
 }

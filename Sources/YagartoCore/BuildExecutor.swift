@@ -4,13 +4,29 @@ import Foundation
 
 public struct BuildExecutor {
     private let runner: any ProcessRunning
+    private let atomicSwapPreflight: (URL, URL) throws -> Void
 
     public init(runner: any ProcessRunning = ProcessRunner()) {
         self.runner = runner
+        self.atomicSwapPreflight = ProjectPathGuard.requireAtomicDirectorySwapSupport
+    }
+
+    init(
+        runner: any ProcessRunning,
+        atomicSwapPreflight: @escaping (URL, URL) throws -> Void
+    ) {
+        self.runner = runner
+        self.atomicSwapPreflight = atomicSwapPreflight
     }
 
     @discardableResult
     public func execute(_ plan: BuildPlan) throws -> [ProcessResult] {
+        try atomicSwapPreflight(plan.projectDirectory, plan.outputDirectory)
+        try ProjectPathGuard.cleanupStaleBuildDirectories(
+            profile: plan.profile,
+            projectDirectory: plan.projectDirectory,
+            outputDirectory: plan.outputDirectory
+        )
         let stagingDirectory = try ProjectPathGuard.createPrivateStagingDirectory(
             projectDirectory: plan.projectDirectory,
             outputDirectory: plan.outputDirectory
@@ -44,6 +60,10 @@ public struct BuildExecutor {
             }
             results.append(result)
         }
+        try normalizePublishedTextPaths(
+            stagedPlan: stagedPlan,
+            finalPlan: plan
+        )
         try ProjectPathGuard.validateProducedArtifacts(
             stagedPlan.artifactFiles,
             outputDirectory: stagedPlan.outputDirectory
@@ -54,5 +74,36 @@ public struct BuildExecutor {
             projectDirectory: plan.projectDirectory
         )
         return results
+    }
+
+    private func normalizePublishedTextPaths(
+        stagedPlan: BuildPlan,
+        finalPlan: BuildPlan
+    ) throws {
+        let stagedRoot = Data(stagedPlan.outputDirectory.path.utf8)
+        let finalRoot = Data(finalPlan.outputDirectory.path.utf8)
+        for artifact in [stagedPlan.mapFile, stagedPlan.listingFile] {
+            guard FileManager.default.fileExists(atPath: artifact.path) else {
+                continue
+            }
+            do {
+                var contents = try Data(contentsOf: artifact)
+                var searchStart = contents.startIndex
+                while searchStart < contents.endIndex,
+                      let range = contents.range(
+                        of: stagedRoot,
+                        in: searchStart..<contents.endIndex
+                      ) {
+                    contents.replaceSubrange(range, with: finalRoot)
+                    searchStart = range.lowerBound + finalRoot.count
+                }
+                try contents.write(to: artifact, options: .atomic)
+            } catch {
+                throw YagartoError.cannotWriteOutput(
+                    artifact.path,
+                    error.localizedDescription
+                )
+            }
+        }
     }
 }

@@ -47,11 +47,18 @@ public struct FlashPlanner {
             boardConfig: boardConfig.path,
             command: CommandSpec(
                 executable: openOCDExecutable,
-                args: ["-f", boardConfig.path, "-c", programCommand],
+                args: [
+                    "-f", boardConfig.path,
+                    "-c", Self.disabledServerPorts,
+                    "-c", programCommand
+                ],
                 workingDirectory: project
             )
         )
     }
+
+    private static let disabledServerPorts =
+        "gdb_port disabled; tcl_port disabled; telnet_port disabled"
 }
 
 public protocol HardwareProbing {
@@ -99,7 +106,10 @@ public struct SystemProfilerSTLinkUSBEnumerator: STLinkUSBEnumerating {
             throw YagartoError.buildStepFailed(
                 executable,
                 result.exitStatus,
-                result.toolOutput ?? ""
+                Self.enumerationFailureOutput(
+                    result: result,
+                    reason: "USB 枚举命令失败（退出码 \(result.exitStatus)）。"
+                )
             )
         }
 
@@ -191,7 +201,12 @@ public struct OpenOCDHardwareProbe: HardwareProbing {
     ) throws -> Bool {
         let result = try runner.run(CommandSpec(
             executable: openOCDExecutable,
-            args: ["-f", boardConfig.path, "-c", "init", "-c", "shutdown"],
+            args: [
+                "-f", boardConfig.path,
+                "-c", "gdb_port disabled; tcl_port disabled; telnet_port disabled",
+                "-c", "init",
+                "-c", "shutdown"
+            ],
             workingDirectory: projectDirectory
         ))
         guard result.exitStatus != 0 else {

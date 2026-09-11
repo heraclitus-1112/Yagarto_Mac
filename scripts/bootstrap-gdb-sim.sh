@@ -393,16 +393,41 @@ verify_archive() {
         echo "源码归档不存在：${archive_to_verify}" >&2
         exit 1
     fi
+    checksum_tool=
     if command -v shasum >/dev/null 2>&1; then
-        ACTUAL_SHA256=$(shasum -a 256 "$archive_to_verify" | awk '{print $1}')
+        checksum_tool=shasum
     elif command -v sha256sum >/dev/null 2>&1; then
-        ACTUAL_SHA256=$(sha256sum "$archive_to_verify" | awk '{print $1}')
-    else
+        checksum_tool=sha256sum
+    fi
+    if [ -z "$checksum_tool" ]; then
         echo "缺少 SHA-256 校验工具（shasum 或 sha256sum）。" >&2
         exit 1
     fi
-    NORMALIZED_EXPECTED=$(printf '%s' "$EXPECTED_SHA256" | tr 'A-F' 'a-f')
-    NORMALIZED_ACTUAL=$(printf '%s' "$ACTUAL_SHA256" | tr 'A-F' 'a-f')
+
+    checksum_output="${WORK_DIRECTORY}/archive-checksum.txt"
+    calculate_archive_checksum() {
+        if [ "$checksum_tool" = "shasum" ]; then
+            exec shasum -a 256 "$archive_to_verify"
+        fi
+        exec sha256sum "$archive_to_verify"
+    }
+    if ! run_supervised calculate_archive_checksum >"$checksum_output"; then
+        echo "SHA-256 工具执行失败。" >&2
+        exit 1
+    fi
+    ACTUAL_SHA256=
+    IFS=' ' read -r ACTUAL_SHA256 ignored_checksum_path <"$checksum_output" || true
+    normalize_checksum() {
+        printf '%s' "$1" | tr 'A-F' 'a-f'
+    }
+    expected_output="${WORK_DIRECTORY}/expected-checksum.txt"
+    actual_output="${WORK_DIRECTORY}/actual-checksum.txt"
+    run_supervised normalize_checksum "$EXPECTED_SHA256" >"$expected_output"
+    run_supervised normalize_checksum "$ACTUAL_SHA256" >"$actual_output"
+    NORMALIZED_EXPECTED=
+    NORMALIZED_ACTUAL=
+    IFS= read -r NORMALIZED_EXPECTED <"$expected_output" || true
+    IFS= read -r NORMALIZED_ACTUAL <"$actual_output" || true
     if [ "$NORMALIZED_ACTUAL" != "$NORMALIZED_EXPECTED" ]; then
         echo "SHA-256 校验失败：预期 ${NORMALIZED_EXPECTED}，实际 ${NORMALIZED_ACTUAL}。" >&2
         exit 1
@@ -423,6 +448,9 @@ else
         --output "$ARCHIVE_PATH" "$GDB_URL"
 fi
 
+if [ -z "$WORK_DIRECTORY" ]; then
+    WORK_DIRECTORY=$(mktemp -d "${TMPDIR:-/tmp}/yagarto-gdb.XXXXXX")
+fi
 verify_archive "$ARCHIVE_PATH"
 
 command -v gmake >/dev/null 2>&1 || {
@@ -441,13 +469,23 @@ command -v tar >/dev/null 2>&1 || {
 GDB_CPPFLAGS=
 GDB_LDFLAGS=
 if command -v pkg-config >/dev/null 2>&1 \
-    && pkg-config --exists gmp \
-    && pkg-config --exists mpfr; then
-    GDB_CPPFLAGS=$(pkg-config --cflags gmp mpfr)
-    GDB_LDFLAGS=$(pkg-config --libs-only-L gmp mpfr)
+    && run_supervised pkg-config --exists gmp \
+    && run_supervised pkg-config --exists mpfr; then
+    pkg_cflags_output="${WORK_DIRECTORY}/pkg-cflags.txt"
+    pkg_ldflags_output="${WORK_DIRECTORY}/pkg-ldflags.txt"
+    run_supervised pkg-config --cflags gmp mpfr >"$pkg_cflags_output"
+    run_supervised pkg-config --libs-only-L gmp mpfr >"$pkg_ldflags_output"
+    IFS= read -r GDB_CPPFLAGS <"$pkg_cflags_output" || true
+    IFS= read -r GDB_LDFLAGS <"$pkg_ldflags_output" || true
 elif command -v brew >/dev/null 2>&1; then
-    GMP_PREFIX=$(brew --prefix gmp 2>/dev/null || true)
-    MPFR_PREFIX=$(brew --prefix mpfr 2>/dev/null || true)
+    gmp_prefix_output="${WORK_DIRECTORY}/gmp-prefix.txt"
+    mpfr_prefix_output="${WORK_DIRECTORY}/mpfr-prefix.txt"
+    run_supervised brew --prefix gmp >"$gmp_prefix_output" 2>/dev/null || true
+    run_supervised brew --prefix mpfr >"$mpfr_prefix_output" 2>/dev/null || true
+    GMP_PREFIX=
+    MPFR_PREFIX=
+    IFS= read -r GMP_PREFIX <"$gmp_prefix_output" || true
+    IFS= read -r MPFR_PREFIX <"$mpfr_prefix_output" || true
     if [ -z "$GMP_PREFIX" ] || [ -z "$MPFR_PREFIX" ]; then
         echo "缺少 gmp 或 mpfr；请运行 brew install gmp mpfr。" >&2
         exit 1
@@ -459,9 +497,6 @@ else
     exit 1
 fi
 
-if [ -z "$WORK_DIRECTORY" ]; then
-    WORK_DIRECTORY=$(mktemp -d "${TMPDIR:-/tmp}/yagarto-gdb.XXXXXX")
-fi
 SOURCE_DIRECTORY="${WORK_DIRECTORY}/gdb-${GDB_VERSION}"
 BUILD_DIRECTORY="${WORK_DIRECTORY}/build"
 run_supervised tar -xf "$ARCHIVE_PATH" -C "$WORK_DIRECTORY"
@@ -482,7 +517,10 @@ configure_gdb() (
 )
 run_supervised configure_gdb
 
-JOB_COUNT=$(sysctl -n hw.logicalcpu 2>/dev/null || printf '2')
+job_count_output="${WORK_DIRECTORY}/job-count.txt"
+run_supervised sysctl -n hw.logicalcpu >"$job_count_output" 2>/dev/null || true
+JOB_COUNT=
+IFS= read -r JOB_COUNT <"$job_count_output" || true
 case "$JOB_COUNT" in
     ''|*[!0-9]*) JOB_COUNT=2 ;;
 esac
@@ -496,7 +534,7 @@ if [ ! -x "$INSTALLED_GDB" ]; then
     exit 1
 fi
 verify_installed_gdb "$INSTALLED_GDB"
-ln -sf "arm-none-eabi-gdb" "$SIMULATOR_ALIAS"
+run_supervised ln -sf "arm-none-eabi-gdb" "$SIMULATOR_ALIAS"
 
 echo "已安装并验证：${SIMULATOR_ALIAS}"
 echo "可设置：export YAGARTO_MAC_GDB_SIM='${SIMULATOR_ALIAS}'"

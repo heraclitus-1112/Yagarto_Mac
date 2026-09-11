@@ -91,6 +91,21 @@ final class BootstrapScriptTests: XCTestCase {
         XCTAssertTrue(script.contains("run_supervised gmake -C \"$BUILD_DIRECTORY\" -j"))
         XCTAssertTrue(script.contains("run_supervised gmake -C \"$BUILD_DIRECTORY\" install"))
         XCTAssertTrue(script.contains("run_supervised_with_timeout \"$verify_timeout\" run_gdb_selftest"))
+        for invocation in [
+            "run_supervised calculate_archive_checksum",
+            "run_supervised pkg-config --exists gmp",
+            "run_supervised pkg-config --exists mpfr",
+            "run_supervised brew --prefix gmp",
+            "run_supervised brew --prefix mpfr",
+            "run_supervised curl --fail",
+            "run_supervised tar -xf",
+            "run_supervised sysctl -n hw.logicalcpu",
+            "run_supervised ln -sf"
+        ] {
+            XCTAssertTrue(script.contains(invocation), "未受控：\(invocation)")
+        }
+        XCTAssertFalse(script.contains("ACTUAL_SHA256=$(shasum"))
+        XCTAssertFalse(script.contains("ACTUAL_SHA256=$(sha256sum"))
     }
 
     func testVerifyInstalledGDBRunsCompleteARM7SimulatorContractWithoutBuilding() throws {
@@ -231,8 +246,39 @@ final class BootstrapScriptTests: XCTestCase {
             XCTAssertLessThan(result.elapsed, 3, testCase.name)
             XCTAssertFalse(result.process.stderr.contains("sed:"), result.process.stderr)
             XCTAssertTrue(
-                result.descendantPIDs.allSatisfy(bootstrapProcessHasExited),
+                result.descendantsExitedBeforeCleanup,
                 "\(testCase.name) 留下后代：\(result.descendantPIDs)"
+            )
+        }
+    }
+
+    func testArchiveChecksumForwardsAndEscalatesSignalsWithoutLeavingDescendants() throws {
+        let cases: [(signal: Int32, expectedStatus: Int32, name: String)] = [
+            (SIGHUP, 128 + SIGHUP, "SIGHUP"),
+            (SIGINT, 128 + SIGINT, "SIGINT"),
+            (SIGTERM, 128 + SIGTERM, "SIGTERM")
+        ]
+
+        for testCase in cases {
+            let fixture = try BootstrapChecksumSignalFixture(name: testCase.name)
+            defer { fixture.cleanup() }
+            let result = try runBootstrapAndSendSignal(
+                [
+                    "--prefix", fixture.installPrefix.path,
+                    "--sha256", String(repeating: "0", count: 64),
+                    "--archive", fixture.archive.path
+                ],
+                environment: fixture.environment,
+                signal: testCase.signal,
+                pidFile: fixture.pidFile
+            )
+
+            XCTAssertFalse(result.watchdogFired, testCase.name)
+            XCTAssertEqual(result.process.exitStatus, testCase.expectedStatus, testCase.name)
+            XCTAssertLessThan(result.elapsed, 3, testCase.name)
+            XCTAssertTrue(
+                result.descendantsExitedBeforeCleanup,
+                "hash \(testCase.name) 留下后代：\(result.descendantPIDs)"
             )
         }
     }
@@ -255,7 +301,7 @@ final class BootstrapScriptTests: XCTestCase {
         XCTAssertLessThan(result.elapsed, 3)
         XCTAssertTrue(result.process.stderr.contains("超时"), result.process.stderr)
         XCTAssertFalse(result.process.stderr.contains("sed:"), result.process.stderr)
-        XCTAssertTrue(result.descendantPIDs.allSatisfy(bootstrapProcessHasExited))
+        XCTAssertTrue(result.descendantsExitedBeforeCleanup)
     }
 
     private func runBootstrap(
@@ -340,11 +386,54 @@ private struct BootstrapSignalFixture {
     }
 }
 
+private struct BootstrapChecksumSignalFixture {
+    let directory: URL
+    let tools: URL
+    let archive: URL
+    let installPrefix: URL
+    let pidFile: URL
+
+    init(name: String) throws {
+        directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("bootstrap-hash-\(name)-\(UUID().uuidString)", isDirectory: true)
+        tools = directory.appendingPathComponent("tools", isDirectory: true)
+        archive = directory.appendingPathComponent("gdb-17.2.tar.xz")
+        installPrefix = directory.appendingPathComponent("install", isDirectory: true)
+        pidFile = directory.appendingPathComponent("hash-descendants.txt")
+        try FileManager.default.createDirectory(at: tools, withIntermediateDirectories: true)
+        try Data("fixture archive".utf8).write(to: archive)
+        try writeBootstrapExecutable(
+            """
+            #!/bin/sh
+            trap '' HUP INT TERM
+            /bin/sleep 30 &
+            grandchild=$!
+            printf '%s %s\n' "$$" "$grandchild" > "$YAGARTO_BOOTSTRAP_PID_FILE"
+            wait "$grandchild"
+            printf '%064d  %s\n' 0 "$1"
+            """,
+            to: tools.appendingPathComponent("shasum")
+        )
+    }
+
+    var environment: [String: String] {
+        [
+            "PATH": "\(tools.path):/usr/bin:/bin",
+            "YAGARTO_BOOTSTRAP_PID_FILE": pidFile.path
+        ]
+    }
+
+    func cleanup() {
+        try? FileManager.default.removeItem(at: directory)
+    }
+}
+
 private struct BootstrapSupervisionResult {
     let process: ProcessResult
     let elapsed: TimeInterval
     let watchdogFired: Bool
     let descendantPIDs: [pid_t]
+    let descendantsExitedBeforeCleanup: Bool
 }
 
 private func runBootstrapAndSendSignal(
@@ -438,15 +527,14 @@ private func runBootstrapProcess(
     process.waitUntilExit()
 
     let descendants = ((try? String(contentsOf: pidFile, encoding: .utf8)) ?? "")
-        .split(whereSeparator: \ .isWhitespace)
+        .split(whereSeparator: \.isWhitespace)
         .compactMap { pid_t($0) }
-    if watchdogFired {
-        for pid in descendants.reversed() {
-            _ = Darwin.kill(pid, SIGKILL)
-        }
-    }
     for _ in 0..<100 where !descendants.allSatisfy(bootstrapProcessHasExited) {
         usleep(10_000)
+    }
+    let descendantsExitedBeforeCleanup = descendants.allSatisfy(bootstrapProcessHasExited)
+    for pid in descendants.reversed() where !bootstrapProcessHasExited(pid) {
+        _ = Darwin.kill(pid, SIGKILL)
     }
 
     try stdout.close()
@@ -459,7 +547,8 @@ private func runBootstrapProcess(
         ),
         elapsed: Date().timeIntervalSince(start),
         watchdogFired: watchdogFired,
-        descendantPIDs: descendants
+        descendantPIDs: descendants,
+        descendantsExitedBeforeCleanup: descendantsExitedBeforeCleanup
     )
 }
 

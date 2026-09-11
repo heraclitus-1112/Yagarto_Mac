@@ -56,6 +56,12 @@ final class BackendE2ETests: XCTestCase {
             XCTAssertGreaterThanOrEqual(binary.count, 8)
             XCTAssertEqual(Array(binary.prefix(4)), expectedStackBytes)
             XCTAssertEqual(binary[4] & 1, 1, "Reset_Handler 向量必须带 Thumb 状态位")
+            let map = try String(contentsOf: plan.mapFile, encoding: .utf8)
+            let listing = try String(contentsOf: plan.listingFile, encoding: .utf8)
+            XCTAssertFalse(map.contains("-staging-"), map)
+            XCTAssertFalse(listing.contains("-staging-"), listing)
+            XCTAssertTrue(map.contains(plan.outputDirectory.path), map)
+            XCTAssertTrue(listing.contains(plan.elfFile.path), listing)
         }
     }
 
@@ -75,7 +81,33 @@ final class BackendE2ETests: XCTestCase {
         XCTAssertTrue(output.contains("mps2-an386"))
     }
 
-    func testRealCortexLinkersReserveFourKiBStackAtMaximumBSSBoundary() throws {
+    func testInstalledOpenOCDCanInitializeDummyAdapterWithAllNetworkPortsDisabled() throws {
+        guard let openOCD = try? ToolResolver().resolve(.openOCD) else {
+            throw XCTSkip("未安装 OpenOCD，跳过本机端口禁用 smoke test")
+        }
+        let disabledPorts = "gdb_port disabled; tcl_port disabled; telnet_port disabled"
+        let result = try ProcessRunner().run(CommandSpec(
+            executable: openOCD,
+            args: [
+                "-c", "adapter driver dummy",
+                "-c", disabledPorts,
+                "-c", "init",
+                "-c", "shutdown"
+            ],
+            workingDirectory: URL(
+                fileURLWithPath: FileManager.default.temporaryDirectory.path,
+                isDirectory: true
+            )
+        ))
+
+        XCTAssertEqual(result.exitStatus, 0, result.toolOutput ?? "")
+        let output = result.stdout + result.stderr
+        XCTAssertFalse(output.contains("Listening on port 3333"), output)
+        XCTAssertFalse(output.contains("Listening on port 4444"), output)
+        XCTAssertFalse(output.contains("Listening on port 6666"), output)
+    }
+
+    func testRealCortexLinkersKeepBSSNoInitAndOrphanWritableSectionsOutOfStack() throws {
         let resolver = ToolResolver()
         let required: [ToolIdentifier] = [.assembler, .linker, .objcopy, .objdump]
         var tools: [ToolIdentifier: String] = [:]
@@ -90,34 +122,42 @@ final class BackendE2ETests: XCTestCase {
             (.cortexM4, 4 * 1024 * 1024),
             (.stm32f4Discovery, 128 * 1024)
         ]
+        let writableSections = [".bss", ".noinit", ".custom_writable"]
         for (profile, ramBytes) in profiles {
-            let maximumBSS = ramBytes - 4 * 1024
-            let fittingPlan = try makeBSSBoundaryPlan(
-                profile: profile,
-                bssBytes: maximumBSS,
-                tools: tools
-            )
-            XCTAssertNoThrow(try BuildExecutor().execute(fittingPlan), profile.rawValue)
-
-            let overflowingPlan = try makeBSSBoundaryPlan(
-                profile: profile,
-                bssBytes: maximumBSS + 1,
-                tools: tools
-            )
-            XCTAssertThrowsError(try BuildExecutor().execute(overflowingPlan)) { error in
-                let yagartoError = error as? YagartoError
-                XCTAssertEqual(yagartoError?.diagnosticCode, "build.step_failed")
-                XCTAssertTrue(
-                    yagartoError?.toolOutput?.contains("reserved 4 KiB stack") == true,
-                    yagartoError?.toolOutput ?? ""
+            let maximumWritableBytes = ramBytes - 4 * 1024
+            for section in writableSections {
+                let fittingPlan = try makeWritableBoundaryPlan(
+                    profile: profile,
+                    section: section,
+                    byteCount: maximumWritableBytes,
+                    tools: tools
                 )
+                XCTAssertNoThrow(
+                    try BuildExecutor().execute(fittingPlan),
+                    "\(profile.rawValue) \(section) 边界内应成功"
+                )
+
+                let overflowingPlan = try makeWritableBoundaryPlan(
+                    profile: profile,
+                    section: section,
+                    byteCount: maximumWritableBytes + 1,
+                    tools: tools
+                )
+                XCTAssertThrowsError(try BuildExecutor().execute(overflowingPlan)) { error in
+                    let yagartoError = error as? YagartoError
+                    XCTAssertEqual(yagartoError?.diagnosticCode, "build.step_failed")
+                    let output = yagartoError?.toolOutput ?? ""
+                    XCTAssertTrue(output.contains("RAM"), output)
+                    XCTAssertTrue(output.localizedCaseInsensitiveContains("overflow"), output)
+                }
             }
         }
     }
 
-    private func makeBSSBoundaryPlan(
+    private func makeWritableBoundaryPlan(
         profile: ProfileID,
-        bssBytes: Int,
+        section: String,
+        byteCount: Int,
         tools: [ToolIdentifier: String]
     ) throws -> BuildPlan {
         let project = FileManager.default.temporaryDirectory
@@ -126,8 +166,8 @@ final class BackendE2ETests: XCTestCase {
         try Data("""
         .syntax unified
         .thumb
-        .section .bss, "aw", %nobits
-        .space \(bssBytes)
+        .section \(section), "aw", %nobits
+        .space \(byteCount)
         .text
         .global user_main
         .thumb_func

@@ -19,6 +19,7 @@ public enum YagartoError: Error, Equatable, Sendable {
     case duplicateObjectName(String)
     case buildArtifactMissing(String)
     case unsafeBuildArtifact(String)
+    case atomicDirectorySwapUnsupported(String, String)
     case invalidEntry(String)
     case toolNotFound(String)
     case debugBackendUnavailable(ProfileID)
@@ -79,6 +80,8 @@ extension YagartoError: LocalizedError {
             return "build.artifact_missing"
         case .unsafeBuildArtifact:
             return "build.artifact_unsafe"
+        case .atomicDirectorySwapUnsupported:
+            return "build.atomic_publish_unsupported"
         case .invalidEntry:
             return "configuration.invalid_entry"
         case .toolNotFound:
@@ -148,6 +151,8 @@ extension YagartoError: LocalizedError {
             return "构建工具成功退出，但未生成预期产物“\(path)”。"
         case .unsafeBuildArtifact(let path):
             return "构建产物“\(path)”不是安全的单链接普通文件。"
+        case .atomicDirectorySwapUnsupported(let path, _):
+            return "构建目录“\(path)”所在文件系统不支持安全的原子目录交换；未启动构建工具。"
         case .invalidEntry(let entry):
             return "入口符号“\(entry)”无效；请使用汇编符号名，不能包含命令或控制字符。"
         case .toolNotFound(let tool):
@@ -198,6 +203,8 @@ extension YagartoError: LocalizedError {
             return "路径：\(path)；\(detail)"
         case .buildArtifactMissing(let path), .unsafeBuildArtifact(let path):
             return "路径：\(path)"
+        case .atomicDirectorySwapUnsupported(let path, let detail):
+            return "路径：\(path)；\(detail)"
         case .processLaunchFailed(_, let detail):
             return detail
         case .terminatedBySignal(let signal):
@@ -242,7 +249,7 @@ extension YagartoError: LocalizedError {
             return .unsupported
         case .interrupted:
             return .interrupted
-        case .buildArtifactMissing, .unsafeBuildArtifact,
+        case .buildArtifactMissing, .unsafeBuildArtifact, .atomicDirectorySwapUnsupported,
              .processIOFailed, .processLaunchFailed, .buildStepFailed, .cannotWriteOutput:
             return .buildFailure
         case .internalFailure:

@@ -156,7 +156,7 @@ final class DebugPlannerTests: XCTestCase {
         XCTAssertEqual(plan.initCommands[0], "file \"/tmp/调试 项目/.yagarto/build/arm7tdmi/演示 固件.elf\"")
         XCTAssertEqual(
             plan.initCommands[1],
-            "target extended-remote | exec '/tools/openocd' '-f' '/opt/Open OCD/scripts/board/stm32f4discovery.cfg' '-c' 'gdb_port pipe; log_output /dev/stderr'"
+            "target extended-remote | exec '/tools/openocd' '-f' '/opt/Open OCD/scripts/board/stm32f4discovery.cfg' '-c' 'gdb_port pipe; tcl_port disabled; telnet_port disabled; log_output /dev/stderr'"
         )
         XCTAssertEqual(Array(plan.initCommands.suffix(3)), [
             "monitor reset halt", "tbreak main", "continue"
@@ -200,7 +200,7 @@ final class DebugPlannerTests: XCTestCase {
 
         XCTAssertEqual(
             plan.initCommands[1],
-            "target extended-remote | exec '/tools/openocd' '-f' '/board.cfg' '-c' 'gdb_port pipe; log_output /dev/stderr'"
+            "target extended-remote | exec '/tools/openocd' '-f' '/board.cfg' '-c' 'gdb_port pipe; tcl_port disabled; telnet_port disabled; log_output /dev/stderr'"
         )
         XCTAssertFalse(
             FileManager.default.fileExists(

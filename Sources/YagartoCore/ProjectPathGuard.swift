@@ -154,6 +154,124 @@ enum ProjectPathGuard {
         )
     }
 
+    static func requireAtomicDirectorySwapSupport(
+        projectDirectory: URL,
+        outputDirectory: URL
+    ) throws {
+        let output = outputDirectory.standardizedFileURL
+        let parent = output.deletingLastPathComponent()
+        try createOutputDirectory(
+            projectDirectory: projectDirectory,
+            outputDirectory: parent
+        )
+        try validateOutputHierarchy(
+            projectDirectory: projectDirectory,
+            outputDirectory: output
+        )
+
+        let identifier = UUID().uuidString.lowercased()
+        let first = parent.appendingPathComponent(
+            ".\(output.lastPathComponent)-swap-probe-a-\(identifier)",
+            isDirectory: true
+        )
+        let second = parent.appendingPathComponent(
+            ".\(output.lastPathComponent)-swap-probe-b-\(identifier)",
+            isDirectory: true
+        )
+        defer {
+            try? FileManager.default.removeItem(at: first)
+            try? FileManager.default.removeItem(at: second)
+        }
+
+        try createPrivateDirectory(first, errorPath: output.path)
+        try createPrivateDirectory(second, errorPath: output.path)
+        guard let firstBefore = try metadata(at: first),
+              let secondBefore = try metadata(at: second) else {
+            throw YagartoError.atomicDirectorySwapUnsupported(
+                output.path,
+                "无法读取同卷探测目录。"
+            )
+        }
+        let result = first.withUnsafeFileSystemRepresentation { firstPath in
+            second.withUnsafeFileSystemRepresentation { secondPath in
+                guard let firstPath, let secondPath else { return Int32(-1) }
+                return Darwin.renamex_np(firstPath, secondPath, UInt32(RENAME_SWAP))
+            }
+        }
+        guard result == 0 else {
+            throw YagartoError.atomicDirectorySwapUnsupported(
+                output.path,
+                String(cString: strerror(errno))
+            )
+        }
+        guard let firstAfter = try metadata(at: first),
+              let secondAfter = try metadata(at: second),
+              firstAfter.st_ino == secondBefore.st_ino,
+              secondAfter.st_ino == firstBefore.st_ino else {
+            throw YagartoError.atomicDirectorySwapUnsupported(
+                output.path,
+                "同卷目录交换未保持预期原子语义。"
+            )
+        }
+    }
+
+    static func cleanupStaleBuildDirectories(
+        profile: ProfileID,
+        projectDirectory: URL,
+        outputDirectory: URL
+    ) throws {
+        let project = projectDirectory.standardizedFileURL
+        let output = outputDirectory.standardizedFileURL
+        let parent = output.deletingLastPathComponent()
+        let expectedParent = project
+            .appendingPathComponent(".yagarto", isDirectory: true)
+            .appendingPathComponent("build", isDirectory: true)
+            .standardizedFileURL
+        guard parent == expectedParent,
+              output.lastPathComponent == profile.rawValue else {
+            throw YagartoError.pathTraversal(output.path)
+        }
+        try createOutputDirectory(
+            projectDirectory: project,
+            outputDirectory: parent
+        )
+        try validateOutputHierarchy(
+            projectDirectory: project,
+            outputDirectory: parent
+        )
+
+        let entries: [URL]
+        do {
+            entries = try FileManager.default.contentsOfDirectory(
+                at: parent,
+                includingPropertiesForKeys: nil,
+                options: []
+            )
+        } catch {
+            throw YagartoError.cannotWriteOutput(parent.path, error.localizedDescription)
+        }
+        for candidate in entries where isStrictStaleBuildDirectoryName(
+            candidate.lastPathComponent,
+            profile: profile
+        ) {
+            guard let value = try metadata(at: candidate) else { continue }
+            if isSymbolicLink(value) {
+                throw YagartoError.outputSymlink(candidate.path)
+            }
+            guard (value.st_mode & S_IFMT) == S_IFDIR else {
+                throw YagartoError.unsafeBuildArtifact(candidate.path)
+            }
+            do {
+                try FileManager.default.removeItem(at: candidate)
+            } catch {
+                throw YagartoError.cannotWriteOutput(
+                    candidate.path,
+                    error.localizedDescription
+                )
+            }
+        }
+    }
+
     static func validateProducedArtifacts(
         _ artifacts: [URL],
         outputDirectory: URL
@@ -201,6 +319,43 @@ enum ProjectPathGuard {
                 String(cString: strerror(errno))
             )
         }
+    }
+
+    private static func createPrivateDirectory(
+        _ directory: URL,
+        errorPath: String
+    ) throws {
+        let result = directory.withUnsafeFileSystemRepresentation { path in
+            guard let path else { return Int32(-1) }
+            return Darwin.mkdir(path, S_IRWXU)
+        }
+        guard result == 0,
+              let created = try metadata(at: directory),
+              (created.st_mode & S_IFMT) == S_IFDIR,
+              (created.st_mode & 0o777) == S_IRWXU else {
+            throw YagartoError.atomicDirectorySwapUnsupported(
+                errorPath,
+                String(cString: strerror(errno))
+            )
+        }
+    }
+
+    private static func isStrictStaleBuildDirectoryName(
+        _ name: String,
+        profile: ProfileID
+    ) -> Bool {
+        for kind in ["staging", "old"] {
+            let prefix = ".\(profile.rawValue)-\(kind)-"
+            guard name.hasPrefix(prefix) else { continue }
+            let suffix = String(name.dropFirst(prefix.count))
+            guard suffix == suffix.lowercased(),
+                  let identifier = UUID(uuidString: suffix),
+                  identifier.uuidString.lowercased() == suffix else {
+                return false
+            }
+            return true
+        }
+        return false
     }
 
     private static func outputComponents(

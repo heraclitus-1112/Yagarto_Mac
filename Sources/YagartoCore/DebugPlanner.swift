@@ -103,7 +103,7 @@ public struct DebugPlanner {
             guard let boardConfig = openOCDBoardConfig else {
                 throw YagartoError.toolNotFound("scripts/board/stm32f4discovery.cfg")
             }
-            let openOCDCommand = "gdb_port pipe; log_output /dev/stderr"
+            let openOCDCommand = "gdb_port pipe; tcl_port disabled; telnet_port disabled; log_output /dev/stderr"
             let pipe = try pipeCommand(
                 executable: openOCD,
                 arguments: ["-f", boardConfig.path, "-c", openOCDCommand]

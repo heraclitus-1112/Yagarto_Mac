@@ -26,6 +26,7 @@ final class FlashPlannerTests: XCTestCase {
             executable: "/tools/openocd",
             args: [
                 "-f", board.path,
+                "-c", "gdb_port disabled; tcl_port disabled; telnet_port disabled",
                 "-c", "program {/tmp/烧录 项目/固件; shutdown.elf} verify reset exit"
             ],
             workingDirectory: project
@@ -103,7 +104,11 @@ final class FlashPlannerTests: XCTestCase {
         }
         XCTAssertEqual(runner.commands, [CommandSpec(
             executable: "/tools/openocd",
-            args: ["-f", "/board config.cfg", "-c", "init", "-c", "shutdown"],
+            args: [
+                "-f", "/board config.cfg",
+                "-c", "gdb_port disabled; tcl_port disabled; telnet_port disabled",
+                "-c", "init", "-c", "shutdown"
+            ],
             workingDirectory: project
         )])
     }
@@ -235,9 +240,10 @@ final class FlashPlannerTests: XCTestCase {
 
     func testSystemProfilerEnumeratorPreservesEnumerationFailure() {
         let diagnostic = "USB data source unavailable"
+        let secret = "STLINK-SERIAL-SECRET"
         let runner = FlashRecordingRunner(result: ProcessResult(
             exitStatus: 7,
-            stdout: "",
+            stdout: "USB device serial_number = \(secret)",
             stderr: diagnostic
         ))
 
@@ -245,7 +251,11 @@ final class FlashPlannerTests: XCTestCase {
             runner: runner
         ).presence()) { error in
             XCTAssertEqual((error as? YagartoError)?.exitCode, .buildFailure)
-            XCTAssertEqual((error as? YagartoError)?.toolOutput, diagnostic)
+            let output = (error as? YagartoError)?.toolOutput ?? ""
+            XCTAssertTrue(output.contains(diagnostic), output)
+            XCTAssertTrue(output.contains("退出码 7"), output)
+            XCTAssertFalse(output.contains(secret), output)
+            XCTAssertFalse(output.contains("serial_number"), output)
         }
     }
 

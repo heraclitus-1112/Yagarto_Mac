@@ -89,6 +89,54 @@ final class CLIIntegrationTests: XCTestCase {
         XCTAssertThrowsError(try decodeErrorEnvelope(result.stderr))
     }
 
+    func testRunFormatPrescanStopsAtDoubleDashBeforeFormatLikeELFFilename() throws {
+        let directory = try CLITemporaryDirectory()
+        let tools = directory.url.appendingPathComponent("double-dash-tools", isDirectory: true)
+        try writeExecutable(
+            "#!/bin/sh\nexit 0\n",
+            to: tools.appendingPathComponent("arm-none-eabi-gdb")
+        )
+        try writeExecutable(
+            "#!/bin/sh\nexit 0\n",
+            to: tools.appendingPathComponent("qemu-system-arm")
+        )
+
+        let result = try runCLI(
+            [
+                "run", "--profile", "cortex-m4", "--dry-run",
+                "--format", "json", "--", "--format=json.s"
+            ],
+            in: directory.url,
+            environment: ["PATH": "\(tools.path):/usr/bin:/bin"]
+        )
+
+        XCTAssertEqual(result.status, 0, result.stderr)
+        let plan = try JSONDecoder().decode(
+            DebugLaunchPlan.self,
+            from: Data(result.stdout.utf8)
+        )
+        XCTAssertTrue(plan.elf.hasSuffix("/--format=json.s"), plan.elf)
+    }
+
+    func testBuildFormatPrescanStopsAtDoubleDashBeforeFormatLikeSourceFilename() throws {
+        try requireARMBuildTools()
+        let directory = try CLITemporaryDirectory()
+        try Data("""
+        .text
+        .global start
+        start:
+            bx lr
+        """.utf8).write(to: directory.url.appendingPathComponent("--format=json.s"))
+
+        let result = try runCLI(
+            ["build", "--format", "json", "--", "--format=json.s"],
+            in: directory.url
+        )
+
+        XCTAssertEqual(result.status, 0, result.stderr)
+        XCTAssertNoThrow(try JSONSerialization.jsonObject(with: Data(result.stdout.utf8)))
+    }
+
     func testInvalidProfileWithJSONFormatEmitsStableStructuredChineseError() throws {
         let directory = try CLITemporaryDirectory()
         let arguments = ["init", "--profile", "invalid", "--format", "json"]

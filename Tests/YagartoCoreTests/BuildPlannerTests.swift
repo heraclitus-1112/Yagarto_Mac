@@ -317,8 +317,16 @@ final class BuildPlannerTests: XCTestCase {
     func testBundledLinkerScriptsContainCompleteMemoryAndSectionDefinitions() throws {
         let expectations: [(ProfileID, String, [String])] = [
             (.arm7tdmi, "arm7tdmi.ld", ["ORIGIN = 0x8000", "LENGTH = 64K"]),
-            (.cortexM4, "mps2-an386.ld", ["ORIGIN = 0x00000000", "LENGTH = 4M", "ORIGIN = 0x20000000"]),
-            (.stm32f4Discovery, "stm32f4-discovery.ld", ["ORIGIN = 0x08000000", "LENGTH = 1M", "LENGTH = 128K"])
+            (.cortexM4, "mps2-an386.ld", [
+                "ORIGIN = 0x00000000", "LENGTH = 4M",
+                "RAM (rwx)   : ORIGIN = 0x20000000, LENGTH = 0x003FF000",
+                "STACK (rw)  : ORIGIN = 0x203FF000, LENGTH = 4K"
+            ]),
+            (.stm32f4Discovery, "stm32f4-discovery.ld", [
+                "ORIGIN = 0x08000000", "LENGTH = 1M",
+                "RAM   (rwx) : ORIGIN = 0x20000000, LENGTH = 0x0001F000",
+                "STACK (rw)  : ORIGIN = 0x2001F000, LENGTH = 4K"
+            ])
         ]
 
         for (profile, filename, fragments) in expectations {
@@ -336,9 +344,9 @@ final class BuildPlannerTests: XCTestCase {
                 XCTAssertTrue(script.contains("ENTRY(Reset_Handler)"))
                 XCTAssertTrue(script.contains("KEEP(*(.isr_vector))"))
                 XCTAssertTrue(script.contains("__data_load__ = LOADADDR(.data)"))
-                XCTAssertTrue(script.contains("_estack = ORIGIN(RAM) + LENGTH(RAM)"))
-                XCTAssertTrue(script.contains("__stack_limit__ = _estack - 0x1000"))
-                XCTAssertTrue(script.contains("ASSERT(__bss_end__ <= __stack_limit__"))
+                XCTAssertTrue(script.contains("_estack = ORIGIN(STACK) + LENGTH(STACK)"))
+                XCTAssertTrue(script.contains("__stack_limit__ = ORIGIN(STACK)"))
+                XCTAssertTrue(script.contains(".noinit (NOLOAD)"))
             }
             for fragment in fragments {
                 XCTAssertTrue(script.contains(fragment), "\(filename) 缺少 \(fragment)")

@@ -489,6 +489,73 @@ private func waitForPTYCondition(
 }
 
 final class BuildExecutorTests: XCTestCase {
+    func testExecutorRejectsUnsupportedAtomicSwapBeforeToolsOrPublishedOutputChange() throws {
+        let directory = try TemporaryTestDirectory(component: "不支持原子交换")
+        let plan = makeRealWritingPlan(directory: directory.url)
+        try FileManager.default.createDirectory(
+            at: plan.outputDirectory,
+            withIntermediateDirectories: true
+        )
+        let marker = plan.outputDirectory.appendingPathComponent("last-good.txt")
+        try Data("last good".utf8).write(to: marker)
+        let runner = RecordingProcessRunner(results: [])
+        let executor = BuildExecutor(
+            runner: runner,
+            atomicSwapPreflight: { project, output in
+                XCTAssertEqual(project, plan.projectDirectory)
+                XCTAssertEqual(output, plan.outputDirectory)
+                throw YagartoError.atomicDirectorySwapUnsupported(
+                    output.path,
+                    "Operation not supported"
+                )
+            }
+        )
+
+        XCTAssertThrowsError(try executor.execute(plan)) { error in
+            XCTAssertEqual(
+                (error as? YagartoError)?.diagnosticCode,
+                "build.atomic_publish_unsupported"
+            )
+        }
+        XCTAssertTrue(runner.commands.isEmpty)
+        XCTAssertEqual(try String(contentsOf: marker, encoding: .utf8), "last good")
+    }
+
+    func testRealAtomicSwapCapabilityProbeUsesSameBuildVolumeWithoutResidue() throws {
+        let directory = try TemporaryTestDirectory(component: "真实原子交换探测")
+        let output = directory.url.appendingPathComponent(
+            ".yagarto/build/arm7tdmi",
+            isDirectory: true
+        )
+
+        XCTAssertNoThrow(try ProjectPathGuard.requireAtomicDirectorySwapSupport(
+            projectDirectory: directory.url,
+            outputDirectory: output
+        ))
+        let parent = output.deletingLastPathComponent()
+        let entries = try FileManager.default.contentsOfDirectory(
+            at: parent,
+            includingPropertiesForKeys: nil
+        )
+        XCTAssertFalse(entries.contains { $0.lastPathComponent.contains("swap-probe") })
+    }
+
+    func testInjectedSuccessfulAtomicSwapPreflightDoesNotNeedToCreateBuildParent() throws {
+        let directory = try TemporaryTestDirectory(component: "注入交换探测")
+        let plan = makeRealWritingPlan(directory: directory.url)
+        let runner = DelegatingRecordingProcessRunner()
+        var preflightCalls = 0
+
+        _ = try BuildExecutor(
+            runner: runner,
+            atomicSwapPreflight: { _, _ in preflightCalls += 1 }
+        ).execute(plan)
+
+        XCTAssertEqual(preflightCalls, 1)
+        XCTAssertEqual(runner.commands.count, plan.steps.count)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: plan.elfFile.path))
+    }
+
     func testExecutorStagesAndAtomicallyReplacesEveryArtifactLinkWithoutTouchingVictim() throws {
         enum LinkKind: String {
             case hard
@@ -608,6 +675,107 @@ final class BuildExecutorTests: XCTestCase {
             includingPropertiesForKeys: nil
         ).filter { $0.lastPathComponent.contains("-staging-") }
         XCTAssertTrue(leftovers.isEmpty, "残留 staging：\(leftovers)")
+    }
+
+    func testExecutorPublishesStableMapAndListingPathsAcrossRepeatedBuilds() throws {
+        let directory = try TemporaryTestDirectory(component: "稳定文本路径")
+        let plan = makeRealWritingPlan(directory: directory.url)
+        let sourcePath = directory.url.appendingPathComponent("源码/demo.s").path
+
+        _ = try BuildExecutor(
+            runner: StagingPathEmbeddingRunner(sourcePath: sourcePath)
+        ).execute(plan)
+        let firstMap = try String(contentsOf: plan.mapFile, encoding: .utf8)
+        let firstListing = try String(contentsOf: plan.listingFile, encoding: .utf8)
+
+        XCTAssertFalse(firstMap.contains("-staging-"), firstMap)
+        XCTAssertFalse(firstListing.contains("-staging-"), firstListing)
+        XCTAssertTrue(firstMap.contains(plan.outputDirectory.path), firstMap)
+        XCTAssertTrue(firstListing.contains(plan.outputDirectory.path), firstListing)
+        XCTAssertTrue(firstMap.contains(sourcePath), firstMap)
+        XCTAssertTrue(firstListing.contains(sourcePath), firstListing)
+
+        _ = try BuildExecutor(
+            runner: StagingPathEmbeddingRunner(sourcePath: sourcePath)
+        ).execute(plan)
+        XCTAssertEqual(
+            try String(contentsOf: plan.mapFile, encoding: .utf8),
+            firstMap
+        )
+        XCTAssertEqual(
+            try String(contentsOf: plan.listingFile, encoding: .utf8),
+            firstListing
+        )
+    }
+
+    func testExecutorCleansOnlyStrictCurrentProfileStaleDirectories() throws {
+        let directory = try TemporaryTestDirectory(component: "陈旧目录清理")
+        let plan = makeRealWritingPlan(directory: directory.url)
+        let parent = plan.outputDirectory.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
+        let staleNames = [
+            ".arm7tdmi-staging-11111111-1111-4111-8111-111111111111",
+            ".arm7tdmi-old-22222222-2222-4222-8222-222222222222"
+        ]
+        let preservedNames = [
+            ".cortex-m4-staging-33333333-3333-4333-8333-333333333333",
+            ".arm7tdmi-staging-not-a-uuid",
+            ".arm7tdmi-staging-AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA",
+            "ordinary-directory"
+        ]
+        for name in staleNames + preservedNames {
+            let candidate = parent.appendingPathComponent(name, isDirectory: true)
+            try FileManager.default.createDirectory(at: candidate, withIntermediateDirectories: false)
+            try Data("marker".utf8).write(to: candidate.appendingPathComponent("marker"))
+        }
+
+        _ = try BuildExecutor().execute(plan)
+
+        for name in staleNames {
+            XCTAssertFalse(
+                FileManager.default.fileExists(atPath: parent.appendingPathComponent(name).path),
+                name
+            )
+        }
+        for name in preservedNames {
+            XCTAssertTrue(
+                FileManager.default.fileExists(atPath: parent.appendingPathComponent(name).path),
+                name
+            )
+        }
+    }
+
+    func testExecutorRejectsStrictlyNamedStaleSymlinkWithoutTouchingVictim() throws {
+        let directory = try TemporaryTestDirectory(component: "陈旧链接拒绝")
+        let outside = try TemporaryTestDirectory(component: "陈旧链接外部")
+        let plan = makeRealWritingPlan(directory: directory.url)
+        let parent = plan.outputDirectory.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
+        let victim = outside.url.appendingPathComponent("victim", isDirectory: true)
+        try FileManager.default.createDirectory(at: victim, withIntermediateDirectories: false)
+        try Data("keep".utf8).write(to: victim.appendingPathComponent("marker"))
+        let staleLink = parent.appendingPathComponent(
+            ".arm7tdmi-staging-44444444-4444-4444-8444-444444444444"
+        )
+        try FileManager.default.createSymbolicLink(
+            atPath: staleLink.path,
+            withDestinationPath: victim.path
+        )
+        let runner = RecordingProcessRunner(results: [
+            ProcessResult(exitStatus: 9, stdout: "", stderr: "must not run")
+        ])
+
+        XCTAssertThrowsError(try BuildExecutor(runner: runner).execute(plan)) { error in
+            XCTAssertEqual(
+                (error as? YagartoError)?.diagnosticCode,
+                "configuration.output_symlink"
+            )
+        }
+        XCTAssertTrue(runner.commands.isEmpty)
+        XCTAssertEqual(
+            try String(contentsOf: victim.appendingPathComponent("marker"), encoding: .utf8),
+            "keep"
+        )
     }
 
     func testExecutorStopsAfterFirstFailedStepAndMapsExitCodeFour() throws {
@@ -838,6 +1006,41 @@ private final class MutatingDelegatingProcessRunner: ProcessRunning {
             try mutation()
         }
         return try ProcessRunner().run(command)
+    }
+}
+
+private final class StagingPathEmbeddingRunner: ProcessRunning {
+    private let sourcePath: String
+    private var stagedELFPath: String?
+
+    init(sourcePath: String) {
+        self.sourcePath = sourcePath
+    }
+
+    func run(_ command: CommandSpec) throws -> ProcessResult {
+        for argument in command.args {
+            switch URL(fileURLWithPath: argument).pathExtension {
+            case "o", "elf", "bin":
+                try Data().write(to: URL(fileURLWithPath: argument))
+                if argument.hasSuffix(".elf") {
+                    stagedELFPath = argument
+                }
+            case "map":
+                try Data("OUTPUT \(argument)\nSOURCE \(sourcePath)\n".utf8).write(
+                    to: URL(fileURLWithPath: argument)
+                )
+            default:
+                continue
+            }
+        }
+        if command.executable == "/usr/bin/printf" {
+            return ProcessResult(
+                exitStatus: 0,
+                stdout: "ELF \(stagedELFPath ?? "missing")\nSOURCE \(sourcePath)\n",
+                stderr: ""
+            )
+        }
+        return ProcessResult(exitStatus: 0, stdout: "", stderr: "")
     }
 }
 
