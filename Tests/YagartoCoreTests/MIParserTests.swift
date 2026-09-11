@@ -17,6 +17,7 @@ final class MIParserTests: XCTestCase {
             ("^running", .result(MIResultRecord(token: nil, resultClass: .running))),
             ("3^connected", .result(MIResultRecord(token: 3, resultClass: .connected))),
             ("9^exit", .result(MIResultRecord(token: 9, resultClass: .exit))),
+            ("11^exited", .result(MIResultRecord(token: 11, resultClass: .exited))),
             ("4^error,msg=\"bad\"", .result(MIResultRecord(
                 token: 4,
                 resultClass: .error,
@@ -76,10 +77,10 @@ final class MIParserTests: XCTestCase {
 
     func testDecodesGDBCStringEscapesAsBytesAndPreservesUnicode() throws {
         let record = try resultRecord(
-            #"^done,text="路径\\\"\n\r\t\101\x42\303\251""#
+            #"^done,text="路径\\\"\n\r\t\e\101\x42\303\251""#
         )
 
-        XCTAssertEqual(record.results["text"]?.constant, "路径\\\"\n\r\tABé")
+        XCTAssertEqual(record.results["text"]?.constant, "路径\\\"\n\r\t\u{1B}ABé")
     }
 
     func testRejectsInvalidUTF8FromRawTransport() {

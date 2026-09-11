@@ -4,7 +4,7 @@ Phase 4A 在 `YagartoCore` 中提供与界面无关的 GDB/MI3 调试核心。�
 
 ## 分层与入口
 
-- `MIParser` 把单条 MI 输出解析为 `MIRecord`。记录覆盖 `^done`、`^running`、`^connected`、`^exit`、`^error`，`*`/`+`/`=` 异步记录，`~`/`@`/`&` 流记录和 `(gdb)` 提示符。
+- `MIParser` 把单条 MI 输出解析为 `MIRecord`。记录覆盖 `^done`、`^running`、`^connected`、`^exit`、`^exited`、`^error`，`*`/`+`/`=` 异步记录，`~`/`@`/`&` 流记录和 `(gdb)` 提示符。
 - `GDBMISession` actor 负责一个真实 GDB 进程、MI token、请求响应关联和事件分发。
 - `DebuggerStateMachine` 定义固定生命周期图并对非法边返回 `DebuggerTransitionError`。
 - `DebuggerController` actor 接收 `ProfileID` 与 `DebugLaunchPlan`，执行 UI 所需的控制命令，并在停止时生成 `DebugSnapshot`。
@@ -27,13 +27,13 @@ for await event in events {
 
 `MIValue` 保留 constant、tuple 和 list；list 明确区分 value-list 与 result-list。`MIResults.fields` 保留原始顺序和重复变量，不会用字典覆盖信息；下标返回第一个值，`values(for:)` 返回全部同名值。这样既能处理 GDB 的 `stack=[frame=...,frame=...]`，也有确定的单值读取规则。
 
-MI C-string 按字节解释 `\\`、`\"`、`\n`、`\r`、`\t`、八进制和十六进制转义，随后严格解码 UTF-8。`parse(Data)` 遇到无效 UTF-8 会返回 `.invalidUTF8`，不会静默替换字符。默认单行上限为 256 KiB、嵌套深度为 32；超限、非法转义、未闭合值、未知记录/结果类别与尾随垃圾都是有类型的 `MIParseError`。
+MI C-string 按字节解释 `\\`、`\"`、`\n`、`\r`、`\t`、GDB 用于 ESC（0x1B）的 `\e`、八进制和十六进制转义，随后严格解码 UTF-8。`parse(Data)` 遇到无效 UTF-8 会返回 `.invalidUTF8`，不会静默替换字符。默认单行上限为 256 KiB、嵌套深度为 32；超限、非法转义、未闭合值、未知记录/结果类别与尾随垃圾都是有类型的 `MIParseError`。
 
 `MIResultRecord` 和 `MIAsyncRecord` 提供 error message、stop reason、frame、register names/values、stack、memory 与 disassembly 提取。地址、行号、寄存器值等通过 `MIRawNumeric` 同时保留 GDB 原字符串和可选 `UInt64`，界面不需要在显示与数值操作之间二选一。
 
 ## 进程与并发语义
 
-`GDBMISession` 使用 executable、argv 数组和 cwd 直接启动进程，不经过 shell。底层用 `posix_spawn` file actions 把三根 `Pipe` 接到标准流，并用 `POSIX_SPAWN_SETPGROUP` 在 exec 前原子建立独立进程组。它移除已有 MI interpreter 选项并在原位置归一成恰好一个 `--interpreter=mi3`；原参数未提供 interpreter 时把 MI3 选项放在最前面。其余参数仍保持为独立 argv 元素，包括 `DebugLaunchPlan` 中的所有 `-ex` 与 GDB 命令。
+`GDBMISession` 使用 executable、argv 数组和 cwd 直接启动进程，不经过 shell。底层用 `posix_spawn` file actions 把三根 `Pipe` 接到标准流，并用 `POSIX_SPAWN_SETPGROUP` 在 exec 前原子建立独立进程组。argv 归一化器按 GDB 参数语义扫描：只在顶层位置移除 `--interpreter`/`-i` 的分离或等号形式，再插入恰好一个 `--interpreter=mi3`；`-ex`/`--eval-command`、`-x`/`--command` 等需值选项及其紧随值作为不可拆分的一对原样保留，`--args` 或 `--` 后的参数也完全保留。因此即使命令文本或文件名长得像 `--interpreter=...`，也不会被误删。孤立的需值选项（包括空的长选项等号形式）会在启动前返回 `.missingOptionValue` 配置错误。`DebugLaunchPlan` 的所有 `-ex` 与 pipe 命令仍是原始独立 argv 元素。
 
 每个 `send(_:)` 分配单调递增 token。并发请求可以乱序完成而不会串线；`^error` 抛出含 token、原命令、GDB message 与原始记录的 `GDBMISessionError.commandFailed`。取消一个调用只恢复该请求，EOF 或进程退出会恢复所有剩余请求一次。
 

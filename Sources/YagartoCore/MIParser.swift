@@ -232,6 +232,7 @@ private struct Cursor {
             case UInt8(ascii: "n"): decoded.append(0x0A)
             case UInt8(ascii: "r"): decoded.append(0x0D)
             case UInt8(ascii: "t"): decoded.append(0x09)
+            case UInt8(ascii: "e"): decoded.append(0x1B)
             case UInt8(ascii: "a"): decoded.append(0x07)
             case UInt8(ascii: "b"): decoded.append(0x08)
             case UInt8(ascii: "f"): decoded.append(0x0C)

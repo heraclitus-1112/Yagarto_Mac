@@ -21,6 +21,7 @@ public enum GDBMISessionError: Error, Equatable, Sendable {
     case notStarted
     case alreadyStarted
     case invalidCommand
+    case missingOptionValue(option: String)
     case launchFailed(executable: String, detail: String)
     case writeFailed(String)
     case waitFailed(String)
@@ -32,7 +33,8 @@ public enum GDBMISessionError: Error, Equatable, Sendable {
         switch self {
         case .launchFailed: .missingTool
         case .processExited, .writeFailed, .waitFailed, .endOfFile: .buildFailure
-        case .notStarted, .alreadyStarted, .invalidCommand, .commandFailed: .configuration
+        case .notStarted, .alreadyStarted, .invalidCommand, .missingOptionValue, .commandFailed:
+            .configuration
         }
     }
 
@@ -66,6 +68,7 @@ public actor GDBMISession {
 
     private let executable: String
     private let arguments: [String]
+    private let argumentValidationError: GDBMISessionError?
     private let workingDirectory: URL
     private let parser: MIParser
     private let eventBufferLimit: Int
@@ -96,7 +99,19 @@ public actor GDBMISession {
         maxDepth: Int = MIParser.defaultMaxDepth
     ) {
         self.executable = executable
-        self.arguments = Self.normalizedArguments(arguments)
+        do {
+            self.arguments = try Self.normalizedArguments(arguments)
+            argumentValidationError = nil
+        } catch let error as GDBMISessionError {
+            self.arguments = []
+            argumentValidationError = error
+        } catch {
+            self.arguments = []
+            argumentValidationError = .launchFailed(
+                executable: executable,
+                detail: String(describing: error)
+            )
+        }
         self.workingDirectory = workingDirectory.standardizedFileURL
         self.eventBufferLimit = max(1, eventBufferLimit)
         parser = MIParser(maxDepth: maxDepth, maxLineBytes: maxLineBytes)
@@ -123,29 +138,98 @@ public actor GDBMISession {
     public var processIdentifier: pid_t? { processBox?.processIdentifier }
     public var droppedEventCount: Int { totalDroppedEvents }
 
-    public static func normalizedArguments(_ arguments: [String]) -> [String] {
+    public static func normalizedArguments(_ arguments: [String]) throws -> [String] {
+        let optionsWithSeparateValues: Set<String> = [
+            "-b", "--baud",
+            "-c", "--core",
+            "-cd", "--cd",
+            "-d", "--directory",
+            "-D", "--data-directory",
+            "-e", "--exec",
+            "-ex", "--eval-command",
+            "-iex", "--init-eval-command",
+            "-ix", "--init-command",
+            "-l",
+            "-p", "--pid",
+            "-s", "--symbols",
+            "-se", "--se",
+            "-tty", "--tty",
+            "-x", "--command"
+        ]
         var normalized: [String] = []
-        var inserted = false
+        var interpreterInsertionIndex: Int?
         var index = 0
         while index < arguments.count {
             let argument = arguments[index]
-            let isSeparate = argument == "--interpreter" || argument == "-i"
-            let isAttached = argument.hasPrefix("--interpreter=") || argument.hasPrefix("-i=")
-            if isSeparate || isAttached {
-                if !inserted {
-                    normalized.append("--interpreter=mi3")
-                    inserted = true
-                }
-                let hasSeparateValue = isSeparate
-                    && index + 1 < arguments.count
-                    && !arguments[index + 1].hasPrefix("-")
-                index += hasSeparateValue ? 2 : 1
-            } else {
-                normalized.append(argument)
-                index += 1
+
+            // Everything after --args or the conventional option terminator belongs
+            // to the inferior/positional tail, so option-shaped strings stay intact.
+            if argument == "--args" || argument == "--" {
+                normalized.append(contentsOf: arguments[index...])
+                break
             }
+
+            // A GDB command or filename may itself begin with "--interpreter" (or
+            // any other option spelling). Consume value-taking options atomically.
+            if optionsWithSeparateValues.contains(argument) {
+                guard index + 1 < arguments.count else {
+                    throw GDBMISessionError.missingOptionValue(option: argument)
+                }
+                normalized.append(argument)
+                normalized.append(arguments[index + 1])
+                index += 2
+                continue
+            }
+
+            if let equalsIndex = argument.firstIndex(of: "=") {
+                let option = String(argument[..<equalsIndex])
+                if option.hasPrefix("--"), optionsWithSeparateValues.contains(option) {
+                    let valueStart = argument.index(after: equalsIndex)
+                    guard valueStart < argument.endIndex else {
+                        throw GDBMISessionError.missingOptionValue(option: option)
+                    }
+                    normalized.append(argument)
+                    index += 1
+                    continue
+                }
+            }
+
+            if argument == "--interpreter" || argument == "-i" {
+                guard index + 1 < arguments.count,
+                      !arguments[index + 1].isEmpty,
+                      !arguments[index + 1].hasPrefix("-") else {
+                    throw GDBMISessionError.missingOptionValue(option: argument)
+                }
+                if interpreterInsertionIndex == nil {
+                    interpreterInsertionIndex = normalized.count
+                }
+                index += 2
+                continue
+            }
+
+            let attachedInterpreter: String?
+            if argument.hasPrefix("--interpreter=") {
+                attachedInterpreter = "--interpreter"
+            } else if argument.hasPrefix("-i=") {
+                attachedInterpreter = "-i"
+            } else {
+                attachedInterpreter = nil
+            }
+            if let attachedInterpreter {
+                guard argument.count > attachedInterpreter.count + 1 else {
+                    throw GDBMISessionError.missingOptionValue(option: attachedInterpreter)
+                }
+                if interpreterInsertionIndex == nil {
+                    interpreterInsertionIndex = normalized.count
+                }
+                index += 1
+                continue
+            }
+
+            normalized.append(argument)
+            index += 1
         }
-        if !inserted { normalized.insert("--interpreter=mi3", at: 0) }
+        normalized.insert("--interpreter=mi3", at: interpreterInsertionIndex ?? 0)
         return normalized
     }
 
@@ -162,6 +246,9 @@ public actor GDBMISession {
     }
 
     public func start() throws {
+        if let argumentValidationError {
+            throw argumentValidationError
+        }
         guard processBox == nil, termination == nil, terminalFailure == nil else {
             throw GDBMISessionError.alreadyStarted
         }

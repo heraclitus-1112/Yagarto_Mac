@@ -10,14 +10,14 @@ final class GDBMISessionTests: XCTestCase {
         XCTAssertEqual(GDBMISession.launchStrategy, .posixSpawnProcessGroup)
     }
 
-    func testArgumentsContainExactlyOneMI3InterpreterAndPreserveEverythingElse() {
+    func testArgumentsContainExactlyOneMI3InterpreterAndPreserveEverythingElse() throws {
         let original = [
             "-q", "--interpreter", "mi2",
             "-ex", "target remote | exec '/路径/qemu system-arm' '-gdb' 'stdio'",
             "-i=mi3", "-ex", "monitor reset halt"
         ]
 
-        let normalized = GDBMISession.normalizedArguments(original)
+        let normalized = try GDBMISession.normalizedArguments(original)
 
         XCTAssertEqual(normalized.filter { $0 == "--interpreter=mi3" }.count, 1)
         XCTAssertEqual(normalized, [
@@ -27,13 +27,140 @@ final class GDBMISessionTests: XCTestCase {
         ])
 
         XCTAssertEqual(
-            GDBMISession.normalizedArguments(["--interpreter", "-ex", "file demo.elf"]),
-            ["--interpreter=mi3", "-ex", "file demo.elf"]
-        )
-        XCTAssertEqual(
-            GDBMISession.normalizedArguments(["-q", "-ex", "file demo.elf"]),
+            try GDBMISession.normalizedArguments(["-q", "-ex", "file demo.elf"]),
             ["--interpreter=mi3", "-q", "-ex", "file demo.elf"]
         )
+    }
+
+    func testArgumentNormalizerTreatsOptionValuesAsOpaqueArguments() throws {
+        let arguments = [
+            "-ex", "--interpreter=sentinel",
+            "--eval-command", "target remote | exec '/路径/qemu system-arm' '-gdb' 'stdio'",
+            "-x", "--interpreter=commands.gdb",
+            "--command", "-leading-command-file",
+            "--interpreter=mi2"
+        ]
+
+        XCTAssertEqual(try GDBMISession.normalizedArguments(arguments), [
+            "-ex", "--interpreter=sentinel",
+            "--eval-command", "target remote | exec '/路径/qemu system-arm' '-gdb' 'stdio'",
+            "-x", "--interpreter=commands.gdb",
+            "--command", "-leading-command-file",
+            "--interpreter=mi3"
+        ])
+    }
+
+    func testArgumentNormalizerPreservesEverySupportedValueTakingOptionPair() throws {
+        let options = [
+            "-b", "--baud", "-c", "--core", "-cd", "--cd", "-d", "--directory",
+            "-D", "--data-directory", "-e", "--exec", "-ex", "--eval-command",
+            "-iex", "--init-eval-command", "-ix", "--init-command", "-l", "-p", "--pid",
+            "-s", "--symbols", "-se", "--se", "-tty", "--tty", "-x", "--command"
+        ]
+
+        for option in options {
+            let value = "--interpreter=value-for-\(option)"
+            XCTAssertEqual(
+                try GDBMISession.normalizedArguments([option, value]),
+                ["--interpreter=mi3", option, value],
+                option
+            )
+            XCTAssertThrowsError(try GDBMISession.normalizedArguments([option]), option) { error in
+                XCTAssertEqual(
+                    error as? GDBMISessionError,
+                    .missingOptionValue(option: option)
+                )
+            }
+            if option.hasPrefix("--") {
+                XCTAssertEqual(
+                    try GDBMISession.normalizedArguments(["\(option)=\(value)"]),
+                    ["--interpreter=mi3", "\(option)=\(value)"],
+                    option
+                )
+                XCTAssertThrowsError(
+                    try GDBMISession.normalizedArguments(["\(option)="]),
+                    option
+                ) { error in
+                    XCTAssertEqual(
+                        error as? GDBMISessionError,
+                        .missingOptionValue(option: option)
+                    )
+                }
+            }
+        }
+    }
+
+    func testArgumentNormalizerOnlyRewritesExactTopLevelInterpreterForms() throws {
+        let arguments = [
+            "-q", "--interpreter", "mi2", "-i=mi",
+            "--interpreter=mi3", "-i", "mi2",
+            "--interpreter-mode=sentinel", "-i-extra", "--args",
+            "/tmp/program", "--interpreter=inferior-argument"
+        ]
+
+        XCTAssertEqual(try GDBMISession.normalizedArguments(arguments), [
+            "-q", "--interpreter=mi3",
+            "--interpreter-mode=sentinel", "-i-extra", "--args",
+            "/tmp/program", "--interpreter=inferior-argument"
+        ])
+    }
+
+    func testArgumentNormalizerHonorsTheOptionTerminator() throws {
+        XCTAssertEqual(
+            try GDBMISession.normalizedArguments([
+                "-q", "--", "/tmp/program", "--interpreter=program-argument"
+            ]),
+            [
+                "--interpreter=mi3", "-q", "--", "/tmp/program",
+                "--interpreter=program-argument"
+            ]
+        )
+    }
+
+    func testArgumentNormalizerRejectsOrphanValueTakingOptions() throws {
+        for option in ["-ex", "--eval-command", "-x", "--command", "--interpreter", "-i"] {
+            XCTAssertThrowsError(try GDBMISession.normalizedArguments([option]), option) { error in
+                XCTAssertEqual(
+                    error as? GDBMISessionError,
+                    .missingOptionValue(option: option)
+                )
+            }
+        }
+        for option in ["--interpreter=", "-i="] {
+            XCTAssertThrowsError(try GDBMISession.normalizedArguments([option]), option) { error in
+                XCTAssertEqual(
+                    error as? GDBMISessionError,
+                    .missingOptionValue(option: String(option.dropLast()))
+                )
+            }
+        }
+        XCTAssertThrowsError(
+            try GDBMISession.normalizedArguments(["--interpreter", "-ex", "file demo.elf"])
+        ) { error in
+            XCTAssertEqual(
+                error as? GDBMISessionError,
+                .missingOptionValue(option: "--interpreter")
+            )
+        }
+    }
+
+    func testInvalidLaunchArgumentsFailBeforeSpawning() async throws {
+        let fixture = try FakeGDBFixture()
+        let session = GDBMISession(
+            executable: fixture.script.path,
+            arguments: ["--command"],
+            workingDirectory: fixture.directory
+        )
+
+        do {
+            try await session.start()
+            XCTFail("expected typed configuration error")
+        } catch let error as GDBMISessionError {
+            XCTAssertEqual(error, .missingOptionValue(option: "--command"))
+            XCTAssertEqual(error.exitCode, .configuration)
+        }
+        let processIdentifier = await session.processIdentifier
+        XCTAssertNil(processIdentifier)
     }
 
     func testRealProcessPreservesUnicodeWorkingDirectoryAndArgumentBoundaries() async throws {
@@ -68,7 +195,7 @@ final class GDBMISessionTests: XCTestCase {
         XCTAssertEqual(actualStatus, 0)
         XCTAssertEqual(expectedDirectory.st_dev, actualDirectory.st_dev)
         XCTAssertEqual(expectedDirectory.st_ino, actualDirectory.st_ino)
-        XCTAssertEqual(captured.arguments, GDBMISession.normalizedArguments(arguments))
+        XCTAssertEqual(captured.arguments, try GDBMISession.normalizedArguments(arguments))
     }
 
     func testOutOfOrderResponsesCorrelateToConcurrentTokens() async throws {
@@ -134,6 +261,19 @@ final class GDBMISessionTests: XCTestCase {
         } catch {
             XCTFail("unexpected error: \(error)")
         }
+        await session.shutdown(timeout: .seconds(1))
+    }
+
+    func testExitedResultCompletesItsRequestWithoutEndingTheSession() async throws {
+        let fixture = try FakeGDBFixture()
+        let session = fixture.session()
+        try await session.start()
+
+        let exited = try await session.send("-inferior-exited-result")
+        XCTAssertEqual(exited.resultClass, .exited)
+        let subsequent = try await session.send("-list-features")
+        XCTAssertEqual(subsequent.resultClass, .done)
+
         await session.shutdown(timeout: .seconds(1))
     }
 
@@ -263,6 +403,34 @@ final class GDBMISessionTests: XCTestCase {
         await session.shutdown(timeout: .seconds(2))
     }
 
+    func testInstalledArmGDBDecodesRealEscapeConsoleStreamWhenAvailable() async throws {
+        let executable = "/opt/homebrew/bin/arm-none-eabi-gdb"
+        guard FileManager.default.isExecutableFile(atPath: executable) else {
+            throw XCTSkip("未安装 arm-none-eabi-gdb，跳过真实 \\e stream 回归")
+        }
+        let session = GDBMISession(
+            executable: executable,
+            arguments: ["-q", "-nx"],
+            workingDirectory: URL(fileURLWithPath: "/tmp", isDirectory: true)
+        )
+        let stream = await session.events()
+        try await session.start()
+        let consoleTask = Task { try await firstConsole(from: stream, timeout: .seconds(1)) }
+
+        do {
+            _ = try await session.send(
+                #"-interpreter-exec console "printf \"\\e[31mRED\\e[0m\"""#
+            )
+            let console = try await consoleTask.value
+            await session.shutdown(timeout: .seconds(2))
+            XCTAssertEqual(console, "\u{1B}[31mRED\u{1B}[0m")
+        } catch {
+            consoleTask.cancel()
+            await session.shutdown(timeout: .seconds(2))
+            throw error
+        }
+    }
+
     func testUnresponsiveGDBEscalatesToProcessGroupKillAndReapsParent() async throws {
         let fixture = try StubbornGDBFixture()
         let session = GDBMISession(
@@ -378,6 +546,27 @@ private func collectUntilFinished(
     }
 }
 
+private func firstConsole(
+    from stream: AsyncStream<GDBMIEvent>,
+    timeout: Duration
+) async throws -> String {
+    try await withThrowingTaskGroup(of: String.self) { group in
+        group.addTask {
+            for await event in stream {
+                if case .console(let text) = event { return text }
+            }
+            throw FakeGDBTestError.timeout
+        }
+        group.addTask {
+            try await Task.sleep(for: timeout)
+            throw FakeGDBTestError.timeout
+        }
+        defer { group.cancelAll() }
+        guard let value = try await group.next() else { throw FakeGDBTestError.timeout }
+        return value
+    }
+}
+
 private struct FakeGDBCapture: Codable {
     let cwd: String
     let arguments: [String]
@@ -449,6 +638,8 @@ for raw in sys.stdin:
         held = None
     elif command == "-fail":
         out(token + '^error,msg="\\345\\221\\275\\344\\273\\244\\345\\244\\261\\350\\264\\245"')
+    elif command == "-inferior-exited-result":
+        out(token + "^exited")
     elif command == "-hang":
         pass
     elif command == "-eof":

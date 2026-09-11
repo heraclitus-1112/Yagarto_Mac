@@ -51,6 +51,7 @@ public enum MIResultClass: String, Equatable, Sendable {
     case running
     case connected
     case exit
+    case exited
     case error
 }
 
