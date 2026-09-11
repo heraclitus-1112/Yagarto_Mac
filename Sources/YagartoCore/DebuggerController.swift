@@ -3,6 +3,11 @@
 import Foundation
 
 public actor DebuggerController {
+    private struct TrackedTask {
+        let id: UUID
+        let task: Task<Void, Never>
+    }
+
     private let profile: ProfileID
     private let consoleLimit: Int
     private let eventBufferLimit: Int
@@ -10,7 +15,11 @@ public actor DebuggerController {
     private var machine: DebuggerStateMachine
     private var plan: DebugLaunchPlan?
     private var session: GDBMISession?
-    private var sessionEventTask: Task<Void, Never>?
+    private var generation = UUID()
+    private var sessionEventTask: TrackedTask?
+    private var snapshotTasks: [UUID: TrackedTask] = [:]
+    private var currentSnapshotTaskID: UUID?
+    private var recoveryTask: TrackedTask?
     private var console: [DebugConsoleEntry] = []
     private var memoryRequest = DebugMemoryRequest.stackWindow
     private var subscribers: [UUID: AsyncStream<DebuggerEvent>.Continuation] = [:]
@@ -80,22 +89,49 @@ public actor DebuggerController {
         try Task.checkCancellation()
         guard let plan else { throw DebuggerControllerError.missingLaunchPlan }
         try transition(.launchStarted)
+        generation = UUID()
+        await cancelAndAwaitBackgroundTasks()
+        if let staleSession = session {
+            session = nil
+            await staleSession.shutdown(timeout: .zero)
+        }
+        try Task.checkCancellation()
+
+        let launchGeneration = UUID()
+        generation = launchGeneration
+        latestSnapshot = nil
         let newSession = GDBMISession(plan: plan)
         session = newSession
         let stream = await newSession.events()
-        sessionEventTask = Task { [weak self] in
+        let eventTaskID = UUID()
+        let eventTask = Task { [weak self] in
             for await event in stream {
                 guard !Task.isCancelled else { return }
-                await self?.receive(event)
+                await self?.receive(
+                    event,
+                    generation: launchGeneration,
+                    sourceSession: newSession
+                )
             }
+            await self?.eventTaskFinished(eventTaskID)
         }
+        sessionEventTask = TrackedTask(
+            id: eventTaskID,
+            task: eventTask
+        )
         do {
             try await newSession.start()
+            guard isCurrent(launchGeneration, session: newSession) else {
+                throw CancellationError()
+            }
         } catch {
-            sessionEventTask?.cancel()
-            sessionEventTask = nil
-            session = nil
-            try transition(.launchFailed)
+            if isCurrent(launchGeneration, session: newSession) {
+                generation = UUID()
+                session = nil
+                await cancelAndAwaitBackgroundTasks()
+                await newSession.shutdown(timeout: .zero)
+                if machine.state == .launching { try transition(.launchFailed) }
+            }
             throw error
         }
     }
@@ -126,12 +162,11 @@ public actor DebuggerController {
 
     public func stop() async throws {
         try transition(.terminationStarted)
-        sessionEventTask?.cancel()
-        sessionEventTask = nil
-        if let session {
-            await session.shutdown()
-        }
+        generation = UUID()
+        let stoppedSession = session
         session = nil
+        await cancelAndAwaitBackgroundTasks()
+        if let stoppedSession { await stoppedSession.shutdown() }
         try transition(.terminationCompleted)
     }
 
@@ -173,15 +208,28 @@ public actor DebuggerController {
         _ = try await requiredSession().send("-break-delete \(identifier)")
     }
 
-    private func receive(_ event: GDBMIEvent) async {
+    private func receive(
+        _ event: GDBMIEvent,
+        generation eventGeneration: UUID,
+        sourceSession: GDBMISession
+    ) {
+        guard isCurrent(eventGeneration, session: sourceSession),
+              machine.state != .idle,
+              machine.state != .building,
+              machine.state != .ready else { return }
         switch event {
         case .asynchronous(let record) where record.kind == .exec && record.asyncClass == "running":
             guard machine.state == .launching || machine.state == .stopped else { return }
             try? transition(.inferiorRunning)
+            cancelSnapshotTasks()
         case .asynchronous(let record) where record.kind == .exec && record.asyncClass == "stopped":
             guard machine.state == .launching || machine.state == .running else { return }
             try? transition(.inferiorStopped)
-            await refreshSnapshot(stopped: record)
+            dispatchSnapshot(
+                stopped: record,
+                session: sourceSession,
+                generation: eventGeneration
+            )
         case .console(let text): appendConsole(.init(channel: .console, text: text))
         case .target(let text): appendConsole(.init(channel: .target, text: text))
         case .log(let text): appendConsole(.init(channel: .log, text: text))
@@ -201,7 +249,11 @@ public actor DebuggerController {
                 message: "MI event buffer dropped \(total) event(s)"
             ))
         case .processExited(let termination):
-            await recoverAfterUnexpectedExit(termination)
+            dispatchRecovery(
+                termination,
+                session: sourceSession,
+                generation: eventGeneration
+            )
         case .endOfFile:
             publishDiagnostic(.init(pane: .session, isCritical: true, message: "GDB stdout reached EOF"))
         case .result, .orphanResult, .prompt, .asynchronous:
@@ -209,8 +261,17 @@ public actor DebuggerController {
         }
     }
 
-    private func refreshSnapshot(stopped: MIAsyncRecord) async {
-        guard let session else { return }
+    private func refreshSnapshot(
+        stopped: MIAsyncRecord,
+        session: GDBMISession,
+        generation snapshotGeneration: UUID,
+        taskID: UUID
+    ) async {
+        guard mayContinueSnapshot(
+            taskID: taskID,
+            generation: snapshotGeneration,
+            session: session
+        ) else { return }
         var diagnostics: [DebugDiagnostic] = []
         var location = stopped.frame
         var registerNames: [String] = []
@@ -224,6 +285,11 @@ public actor DebuggerController {
         } catch {
             diagnostics.append(diagnostic(.frame, critical: true, error: error))
         }
+        guard mayContinueSnapshot(
+            taskID: taskID,
+            generation: snapshotGeneration,
+            session: session
+        ) else { return }
         do {
             registerNames = try await sendSnapshotCommand(
                 "-data-list-register-names",
@@ -236,11 +302,21 @@ public actor DebuggerController {
         } catch {
             diagnostics.append(diagnostic(.registers, critical: true, error: error))
         }
+        guard mayContinueSnapshot(
+            taskID: taskID,
+            generation: snapshotGeneration,
+            session: session
+        ) else { return }
         do {
             stack = try await sendSnapshotCommand("-stack-list-frames", to: session).stackFrames
         } catch {
             diagnostics.append(diagnostic(.stack, critical: false, error: error))
         }
+        guard mayContinueSnapshot(
+            taskID: taskID,
+            generation: snapshotGeneration,
+            session: session
+        ) else { return }
         do {
             let request = memoryRequest
             try validate(request)
@@ -251,6 +327,11 @@ public actor DebuggerController {
         } catch {
             diagnostics.append(diagnostic(.memory, critical: false, error: error))
         }
+        guard mayContinueSnapshot(
+            taskID: taskID,
+            generation: snapshotGeneration,
+            session: session
+        ) else { return }
         do {
             disassembly = try await sendSnapshotCommand(
                 "-data-disassemble -s \"$pc-32\" -e \"$pc+32\" -- 0",
@@ -259,6 +340,11 @@ public actor DebuggerController {
         } catch {
             diagnostics.append(diagnostic(.disassembly, critical: false, error: error))
         }
+        guard mayContinueSnapshot(
+            taskID: taskID,
+            generation: snapshotGeneration,
+            session: session
+        ) else { return }
 
         let snapshot = DebugSnapshot(
             stopReason: stopped.stopReason,
@@ -282,7 +368,14 @@ public actor DebuggerController {
             numbersByName[name.lowercased()] = number
         }
         return Self.registerDisplayNames(for: profile).map { displayName in
-            let number = numbersByName[displayName.lowercased()]
+            let lookupNames: [String]
+            switch displayName.lowercased() {
+            case "r13": lookupNames = ["r13", "sp"]
+            case "r14": lookupNames = ["r14", "lr"]
+            case "r15": lookupNames = ["r15", "pc"]
+            default: lookupNames = [displayName.lowercased()]
+            }
+            let number = lookupNames.lazy.compactMap { numbersByName[$0] }.first
             return DebugRegister(
                 name: displayName,
                 number: number,
@@ -323,9 +416,15 @@ public actor DebuggerController {
         }
     }
 
-    private func recoverAfterUnexpectedExit(_ processTermination: ProcessTermination) async {
-        guard machine.state != .ready, machine.state != .idle, machine.state != .building else { return }
-        let endedSession = session
+    private func recoverAfterUnexpectedExit(
+        _ processTermination: ProcessTermination,
+        session endedSession: GDBMISession,
+        generation recoveryGeneration: UUID
+    ) async {
+        guard isCurrent(recoveryGeneration, session: endedSession),
+              machine.state != .ready,
+              machine.state != .idle,
+              machine.state != .building else { return }
         publishDiagnostic(.init(
             pane: .session,
             isCritical: true,
@@ -342,10 +441,105 @@ public actor DebuggerController {
         case .idle, .building, .ready:
             break
         }
-        if let endedSession {
-            await endedSession.shutdown(timeout: .zero)
-        }
+        await endedSession.shutdown(timeout: .zero)
+        guard isCurrent(recoveryGeneration, session: endedSession) else { return }
         session = nil
+    }
+
+    private func dispatchSnapshot(
+        stopped: MIAsyncRecord,
+        session: GDBMISession,
+        generation snapshotGeneration: UUID
+    ) {
+        cancelSnapshotTasks()
+        let taskID = UUID()
+        currentSnapshotTaskID = taskID
+        let task = Task { [weak self] in
+            await self?.refreshSnapshot(
+                stopped: stopped,
+                session: session,
+                generation: snapshotGeneration,
+                taskID: taskID
+            )
+            await self?.snapshotTaskFinished(taskID)
+        }
+        snapshotTasks[taskID] = TrackedTask(
+            id: taskID,
+            task: task
+        )
+    }
+
+    private func dispatchRecovery(
+        _ termination: ProcessTermination,
+        session: GDBMISession,
+        generation recoveryGeneration: UUID
+    ) {
+        guard recoveryTask == nil else { return }
+        cancelSnapshotTasks()
+        let taskID = UUID()
+        let task = Task { [weak self] in
+            await self?.recoverAfterUnexpectedExit(
+                termination,
+                session: session,
+                generation: recoveryGeneration
+            )
+            await self?.recoveryTaskFinished(taskID)
+        }
+        recoveryTask = TrackedTask(
+            id: taskID,
+            task: task
+        )
+    }
+
+    private func mayContinueSnapshot(
+        taskID: UUID,
+        generation snapshotGeneration: UUID,
+        session sourceSession: GDBMISession
+    ) -> Bool {
+        !Task.isCancelled
+            && currentSnapshotTaskID == taskID
+            && machine.state == .stopped
+            && isCurrent(snapshotGeneration, session: sourceSession)
+    }
+
+    private func isCurrent(_ candidate: UUID, session candidateSession: GDBMISession) -> Bool {
+        generation == candidate && session === candidateSession
+    }
+
+    private func cancelSnapshotTasks() {
+        currentSnapshotTaskID = nil
+        for tracked in snapshotTasks.values { tracked.task.cancel() }
+    }
+
+    private func cancelAndAwaitBackgroundTasks() async {
+        let eventTask = sessionEventTask?.task
+        let snapshots = snapshotTasks.values.map(\.task)
+        let recovery = recoveryTask?.task
+        sessionEventTask = nil
+        snapshotTasks.removeAll(keepingCapacity: false)
+        currentSnapshotTaskID = nil
+        recoveryTask = nil
+        eventTask?.cancel()
+        for task in snapshots { task.cancel() }
+        recovery?.cancel()
+        if let eventTask { await eventTask.value }
+        for task in snapshots { await task.value }
+        if let recovery { await recovery.value }
+    }
+
+    private func eventTaskFinished(_ taskID: UUID) {
+        guard sessionEventTask?.id == taskID else { return }
+        sessionEventTask = nil
+    }
+
+    private func snapshotTaskFinished(_ taskID: UUID) {
+        snapshotTasks.removeValue(forKey: taskID)
+        if currentSnapshotTaskID == taskID { currentSnapshotTaskID = nil }
+    }
+
+    private func recoveryTaskFinished(_ taskID: UUID) {
+        guard recoveryTask?.id == taskID else { return }
+        recoveryTask = nil
     }
 
     private func transition(_ event: DebuggerLifecycleEvent) throws {

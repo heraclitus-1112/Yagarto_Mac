@@ -73,7 +73,8 @@ final class GDBMIChildProcess: Sendable {
         var emptySignalMask = sigset_t()
         sigemptyset(&emptySignalMask)
         let flags = Int16(
-            POSIX_SPAWN_SETPGROUP
+            POSIX_SPAWN_CLOEXEC_DEFAULT
+                | POSIX_SPAWN_SETPGROUP
                 | POSIX_SPAWN_SETSIGDEF
                 | POSIX_SPAWN_SETSIGMASK
         )

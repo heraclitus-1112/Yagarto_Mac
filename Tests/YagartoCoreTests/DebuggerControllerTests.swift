@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+import Darwin
 import Foundation
 import XCTest
 @testable import YagartoCore
@@ -81,6 +82,24 @@ final class DebuggerControllerTests: XCTestCase {
         try await controller.stop()
     }
 
+    func testRealArmGDBCanonicalAliasesPopulateDisplayedR13R14R15Slots() async throws {
+        let fixture = try ControllerGDBFixture()
+        let controller = DebuggerController(plan: fixture.plan(profile: .arm7tdmi))
+
+        try await controller.launch()
+        let snapshot = try await waitForSnapshot(controller)
+        let registers = Dictionary(uniqueKeysWithValues: snapshot.registers.map { ($0.name, $0) })
+
+        XCTAssertEqual(registers["r13"]?.number, 13)
+        XCTAssertEqual(registers["r13"]?.value?.numeric, 0x2000_1000)
+        XCTAssertEqual(registers["r14"]?.number, 14)
+        XCTAssertEqual(registers["r14"]?.value?.numeric, 0x100)
+        XCTAssertEqual(registers["r15"]?.number, 15)
+        XCTAssertEqual(registers["r15"]?.value?.numeric, 0x104)
+        XCTAssertEqual(registers["CPSR"]?.number, 17)
+        try await controller.stop()
+    }
+
     func testCriticalFrameAndRegisterFailuresRemainVisibleWithoutDeadlock() async throws {
         let fixture = try ControllerGDBFixture(failCritical: true)
         let controller = DebuggerController(plan: fixture.plan(profile: .arm7tdmi))
@@ -111,6 +130,83 @@ final class DebuggerControllerTests: XCTestCase {
             $0.pane == .frame && $0.isCritical && $0.message.contains("timed out")
         }))
         try await controller.stop()
+    }
+
+    func testRunningEventIsNotBlockedByAHungSnapshotPane() async throws {
+        let fixture = try ControllerGDBFixture(
+            hangStack: true,
+            emitRunningWhileStackHung: true
+        )
+        let controller = DebuggerController(
+            plan: fixture.plan(profile: .arm7tdmi),
+            snapshotCommandTimeout: .milliseconds(500)
+        )
+
+        try await controller.launch()
+        try await waitForCommand("-stack-list-frames", fixture: fixture)
+        let started = ContinuousClock.now
+        try await waitForState(.running, controller: controller)
+
+        XCTAssertLessThan(started.duration(to: .now), .milliseconds(100))
+        try await controller.stop()
+    }
+
+    func testStopCancelsOldSnapshotBeforeItCanPublish() async throws {
+        let fixture = try ControllerGDBFixture(hangStack: true)
+        let controller = DebuggerController(
+            plan: fixture.plan(profile: .arm7tdmi),
+            snapshotCommandTimeout: .milliseconds(500)
+        )
+
+        try await controller.launch()
+        try await waitForCommand("-stack-list-frames", fixture: fixture)
+        try await controller.stop()
+        try await Task.sleep(for: .milliseconds(100))
+
+        let state = await controller.currentState
+        let snapshot = await controller.latestSnapshot
+        XCTAssertEqual(state, .ready)
+        XCTAssertNil(snapshot)
+    }
+
+    func testOldRecoveryCompletionCannotClearRelaunchedSession() async throws {
+        let oldFixture = try ControllerGDBFixture(autoExitWithStubbornChild: true, label: "old")
+        let newFixture = try ControllerGDBFixture(label: "new")
+        let controller = DebuggerController(plan: oldFixture.plan(profile: .arm7tdmi))
+
+        try await controller.launch()
+        let oldChild = try await oldFixture.waitForChildPID()
+        try await waitForState(.ready, controller: controller)
+        XCTAssertEqual(Darwin.kill(oldChild, 0), 0)
+
+        try await controller.buildStarted()
+        try await controller.buildSucceeded(plan: newFixture.plan(profile: .arm7tdmi))
+        try await controller.launch()
+        let snapshot = try await waitForSnapshot(controller, fullName: "/tmp/new/main.s")
+        XCTAssertEqual(snapshot.location?.fullName, "/tmp/new/main.s")
+        try await controller.run()
+        try await waitForState(.running, controller: controller)
+        try await controller.stop()
+        withExtendedLifetime((oldFixture, newFixture)) {}
+    }
+
+    func testRapidStopAndRelaunchCyclesDoNotLeakOrDeadlock() async throws {
+        let fixture = try ControllerGDBFixture()
+        let controller = DebuggerController(plan: fixture.plan(profile: .arm7tdmi))
+
+        for _ in 0..<5 {
+            try await controller.launch()
+            try await waitForState(.stopped, controller: controller)
+            try await controller.stop()
+        }
+
+        let processIDs = try fixture.processIDs()
+        XCTAssertEqual(processIDs.count, 5)
+        XCTAssertEqual(Set(processIDs).count, 5)
+        for processID in processIDs {
+            XCTAssertEqual(Darwin.kill(processID, 0), -1, "pid \(processID) still exists")
+            XCTAssertEqual(errno, ESRCH)
+        }
     }
 
     func testControlMemoryAndBreakpointMethodsSendTypedMICommands() async throws {
@@ -174,6 +270,21 @@ final class DebuggerControllerTests: XCTestCase {
         throw ControllerTestError.timeout
     }
 
+    private func waitForSnapshot(
+        _ controller: DebuggerController,
+        fullName: String
+    ) async throws -> DebugSnapshot {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(3))
+        while ContinuousClock.now < deadline {
+            if let snapshot = await controller.latestSnapshot,
+               snapshot.location?.fullName == fullName {
+                return snapshot
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        throw ControllerTestError.timeout
+    }
+
     private func waitForState(
         _ expected: DebuggerState,
         controller: DebuggerController
@@ -182,6 +293,18 @@ final class DebuggerControllerTests: XCTestCase {
         while ContinuousClock.now < deadline {
             if await controller.currentState == expected { return }
             try await Task.sleep(for: .milliseconds(10))
+        }
+        throw ControllerTestError.timeout
+    }
+
+    private func waitForCommand(
+        _ command: String,
+        fixture: ControllerGDBFixture
+    ) async throws {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while ContinuousClock.now < deadline {
+            if (try? fixture.commands().contains(command)) == true { return }
+            try await Task.sleep(for: .milliseconds(5))
         }
         throw ControllerTestError.timeout
     }
@@ -206,25 +329,51 @@ private final class ControllerGDBFixture {
     let failMemory: Bool
     let failCritical: Bool
     let hangFrame: Bool
+    let hangStack: Bool
+    let emitRunningWhileStackHung: Bool
+    let autoExitWithStubbornChild: Bool
+    let label: String
+    let pidLog: URL
+    let childPIDFile: URL
 
     init(
         failMemory: Bool = false,
         failCritical: Bool = false,
-        hangFrame: Bool = false
+        hangFrame: Bool = false,
+        hangStack: Bool = false,
+        emitRunningWhileStackHung: Bool = false,
+        autoExitWithStubbornChild: Bool = false,
+        label: String = "课程"
     ) throws {
         self.failMemory = failMemory
         self.failCritical = failCritical
         self.hangFrame = hangFrame
+        self.hangStack = hangStack
+        self.emitRunningWhileStackHung = emitRunningWhileStackHung
+        self.autoExitWithStubbornChild = autoExitWithStubbornChild
+        self.label = label
         directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         script = directory.appendingPathComponent("controller fake gdb.py")
         capture = directory.appendingPathComponent("commands.txt")
+        pidLog = directory.appendingPathComponent("pids.txt")
+        childPIDFile = directory.appendingPathComponent("child.pid")
         try Self.source.write(to: script, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
     }
 
-    deinit { try? FileManager.default.removeItem(at: directory) }
+    deinit {
+        if let processIDs = try? processIDs() {
+            for processID in processIDs { _ = Darwin.kill(processID, SIGKILL) }
+        }
+        if autoExitWithStubbornChild,
+           let raw = try? String(contentsOf: childPIDFile, encoding: .utf8),
+           let childPID = pid_t(raw.trimmingCharacters(in: .whitespacesAndNewlines)) {
+            _ = Darwin.kill(childPID, SIGKILL)
+        }
+        try? FileManager.default.removeItem(at: directory)
+    }
 
     func plan(profile: ProfileID) -> DebugLaunchPlan {
         DebugLaunchPlan(
@@ -235,7 +384,13 @@ private final class ControllerGDBFixture {
                 "--capture", capture.path,
                 "--fail-memory", failMemory ? "yes" : "no",
                 "--fail-critical", failCritical ? "yes" : "no",
-                "--hang-frame", hangFrame ? "yes" : "no"
+                "--hang-frame", hangFrame ? "yes" : "no",
+                "--hang-stack", hangStack ? "yes" : "no",
+                "--emit-running-while-stack-hung", emitRunningWhileStackHung ? "yes" : "no",
+                "--auto-exit-with-stubborn-child", autoExitWithStubbornChild ? "yes" : "no",
+                "--label", label,
+                "--pid-log", pidLog.path,
+                "--child-pid-file", childPIDFile.path
             ],
             initCommands: [],
             warnings: [],
@@ -250,14 +405,51 @@ private final class ControllerGDBFixture {
             .map(String.init)
     }
 
+    func processIDs() throws -> [pid_t] {
+        try String(contentsOf: pidLog, encoding: .utf8)
+            .split(separator: "\n")
+            .compactMap { pid_t($0) }
+    }
+
+    func waitForChildPID() async throws -> pid_t {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while ContinuousClock.now < deadline {
+            if let raw = try? String(contentsOf: childPIDFile, encoding: .utf8),
+               let processID = pid_t(raw.trimmingCharacters(in: .whitespacesAndNewlines)) {
+                return processID
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        throw ControllerTestError.timeout
+    }
+
     private static let source = #"""
 #!/usr/bin/python3
-import sys, threading, time
+import os, signal, sys, threading, time
 
 capture = sys.argv[sys.argv.index("--capture") + 1]
 fail_memory = sys.argv[sys.argv.index("--fail-memory") + 1] == "yes"
 fail_critical = sys.argv[sys.argv.index("--fail-critical") + 1] == "yes"
 hang_frame = sys.argv[sys.argv.index("--hang-frame") + 1] == "yes"
+hang_stack = sys.argv[sys.argv.index("--hang-stack") + 1] == "yes"
+emit_running_while_stack_hung = sys.argv[sys.argv.index("--emit-running-while-stack-hung") + 1] == "yes"
+auto_exit_with_stubborn_child = sys.argv[sys.argv.index("--auto-exit-with-stubborn-child") + 1] == "yes"
+label = sys.argv[sys.argv.index("--label") + 1]
+pid_log = sys.argv[sys.argv.index("--pid-log") + 1]
+child_pid_file = sys.argv[sys.argv.index("--child-pid-file") + 1]
+
+with open(pid_log, "a", encoding="utf-8") as handle:
+    handle.write(str(os.getpid()) + "\n")
+
+if auto_exit_with_stubborn_child:
+    child = os.fork()
+    if child == 0:
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        while True:
+            time.sleep(1)
+    with open(child_pid_file, "w", encoding="utf-8") as handle:
+        handle.write(str(child))
 
 def out(value):
     sys.stdout.write(value + "\n")
@@ -265,7 +457,11 @@ def out(value):
 
 for value in range(1, 6):
     out('~"console-%d"' % value)
-out('*stopped,reason="breakpoint-hit",frame={addr="0x1000",func="main",file="main.s",fullname="/tmp/课程/main.s",line="12"}')
+out('*stopped,reason="breakpoint-hit",frame={addr="0x1000",func="main",file="main.s",fullname="/tmp/%s/main.s",line="12"}' % label)
+
+if auto_exit_with_stubborn_child:
+    time.sleep(0.05)
+    sys.exit(17)
 
 for raw in sys.stdin:
     raw = raw.rstrip("\r\n")
@@ -281,17 +477,21 @@ for raw in sys.stdin:
         elif fail_critical:
             out(token + '^error,msg="frame unavailable"')
         else:
-            out(token + '^done,frame={addr="0x1000",func="main",file="main.s",fullname="/tmp/课程/main.s",line="12"}')
+            out(token + '^done,frame={addr="0x1000",func="main",file="main.s",fullname="/tmp/%s/main.s",line="12"}' % label)
     elif command == "-data-list-register-names":
         if fail_critical:
             out(token + '^error,msg="registers unavailable"')
         else:
-            names = ["r%d" % value for value in range(16)] + ["", "cpsr", "xpsr", "msp", "", "control", "primask"]
+            names = ["r%d" % value for value in range(13)] + ["SP", "lr", "Pc", "", "CPSR", "xPsR", "msp", "", "control", "primask"]
             out(token + '^done,register-names=[' + ','.join('"%s"' % value for value in names) + ']')
     elif command == "-data-list-register-values x":
-        out(token + '^done,register-values=[{number="17",value="0x60000013"},{number="0",value="42"},{number="18",value="0x01000000"},{number="19",value="0x20001000"},{number="21",value="0"},{number="22",value="1"}]')
+        out(token + '^done,register-values=[{number="17",value="0x60000013"},{number="14",value="0x100"},{number="0",value="42"},{number="15",value="0x104"},{number="18",value="0x01000000"},{number="13",value="0x20001000"},{number="19",value="0x20001000"},{number="21",value="0"},{number="22",value="1"}]')
     elif command == "-stack-list-frames":
-        out(token + '^done,stack=[frame={addr="0x1000",func="main",line="12"},frame={addr="0x2000",func="reset"}]')
+        if hang_stack:
+            if emit_running_while_stack_hung:
+                threading.Thread(target=lambda: (time.sleep(0.02), out("*running,thread-id=\"all\"")), daemon=True).start()
+        else:
+            out(token + '^done,stack=[frame={addr="0x1000",func="main",line="12"},frame={addr="0x2000",func="reset"}]')
     elif command.startswith("-data-read-memory-bytes"):
         if fail_memory:
             out(token + '^error,msg="memory unavailable"')

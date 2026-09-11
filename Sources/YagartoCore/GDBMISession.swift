@@ -21,6 +21,7 @@ public enum GDBMISessionError: Error, Equatable, Sendable {
     case notStarted
     case alreadyStarted
     case invalidCommand
+    case invalidLaunchValue(field: String)
     case missingOptionValue(option: String)
     case launchFailed(executable: String, detail: String)
     case writeFailed(String)
@@ -33,7 +34,8 @@ public enum GDBMISessionError: Error, Equatable, Sendable {
         switch self {
         case .launchFailed: .missingTool
         case .processExited, .writeFailed, .waitFailed, .endOfFile: .buildFailure
-        case .notStarted, .alreadyStarted, .invalidCommand, .missingOptionValue, .commandFailed:
+        case .notStarted, .alreadyStarted, .invalidCommand, .invalidLaunchValue,
+             .missingOptionValue, .commandFailed:
             .configuration
         }
     }
@@ -100,6 +102,11 @@ public actor GDBMISession {
     ) {
         self.executable = executable
         do {
+            try Self.validateNoNUL(executable, field: "executable")
+            try Self.validateNoNUL(
+                workingDirectory.path(percentEncoded: false),
+                field: "workingDirectory"
+            )
             self.arguments = try Self.normalizedArguments(arguments)
             argumentValidationError = nil
         } catch let error as GDBMISessionError {
@@ -159,6 +166,9 @@ public actor GDBMISession {
         var normalized: [String] = []
         var interpreterInsertionIndex: Int?
         var index = 0
+        for (argumentIndex, argument) in arguments.enumerated() {
+            try validateNoNUL(argument, field: "argument[\(argumentIndex)]")
+        }
         while index < arguments.count {
             let argument = arguments[index]
 
@@ -233,6 +243,12 @@ public actor GDBMISession {
         return normalized
     }
 
+    private static func validateNoNUL(_ value: String, field: String) throws {
+        guard !value.unicodeScalars.contains(where: { $0.value == 0 }) else {
+            throw GDBMISessionError.invalidLaunchValue(field: field)
+        }
+    }
+
     public func events() -> AsyncStream<GDBMIEvent> {
         let identifier = UUID()
         let pair = AsyncStream<GDBMIEvent>.makeStream(
@@ -255,6 +271,18 @@ public actor GDBMISession {
         let stdinPipe = Pipe()
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()
+        let stdinWriter = stdinPipe.fileHandleForWriting
+        do {
+            try Self.disableSIGPIPE(on: stdinWriter)
+        } catch {
+            try? stdinPipe.fileHandleForReading.close()
+            try? stdinWriter.close()
+            try? stdoutPipe.fileHandleForReading.close()
+            try? stdoutPipe.fileHandleForWriting.close()
+            try? stderrPipe.fileHandleForReading.close()
+            try? stderrPipe.fileHandleForWriting.close()
+            throw error
+        }
         let stdoutReader = stdoutPipe.fileHandleForReading
         let stderrReader = stderrPipe.fileHandleForReading
         stdoutReader.readabilityHandler = { [weak self] handle in
@@ -298,7 +326,7 @@ public actor GDBMISession {
         try? stdoutPipe.fileHandleForWriting.close()
         try? stderrPipe.fileHandleForWriting.close()
         processBox = child
-        inputHandle = stdinPipe.fileHandleForWriting
+        inputHandle = stdinWriter
         outputHandle = stdoutReader
         errorHandle = stderrReader
         Task.detached { [weak self] in
@@ -329,11 +357,7 @@ public actor GDBMISession {
                 do {
                     try inputHandle?.write(contentsOf: Data("\(token)\(command)\n".utf8))
                 } catch {
-                    if let request = pending.removeValue(forKey: token) {
-                        request.continuation.resume(
-                            throwing: GDBMISessionError.writeFailed(error.localizedDescription)
-                        )
-                    }
+                    failTransport(.writeFailed(error.localizedDescription))
                 }
             }
         } onCancel: {
@@ -520,6 +544,23 @@ public actor GDBMISession {
         pending.removeAll(keepingCapacity: false)
         for request in requests {
             request.continuation.resume(throwing: error)
+        }
+    }
+
+    private func failTransport(_ error: GDBMISessionError) {
+        guard terminalFailure == nil, termination == nil else { return }
+        terminalFailure = error
+        emit(.transportError(error))
+        failAllPending(with: error)
+    }
+
+    private static func disableSIGPIPE(on handle: FileHandle) throws {
+        let descriptor = handle.fileDescriptor
+        guard Darwin.fcntl(descriptor, F_SETNOSIGPIPE, 1) == 0,
+              Darwin.fcntl(descriptor, F_GETNOSIGPIPE) == 1 else {
+            throw GDBMISessionError.writeFailed(
+                "unable to configure F_SETNOSIGPIPE: \(String(cString: strerror(errno)))"
+            )
         }
     }
 

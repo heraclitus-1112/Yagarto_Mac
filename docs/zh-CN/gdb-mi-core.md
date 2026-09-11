@@ -33,9 +33,9 @@ MI C-string 按字节解释 `\\`、`\"`、`\n`、`\r`、`\t`、GDB 用于 ESC（
 
 ## 进程与并发语义
 
-`GDBMISession` 使用 executable、argv 数组和 cwd 直接启动进程，不经过 shell。底层用 `posix_spawn` file actions 把三根 `Pipe` 接到标准流，并用 `POSIX_SPAWN_SETPGROUP` 在 exec 前原子建立独立进程组。argv 归一化器按 GDB 参数语义扫描：只在顶层位置移除 `--interpreter`/`-i` 的分离或等号形式，再插入恰好一个 `--interpreter=mi3`；`-ex`/`--eval-command`、`-x`/`--command` 等需值选项及其紧随值作为不可拆分的一对原样保留，`--args` 或 `--` 后的参数也完全保留。因此即使命令文本或文件名长得像 `--interpreter=...`，也不会被误删。孤立或空值的需值选项（包括短、长选项的空等号形式）会在启动前返回 `.missingOptionValue` 配置错误。`DebugLaunchPlan` 的所有 `-ex` 与 pipe 命令仍是原始独立 argv 元素。
+`GDBMISession` 使用 executable、argv 数组和 cwd 直接启动进程，不经过 shell。底层用 `posix_spawn` file actions 把三根 `Pipe` 接到标准流，并用 `POSIX_SPAWN_SETPGROUP` 在 exec 前原子建立独立进程组；`POSIX_SPAWN_CLOEXEC_DEFAULT` 关闭未由 file actions 明确重建的父进程 fd，避免调试子进程继承无关资源。argv 归一化器按 GDB 参数语义扫描：只在顶层位置移除 `--interpreter`/`-i` 的分离或等号形式，再插入恰好一个 `--interpreter=mi3`；`-ex`/`--eval-command`、`-x`/`--command` 等需值选项及其紧随值作为不可拆分的一对原样保留，`--args` 或 `--` 后的参数也完全保留。因此即使命令文本或文件名长得像 `--interpreter=...`，也不会被误删。孤立或空值的需值选项（包括短、长选项的空等号形式）会在启动前返回 `.missingOptionValue` 配置错误。executable、decoded cwd path 或任一 argv 含 U+0000 时返回 `.invalidLaunchValue`，不会交给 C 字符串接口截断；继承的系统 environment 本身已受 POSIX NUL 终止边界约束。`DebugLaunchPlan` 的所有 `-ex` 与 pipe 命令仍是原始独立 argv 元素。
 
-每个 `send(_:)` 分配单调递增 token。并发请求可以乱序完成而不会串线；`^error` 抛出含 token、原命令、GDB message 与原始记录的 `GDBMISessionError.commandFailed`。取消一个调用只恢复该请求，EOF 或进程退出会恢复所有剩余请求一次。
+每个 `send(_:)` 分配单调递增 token。并发请求可以乱序完成而不会串线；`^error` 抛出含 token、原命令、GDB message 与原始记录的 `GDBMISessionError.commandFailed`。父端 stdin fd 在首次写入前设置并读取校验 Darwin `F_SETNOSIGPIPE`，所以子进程提前关闭 stdin 时宿主不会收到 SIGPIPE；EPIPE 映射为 `.writeFailed`，并把当前与其余 pending 请求各恢复一次。取消一个调用只恢复该请求，EOF 或进程退出会恢复所有剩余请求一次。
 
 `events()` 支持多个安全订阅者，并使用 `AsyncStream.bufferingNewest` 有界缓存。默认每个订阅保留 256 个事件；丢弃次数可由 `droppedEventCount` 读取，并以 `eventsDropped` 事件报告。stdout 单行也受 parser 字节上限约束；超长行被丢到下一个换行，后续 MI 仍可继续解析。stderr 及 MI console/target/log 分别事件化；进程终止且 stdout/stderr 都排空后，所有订阅会正常结束。
 
@@ -55,14 +55,16 @@ idle -> building -> ready -> launching -> stopped <-> running
 
 编译失败回到 `idle`，启动失败回到 `ready`，termination 完成回到 `ready`。运行/停止状态只由 MI `*running` 和 `*stopped` 驱动；命令返回 `^done` 或 `^running` 不被当成 inferior 状态证据。
 
-每次 `*stopped` 都刷新执行位置、寄存器、stack、默认 `$sp` 64-byte memory window、反汇编和有界 console。每条 snapshot 查询默认有 2 秒超时，也可由 controller 初始化参数缩短；超时请求会从 session pending 表移除。frame 或 register 失败产生 critical diagnostic；stack、memory、disassembly 等可选 pane 失败产生非关键 diagnostic。两者都保留 `stopped`，不会阻塞后续命令。
+每次 `*stopped` 都派发独立任务刷新执行位置、寄存器、stack、默认 `$sp` 64-byte memory window、反汇编和有界 console；唯一 MI event loop 不会同步等待整套刷新，因此慢 pane 不会延迟后续 `*running`/`*stopped`。每条 snapshot 查询默认有 2 秒超时，也可由 controller 初始化参数缩短；超时请求会从 session pending 表移除。frame 或 register 失败产生 critical diagnostic；stack、memory、disassembly 等可选 pane 失败产生非关键 diagnostic。两者都保留 `stopped`，不会阻塞后续命令。
+
+每次 launch 都使用新的 generation 与 session identity。event、snapshot 和 recovery 在发布前同时检查 generation、session 与允许状态；stop/relaunch 会取消并等待旧代后台任务清理。因此旧代的慢 snapshot 或进程组 shutdown 即使跨 actor reentrancy 完成，也不能覆盖新 snapshot、清空新 session 或发布旧事件。
 
 寄存器展示集合固定为：
 
 - ARM7TDMI：`r0-r15` 与 `CPSR`。
 - Cortex-M4 / STM32F4：`r0-r15`、`xPSR`、`MSP`、`PSP`、`CONTROL`、`PRIMASK`。
 
-匹配按 GDB 返回的 register number 和 name 完成，允许返回顺序变化、空 name 或缺值；缺值在 snapshot 中为 `nil`。Cortex-M4/STM32F4 不会显示为 CPSR。
+匹配按 GDB 返回的 register number 和 name 完成，允许返回顺序变化、空 name、大小写变化或缺值；真实 GDB 的 canonical alias `sp`/`lr`/`pc` 分别映射到展示槽 `r13`/`r14`/`r15`，number 与 value 仍取实际 GDB slot，缺值在 snapshot 中为 `nil`。Cortex-M4/STM32F4 不会显示为 CPSR。
 
 控制器公开 `launch`、`run`/`continue`、`pause`、`stepInstruction`、`stepOver`、`stop`、`readMemory`、`setBreakpoint` 和 `removeBreakpoint`。地址表达式、字节数、断点 ID 和换行控制字符都在写入 MI stdin 前验证。
 

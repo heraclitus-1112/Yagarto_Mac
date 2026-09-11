@@ -176,6 +176,77 @@ final class GDBMISessionTests: XCTestCase {
         XCTAssertNil(processIdentifier)
     }
 
+    func testNULInExecutableWorkingDirectoryOrArgumentsFailsBeforeSpawn() async throws {
+        let fixture = try FakeGDBFixture()
+        let cases: [(String, String, [String], URL)] = [
+            (
+                "executable",
+                fixture.script.path + "\0ignored",
+                [],
+                fixture.directory
+            ),
+            (
+                "argument[2]",
+                fixture.script.path,
+                ["--args", "program", "argument\0ignored"],
+                fixture.directory
+            ),
+            (
+                "workingDirectory",
+                fixture.script.path,
+                [],
+                URL(fileURLWithPath: fixture.directory.path + "\0ignored", isDirectory: true)
+            )
+        ]
+
+        for (index, item) in cases.enumerated() {
+            let marker = fixture.directory.appendingPathComponent("nul-spawned-\(index)")
+            let session = GDBMISession(
+                executable: item.1,
+                arguments: item.2 + ["--spawn-marker", marker.path],
+                workingDirectory: item.3
+            )
+            do {
+                try await session.start()
+                await session.shutdown(timeout: .milliseconds(100))
+                XCTFail("expected NUL validation for \(item.0)")
+            } catch let error as GDBMISessionError {
+                XCTAssertEqual(error, .invalidLaunchValue(field: item.0))
+                XCTAssertEqual(error.exitCode, .configuration)
+            }
+            let processIdentifier = await session.processIdentifier
+            XCTAssertNil(processIdentifier, item.0)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path), item.0)
+        }
+    }
+
+    func testSpawnClosesUnrelatedParentFDWhileKeepingAllThreeStandardStreams() async throws {
+        let fixture = try FakeGDBFixture()
+        let inheritedSource = fixture.directory.appendingPathComponent("parent-extra-fd")
+        let descriptor = Darwin.open(inheritedSource.path, O_CREAT | O_RDWR, 0o600)
+        XCTAssertGreaterThanOrEqual(descriptor, 3)
+        guard descriptor >= 3 else { return }
+        defer { _ = Darwin.close(descriptor) }
+        XCTAssertEqual(Darwin.fcntl(descriptor, F_SETFD, 0), 0)
+        XCTAssertEqual(Darwin.fcntl(descriptor, F_GETFD) & FD_CLOEXEC, 0)
+
+        let result = fixture.directory.appendingPathComponent("child-fd-result")
+        let session = fixture.session(arguments: [
+            "--inspect-fd", String(descriptor),
+            "--fd-result", result.path
+        ])
+        let stream = await session.events()
+        try await session.start()
+        let events = try await collectFirstEvents(5, from: stream)
+        let response = try await session.send("-list-features")
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: result.path), "\(events)")
+        XCTAssertEqual(try String(contentsOf: result, encoding: .utf8), "closed")
+        XCTAssertEqual(response.resultClass, .done)
+        XCTAssertTrue(events.contains(.stderr("诊断 stderr")))
+        await session.shutdown(timeout: .seconds(1))
+    }
+
     func testEmptyOptionValuesFailBeforeTheExecutableCanSpawn() async throws {
         let fixture = try FakeGDBFixture()
         let invalidArguments: [([String], String)] = [
@@ -307,6 +378,31 @@ final class GDBMISessionTests: XCTestCase {
             XCTFail("unexpected error: \(error)")
         }
         await session.shutdown(timeout: .seconds(1))
+    }
+
+    func testClosedChildStdinDoesNotKillIndependentTestHarness() throws {
+        let testBundle = Bundle(for: GDBMISessionTests.self).bundleURL
+        let process = Process()
+        let output = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+        process.arguments = [
+            "xctest",
+            "-XCTest",
+            "YagartoCoreTests.GDBMISessionSIGPIPEHarnessTests/testClosedStdinRecoversEveryPendingRequest",
+            testBundle.path
+        ]
+        process.standardOutput = output
+        process.standardError = output
+
+        try process.run()
+        process.waitUntilExit()
+        let transcript = String(
+            decoding: output.fileHandleForReading.readDataToEndOfFile(),
+            as: UTF8.self
+        )
+
+        XCTAssertEqual(process.terminationReason, .exit, transcript)
+        XCTAssertEqual(process.terminationStatus, 0, transcript)
     }
 
     func testExitedResultCompletesItsRequestWithoutEndingTheSession() async throws {
@@ -448,6 +544,25 @@ final class GDBMISessionTests: XCTestCase {
         await session.shutdown(timeout: .seconds(2))
     }
 
+    func testInstalledArmGDBReportsCanonicalStackLinkAndProgramCounterNamesWhenAvailable() async throws {
+        let executable = "/opt/homebrew/bin/arm-none-eabi-gdb"
+        guard FileManager.default.isExecutableFile(atPath: executable) else {
+            throw XCTSkip("未安装 arm-none-eabi-gdb，跳过真实 register-names 回归")
+        }
+        let session = GDBMISession(
+            executable: executable,
+            arguments: ["-q", "-nx"],
+            workingDirectory: URL(fileURLWithPath: "/tmp", isDirectory: true)
+        )
+
+        try await session.start()
+        let names = try await session.send("-data-list-register-names").registerNames
+        XCTAssertGreaterThan(names.count, 25)
+        XCTAssertEqual(Array(names.prefix(16)), (0...12).map { "r\($0)" } + ["sp", "lr", "pc"])
+        XCTAssertEqual(names[25], "cpsr")
+        await session.shutdown(timeout: .seconds(2))
+    }
+
     func testInstalledArmGDBDecodesRealEscapeConsoleStreamWhenAvailable() async throws {
         let executable = "/opt/homebrew/bin/arm-none-eabi-gdb"
         guard FileManager.default.isExecutableFile(atPath: executable) else {
@@ -550,6 +665,35 @@ final class GDBMISessionTests: XCTestCase {
     }
 }
 
+final class GDBMISessionSIGPIPEHarnessTests: XCTestCase {
+    func testClosedStdinRecoversEveryPendingRequest() async throws {
+        let fixture = try FakeGDBFixture()
+        let closedMarker = fixture.directory.appendingPathComponent("stdin-closed")
+        let session = fixture.session(arguments: ["--stdin-closed-marker", closedMarker.path])
+        try await session.start()
+
+        let first = Task { await sessionOutcome(from: session, command: "-hold-and-close-stdin") }
+        try await waitForFile(closedMarker)
+        let started = ContinuousClock.now
+        let second = await sessionOutcome(from: session, command: "-list-features")
+        let firstOutcome = await first.value
+        let elapsed = started.duration(to: .now)
+
+        guard case .sessionError(.writeFailed) = second else {
+            await session.shutdown(timeout: .milliseconds(50))
+            return XCTFail("expected EPIPE to map to writeFailed, got \(String(describing: second))")
+        }
+        guard case .sessionError(.writeFailed) = firstOutcome else {
+            await session.shutdown(timeout: .milliseconds(50))
+            return XCTFail("expected existing pending request to fail once, got \(String(describing: firstOutcome))")
+        }
+        XCTAssertLessThan(elapsed, .milliseconds(500))
+        let later = await sessionOutcome(from: session, command: "-list-features")
+        XCTAssertEqual(later, second)
+        await session.shutdown(timeout: .milliseconds(50))
+    }
+}
+
 private func collectFirstEvents(
     _ count: Int,
     from stream: AsyncStream<GDBMIEvent>
@@ -612,6 +756,35 @@ private func firstConsole(
     }
 }
 
+private func waitForFile(_ url: URL) async throws {
+    let deadline = ContinuousClock.now.advanced(by: .seconds(1))
+    while ContinuousClock.now < deadline {
+        if FileManager.default.fileExists(atPath: url.path) { return }
+        try await Task.sleep(for: .milliseconds(5))
+    }
+    throw FakeGDBTestError.timeout
+}
+
+private enum SessionCommandOutcome: Equatable, Sendable {
+    case success
+    case sessionError(GDBMISessionError)
+    case unexpected(String)
+}
+
+private func sessionOutcome(
+    from session: GDBMISession,
+    command: String
+) async -> SessionCommandOutcome {
+    do {
+        _ = try await session.send(command)
+        return .success
+    } catch let error as GDBMISessionError {
+        return .sessionError(error)
+    } catch {
+        return .unexpected(String(describing: error))
+    }
+}
+
 private struct FakeGDBCapture: Codable {
     let cwd: String
     let arguments: [String]
@@ -645,10 +818,14 @@ private final class FakeGDBFixture {
         try? FileManager.default.removeItem(at: directory)
     }
 
-    func session(eventBufferLimit: Int = 64, maxLineBytes: Int = 4_096) -> GDBMISession {
+    func session(
+        arguments: [String] = [],
+        eventBufferLimit: Int = 64,
+        maxLineBytes: Int = 4_096
+    ) -> GDBMISession {
         GDBMISession(
             executable: script.path,
-            arguments: [],
+            arguments: arguments,
             workingDirectory: directory,
             eventBufferLimit: eventBufferLimit,
             maxLineBytes: maxLineBytes
@@ -657,7 +834,7 @@ private final class FakeGDBFixture {
 
     private static let source = #"""
 #!/usr/bin/python3
-import json, os, sys
+import json, os, sys, time
 
 if "--capture" in sys.argv:
     index = sys.argv.index("--capture")
@@ -668,6 +845,22 @@ if "--spawn-marker" in sys.argv:
     index = sys.argv.index("--spawn-marker")
     with open(sys.argv[index + 1], "w", encoding="utf-8") as handle:
         handle.write("spawned")
+
+stdin_closed_marker = None
+if "--stdin-closed-marker" in sys.argv:
+    index = sys.argv.index("--stdin-closed-marker")
+    stdin_closed_marker = sys.argv[index + 1]
+
+if "--inspect-fd" in sys.argv:
+    descriptor = int(sys.argv[sys.argv.index("--inspect-fd") + 1])
+    result = sys.argv[sys.argv.index("--fd-result") + 1]
+    try:
+        os.fstat(descriptor)
+        status = "open"
+    except OSError:
+        status = "closed"
+    with open(result, "w", encoding="utf-8") as handle:
+        handle.write(status)
 
 def out(value):
     sys.stdout.write(value + "\n")
@@ -699,6 +892,12 @@ for raw in sys.stdin:
         out(token + "^exited")
     elif command == "-hang":
         pass
+    elif command == "-hold-and-close-stdin":
+        os.close(0)
+        with open(stdin_closed_marker, "w", encoding="utf-8") as handle:
+            handle.write("closed")
+        time.sleep(2)
+        sys.exit(0)
     elif command == "-eof":
         sys.exit(23)
     elif command == "-burst":
