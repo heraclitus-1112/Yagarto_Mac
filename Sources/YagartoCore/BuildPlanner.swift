@@ -33,6 +33,12 @@ public struct BuildPlanner {
             projectDirectory: projectDirectory,
             outputDirectory: outputDirectory
         )
+        let managedBuildRoot = projectDirectory
+            .resolvingSymlinksInPath()
+            .standardizedFileURL
+            .appendingPathComponent(".yagarto", isDirectory: true)
+            .appendingPathComponent("build", isDirectory: true)
+            .standardizedFileURL
 
         var objectNames = Set<String>()
         var sourceIdentities = Set<String>()
@@ -41,13 +47,17 @@ public struct BuildPlanner {
         let cpuArguments = cpuArguments(for: configuration.profile)
 
         for source in configuration.sources {
+            try ProjectPathGuard.validateConfiguredSourceOutsideManagedBuildRoot(
+                relativePath: source,
+                projectDirectory: projectDirectory
+            )
             let canonicalSource = try ProjectPathGuard.canonicalSource(
                 relativePath: source,
                 projectDirectory: projectDirectory
             )
             try ProjectPathGuard.validateSourceOutsideOutput(
                 canonicalSource.url,
-                outputDirectory: outputDirectory.deletingLastPathComponent(),
+                outputDirectory: managedBuildRoot,
                 configuredPath: source
             )
             guard sourceIdentities.insert(canonicalSource.identity).inserted else {
@@ -106,6 +116,7 @@ public struct BuildPlanner {
             let userEntry = try validatedLinkerSymbol(entry)
             linkEntry = "Reset_Handler"
             linkerArguments = [
+                "--orphan-handling=error",
                 "-T", scriptURL.path,
                 "-e", linkEntry,
                 "--defsym=__yagarto_entry=\(userEntry)",

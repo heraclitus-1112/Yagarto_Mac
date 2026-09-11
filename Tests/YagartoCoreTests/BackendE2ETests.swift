@@ -130,7 +130,7 @@ final class BackendE2ETests: XCTestCase {
             try Data("""
             .syntax unified
             .thumb
-            .section .custom_writable, "aw", %progbits
+            .section .data.custom, "aw", %progbits
             .global custom_initialized
             custom_initialized:
                 .word 0x12345678
@@ -245,7 +245,60 @@ final class BackendE2ETests: XCTestCase {
         }
     }
 
-    func testRealCortexLinkersKeepBSSNoInitAndOrphanWritableSectionsOutOfStack() throws {
+    func testRealCortexLinkersRejectUnknownWritableProgbitsAndNobitsSections() throws {
+        let resolver = ToolResolver()
+        let required: [ToolIdentifier] = [.assembler, .linker, .objcopy, .objdump]
+        var tools: [ToolIdentifier: String] = [:]
+        for tool in required {
+            guard let path = try? resolver.resolve(tool) else {
+                throw XCTSkip("缺少真实 ARM 工具 \(tool.rawValue)，跳过 orphan E2E")
+            }
+            tools[tool] = path
+        }
+
+        for profile in [ProfileID.cortexM4, .stm32f4Discovery] {
+            for sectionType in ["%progbits", "%nobits"] {
+                let project = FileManager.default.temporaryDirectory
+                    .appendingPathComponent(UUID().uuidString, isDirectory: true)
+                try FileManager.default.createDirectory(
+                    at: project,
+                    withIntermediateDirectories: true
+                )
+                defer { try? FileManager.default.removeItem(at: project) }
+                let contents = sectionType == "%progbits" ? ".word 0x12345678" : ".space 4"
+                try Data("""
+                .syntax unified
+                .thumb
+                .section .custom_writable, "aw", \(sectionType)
+                \(contents)
+                .text
+                .global user_main
+                .thumb_func
+                user_main:
+                    b .
+                """.utf8).write(to: project.appendingPathComponent("unknown.s"))
+                let plan = try BuildPlanner(toolPaths: tools).plan(
+                    configuration: ProjectConfiguration(
+                        profile: profile,
+                        entry: "user_main",
+                        sources: ["unknown.s"],
+                        outputName: "unknown"
+                    ),
+                    projectDirectory: project
+                )
+
+                XCTAssertThrowsError(try BuildExecutor().execute(plan)) { error in
+                    let buildError = error as? YagartoError
+                    XCTAssertEqual(buildError?.diagnosticCode, "build.step_failed")
+                    let output = buildError?.toolOutput ?? ""
+                    XCTAssertTrue(output.contains(".custom_writable"), output)
+                    XCTAssertTrue(output.localizedCaseInsensitiveContains("orphan"), output)
+                }
+            }
+        }
+    }
+
+    func testRealCortexLinkersKeepBSSAndNoInitOutOfStackWithoutInflatingBinary() throws {
         let resolver = ToolResolver()
         let required: [ToolIdentifier] = [.assembler, .linker, .objcopy, .objdump]
         var tools: [ToolIdentifier: String] = [:]
@@ -260,7 +313,7 @@ final class BackendE2ETests: XCTestCase {
             (.cortexM4, 4 * 1024 * 1024),
             (.stm32f4Discovery, 128 * 1024)
         ]
-        let writableSections = [".bss", ".noinit", ".custom_writable"]
+        let writableSections = [".bss", ".noinit"]
         for (profile, ramBytes) in profiles {
             let maximumWritableBytes = ramBytes - 4 * 1024
             for section in writableSections {
@@ -274,6 +327,13 @@ final class BackendE2ETests: XCTestCase {
                     try BuildExecutor().execute(fittingPlan),
                     "\(profile.rawValue) \(section) 边界内应成功"
                 )
+                if section == ".noinit" {
+                    XCTAssertLessThan(
+                        try Data(contentsOf: fittingPlan.binaryFile).count,
+                        4 * 1024,
+                        "noinit 不得膨胀发布的 Flash binary"
+                    )
+                }
 
                 let overflowingPlan = try makeWritableBoundaryPlan(
                     profile: profile,

@@ -13,7 +13,7 @@ YAGARTO Mac 是一个面向 macOS 的非官方 YAGARTO 兼容命令行层，不�
 | `cortex-m4` | QEMU `mps2-an386` | 适合运行本项目生成的 Cortex-M4 裸机 ELF；它不是 STM32F407 外设模型。 |
 | `stm32f4-discovery` | OpenOCD + `stm32f4discovery.cfg` | 面向连接到 Mac 的真实开发板和调试器，不是 STM32 外设模拟器。`run`/`debug` 只 attach/reset，不写 Flash；烧录只能通过带确认门的 `flash`。 |
 
-`cortex-m4` 和 `stm32f4-discovery` 构建会自动加入内置向量表与 `Reset_Handler`。前者链接到 MPS2 的 0 地址代码区并使用链接器定义的 `0x20400000` 初始栈顶；后者链接到 `0x08000000` Flash 并使用链接器定义的 `0x20020000` 初始栈顶。两套链接脚本都把可用 RAM 与独立 4 KiB `STACK` MEMORY region 物理拆开，因此 `.data`、`.bss`、`.noinit` 及未显式列出的 writable section 都不能侵入栈。链接器会把其余带初值的 writable alloc section 一并纳入连续的 `.data` 复制范围；启动代码复制该范围、清零 `.bss`、保留 `.noinit`，再调用 `yagarto.json` 中的用户 `entry`。
+`cortex-m4` 和 `stm32f4-discovery` 构建会自动加入内置向量表与 `Reset_Handler`。前者链接到 MPS2 的 0 地址代码区并使用链接器定义的 `0x20400000` 初始栈顶；后者链接到 `0x08000000` Flash 并使用链接器定义的 `0x20020000` 初始栈顶。两套链接脚本都把可用 RAM 与独立 4 KiB `STACK` MEMORY region 物理拆开。可写段采用显式命名契约：带初值的数据放在 `.data` 或 `.data.*`，需清零的数据放在 `.bss` 或 `.bss.*`，需跨复位保留且不进入镜像的数据放在 `.noinit` 或 `.noinit.*`。启动代码复制 `.data`、清零 `.bss`、保留 `.noinit`，再调用 `yagarto.json` 中的用户 `entry`；未分类的 orphan section 会在链接时明确报错，不会被静默放入 RAM 或膨胀 Flash 镜像。
 
 ## 使用
 
@@ -42,7 +42,9 @@ swift run yagarto-mac flash firmware.elf --profile stm32f4-discovery --yes
 
 对 `stm32f4-discovery`，请先通过 `flash --yes` 明确完成写入，再使用 `run`/`debug` attach。OpenOCD 的诊断直接写入继承的标准错误流；GDB remote 协议仍独占管道标准输出，不会在项目目录创建或重开日志路径。debug 只启用 pipe GDB 端口，flash/probe 则禁用 GDB、Tcl、telnet 全部网络服务，不监听默认的 3333/4444/6666 端口。
 
-构建先在同卷私有 staging 目录完成并验证所有产物，再以原子目录交换发布；文件系统不支持该能力时会在启动工具前失败。发布前会把 `.map`/`.lst` 中的 staging 路径改回稳定最终路径，并只清理当前 profile 且严格匹配 UUID 命名的陈旧 staging/old 目录。
+同一项目、同一 profile 的并发 `build` 使用 `.yagarto/build/.<profile>.lock` 串行化：后启动者会阻塞等待当前构建完成，再进行残留清理和发布；不同 profile 使用不同锁，可以并行。锁描述符不会继承给工具进程，构建失败或 CLI 被信号终止时由进程关闭并释放；锁文件本身会保留供后续构建复用。
+
+取得锁后，构建会在同卷私有 staging 目录完成并验证所有产物，再以原子目录交换发布；文件系统不支持该能力时会在启动工具前失败。发布前会把 `.map`/`.lst` 中的 staging 路径改回稳定最终路径，并只清理当前 profile 且严格匹配 UUID 命名的陈旧 staging/old/swap-probe 目录。
 
 实际烧录前会先通过 macOS `system_profiler` 只读枚举 ST-Link USB VID/PID。明确没有匹配设备时返回 6，且不会启动 OpenOCD；枚举失败，或已有 ST-Link 候选但 OpenOCD 报告 open/权限/占用/配置等错误时返回 4 并保留原始诊断。`flash --dry-run` 不会执行 USB 枚举、OpenOCD 探测或烧录。
 

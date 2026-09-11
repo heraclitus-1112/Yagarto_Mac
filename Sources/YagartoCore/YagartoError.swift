@@ -20,6 +20,7 @@ public enum YagartoError: Error, Equatable, Sendable {
     case duplicateObjectName(String)
     case buildArtifactMissing(String)
     case unsafeBuildArtifact(String)
+    case unsafeBuildLock(String, String)
     case atomicDirectorySwapUnsupported(String, String)
     case invalidEntry(String)
     case toolNotFound(String)
@@ -83,6 +84,8 @@ extension YagartoError: LocalizedError {
             return "build.artifact_missing"
         case .unsafeBuildArtifact:
             return "build.artifact_unsafe"
+        case .unsafeBuildLock:
+            return "build.lock_unsafe"
         case .atomicDirectorySwapUnsupported:
             return "build.atomic_publish_unsupported"
         case .invalidEntry:
@@ -156,6 +159,8 @@ extension YagartoError: LocalizedError {
             return "构建工具成功退出，但未生成预期产物“\(path)”。"
         case .unsafeBuildArtifact(let path):
             return "构建产物“\(path)”不是安全的单链接普通文件。"
+        case .unsafeBuildLock(let path, _):
+            return "构建锁“\(path)”不安全或无法取得；构建未启动。"
         case .atomicDirectorySwapUnsupported(let path, _):
             return "构建目录“\(path)”所在文件系统不支持安全的原子目录交换；未启动构建工具。"
         case .invalidEntry(let entry):
@@ -208,6 +213,8 @@ extension YagartoError: LocalizedError {
             return "路径：\(path)；\(detail)"
         case .buildArtifactMissing(let path), .unsafeBuildArtifact(let path):
             return "路径：\(path)"
+        case .unsafeBuildLock(let path, let detail):
+            return "路径：\(path)；\(detail)"
         case .atomicDirectorySwapUnsupported(let path, let detail):
             return "路径：\(path)；\(detail)"
         case .processLaunchFailed(_, let detail):
@@ -254,7 +261,8 @@ extension YagartoError: LocalizedError {
             return .unsupported
         case .interrupted:
             return .interrupted
-        case .buildArtifactMissing, .unsafeBuildArtifact, .atomicDirectorySwapUnsupported,
+        case .buildArtifactMissing, .unsafeBuildArtifact, .unsafeBuildLock,
+             .atomicDirectorySwapUnsupported,
              .processIOFailed, .processLaunchFailed, .buildStepFailed, .cannotWriteOutput:
             return .buildFailure
         case .internalFailure:

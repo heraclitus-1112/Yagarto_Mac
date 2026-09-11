@@ -1233,6 +1233,104 @@ final class CLIIntegrationTests: XCTestCase {
         ).filter { $0.pathExtension == "o" }
         XCTAssertEqual(objectFiles.count, 1)
     }
+
+    func testConcurrentSameProfileCLIBuildWaitsWithoutRemovingActiveStaging() throws {
+        let fixture = try ConcurrentBuildFixture(profile: .arm7tdmi)
+        defer { fixture.cleanup() }
+        let first = try RunningCLIProcess(
+            arguments: ["build", "--format", "json"],
+            directory: fixture.directory,
+            environment: fixture.environment
+        )
+        defer { first.cleanup() }
+        XCTAssertTrue(fixture.waitForFirstAssembler())
+        let activeStaging = try XCTUnwrap(fixture.stagingDirectories(profile: .arm7tdmi).first)
+
+        let second = try RunningCLIProcess(
+            arguments: ["build", "--format", "json"],
+            directory: fixture.directory,
+            environment: fixture.environment
+        )
+        defer { second.cleanup() }
+        Thread.sleep(forTimeInterval: 0.35)
+
+        XCTAssertTrue(second.isRunning, "同 profile 的第二个 CLI 应阻塞等待锁")
+        XCTAssertEqual(fixture.assemblerInvocationCount, 1)
+        XCTAssertTrue(
+            FileManager.default.fileExists(atPath: activeStaging.path),
+            "等待者不得把持锁构建的 staging 当作残留删除"
+        )
+
+        fixture.releaseAssembler()
+        let firstResult = try first.waitForExit()
+        let secondResult = try second.waitForExit()
+        XCTAssertEqual(firstResult.status, 0, firstResult.stderr)
+        XCTAssertEqual(secondResult.status, 0, secondResult.stderr)
+    }
+
+    func testConcurrentDifferentProfileCLIBuildsDoNotShareOneGlobalLock() throws {
+        let fixture = try ConcurrentBuildFixture(profile: .arm7tdmi)
+        defer { fixture.cleanup() }
+        let first = try RunningCLIProcess(
+            arguments: ["build", "--format", "json"],
+            directory: fixture.directory,
+            environment: fixture.environment
+        )
+        defer { first.cleanup() }
+        XCTAssertTrue(fixture.waitForFirstAssembler())
+
+        try fixture.saveConfiguration(profile: .cortexM4)
+        let second = try RunningCLIProcess(
+            arguments: ["build", "--format", "json"],
+            directory: fixture.directory,
+            environment: fixture.environment
+        )
+        defer { second.cleanup() }
+        XCTAssertTrue(
+            waitUntil(timeout: 2) { fixture.assemblerInvocationCount >= 2 },
+            "不同 profile 构建必须能在第一个 profile 暂停时进入工具阶段"
+        )
+
+        fixture.releaseAssembler()
+        let firstResult = try first.waitForExit()
+        let secondResult = try second.waitForExit()
+        XCTAssertEqual(firstResult.status, 0, firstResult.stderr)
+        XCTAssertEqual(secondResult.status, 0, secondResult.stderr)
+    }
+
+    func testTerminatedBuildCLIReleasesProfileLockWithoutLeakingItToAssembler() throws {
+        let fixture = try ConcurrentBuildFixture(profile: .arm7tdmi)
+        defer { fixture.cleanup() }
+        let first = try RunningCLIProcess(
+            arguments: ["build", "--format", "json"],
+            directory: fixture.directory,
+            environment: fixture.environment
+        )
+        defer { first.cleanup() }
+        XCTAssertTrue(fixture.waitForFirstAssembler())
+        XCTAssertEqual(Darwin.kill(first.processIdentifier, SIGTERM), 0)
+        XCTAssertTrue(waitUntil(timeout: 2) { !first.isRunning })
+        _ = try first.waitForExit()
+
+        let second = try RunningCLIProcess(
+            arguments: ["build", "--format", "json"],
+            directory: fixture.directory,
+            environment: fixture.environment
+        )
+        defer { second.cleanup() }
+        XCTAssertTrue(
+            waitUntil(timeout: 2) { fixture.assemblerInvocationCount >= 2 },
+            "CLI 被信号终止后，assembler 不得继承锁 FD"
+        )
+
+        fixture.releaseAssembler()
+        let secondResult = try second.waitForExit()
+        XCTAssertEqual(secondResult.status, 0, secondResult.stderr)
+        XCTAssertTrue(
+            waitUntil(timeout: 2) { fixture.assemblerPIDs.allSatisfy(processHasExited) },
+            "信号测试的 assembler fixture 未退出"
+        )
+    }
 }
 
 private struct CLIResult {
@@ -1246,6 +1344,196 @@ private struct SignalledCLIResult {
     let stdout: String
     let stderr: String
     let descendantPIDs: [pid_t]
+}
+
+private final class RunningCLIProcess {
+    private let process = Process()
+    private let captureDirectory: URL
+    private let stdoutURL: URL
+    private let stderrURL: URL
+    private let stdoutHandle: FileHandle
+    private let stderrHandle: FileHandle
+    private var handlesClosed = false
+
+    init(
+        arguments: [String],
+        directory: URL,
+        environment: [String: String]
+    ) throws {
+        captureDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(
+            at: captureDirectory,
+            withIntermediateDirectories: true
+        )
+        stdoutURL = captureDirectory.appendingPathComponent("stdout")
+        stderrURL = captureDirectory.appendingPathComponent("stderr")
+        guard FileManager.default.createFile(atPath: stdoutURL.path, contents: nil),
+              FileManager.default.createFile(atPath: stderrURL.path, contents: nil) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        stdoutHandle = try FileHandle(forWritingTo: stdoutURL)
+        stderrHandle = try FileHandle(forWritingTo: stderrURL)
+        process.executableURL = cliExecutableURL()
+        process.arguments = arguments
+        process.currentDirectoryURL = directory
+        process.environment = ProcessInfo.processInfo.environment.merging(
+            environment,
+            uniquingKeysWith: { _, override in override }
+        )
+        process.standardOutput = stdoutHandle
+        process.standardError = stderrHandle
+        try process.run()
+    }
+
+    var isRunning: Bool { process.isRunning }
+    var processIdentifier: pid_t { process.processIdentifier }
+
+    func waitForExit(timeout: TimeInterval = 8) throws -> CLIResult {
+        guard waitUntil(timeout: timeout, condition: { !process.isRunning }) else {
+            throw YagartoError.internalFailure("等待并发 build CLI 退出超时。")
+        }
+        process.waitUntilExit()
+        try closeHandles()
+        return CLIResult(
+            status: process.terminationStatus,
+            stdout: String(decoding: try Data(contentsOf: stdoutURL), as: UTF8.self),
+            stderr: String(decoding: try Data(contentsOf: stderrURL), as: UTF8.self)
+        )
+    }
+
+    func cleanup() {
+        if process.isRunning {
+            _ = Darwin.kill(process.processIdentifier, SIGKILL)
+            process.waitUntilExit()
+        }
+        try? closeHandles()
+        try? FileManager.default.removeItem(at: captureDirectory)
+    }
+
+    private func closeHandles() throws {
+        guard !handlesClosed else { return }
+        try stdoutHandle.close()
+        try stderrHandle.close()
+        handlesClosed = true
+    }
+}
+
+private final class ConcurrentBuildFixture {
+    let directory: URL
+    private let tools: URL
+    private let calls: URL
+    private let claim: URL
+    private let started: URL
+    private let release: URL
+
+    init(profile: ProfileID) throws {
+        directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("concurrent-build-\(UUID().uuidString)", isDirectory: true)
+        tools = directory.appendingPathComponent("tools", isDirectory: true)
+        calls = directory.appendingPathComponent("assembler-calls", isDirectory: true)
+        claim = directory.appendingPathComponent("assembler-claim", isDirectory: true)
+        started = directory.appendingPathComponent("assembler-started")
+        release = directory.appendingPathComponent("assembler-release")
+        try FileManager.default.createDirectory(at: tools, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: calls, withIntermediateDirectories: true)
+        try Data(".text\n.global user_main\nuser_main:\n  bx lr\n".utf8).write(
+            to: directory.appendingPathComponent("demo.s")
+        )
+        try saveConfiguration(profile: profile)
+
+        let tool = """
+        #!/bin/sh
+        name=${0##*/}
+        if [ "$name" = "arm-none-eabi-as" ] || [ "$name" = "arm-none-eabi-gcc" ]; then
+            : > "$YAGARTO_BUILD_CALLS/call-$$"
+            if /bin/mkdir "$YAGARTO_BUILD_CLAIM" 2>/dev/null; then
+                : > "$YAGARTO_BUILD_STARTED"
+                while [ ! -f "$YAGARTO_BUILD_RELEASE" ]; do
+                    /bin/sleep 0.02
+                done
+            fi
+        fi
+        previous=
+        last=
+        for argument in "$@"; do
+            case "$previous" in
+                -o|-Map) : > "$argument" ;;
+            esac
+            previous=$argument
+            last=$argument
+        done
+        case "$name" in
+            *objcopy) : > "$last" ;;
+            *objdump) printf 'listing\n' ;;
+        esac
+        exit 0
+        """
+        for name in [
+            "arm-none-eabi-as", "arm-none-eabi-gcc", "arm-none-eabi-ld",
+            "arm-none-eabi-objcopy", "arm-none-eabi-objdump"
+        ] {
+            try writeExecutable(tool, to: tools.appendingPathComponent(name))
+        }
+    }
+
+    var environment: [String: String] {
+        [
+            "PATH": "\(tools.path):/usr/bin:/bin",
+            "YAGARTO_BUILD_CALLS": calls.path,
+            "YAGARTO_BUILD_CLAIM": claim.path,
+            "YAGARTO_BUILD_STARTED": started.path,
+            "YAGARTO_BUILD_RELEASE": release.path
+        ]
+    }
+
+    var assemblerInvocationCount: Int {
+        (try? FileManager.default.contentsOfDirectory(atPath: calls.path).count) ?? 0
+    }
+
+    var assemblerPIDs: [pid_t] {
+        ((try? FileManager.default.contentsOfDirectory(atPath: calls.path)) ?? [])
+            .compactMap { name in
+                guard name.hasPrefix("call-") else { return nil }
+                return pid_t(name.dropFirst("call-".count))
+            }
+    }
+
+    func waitForFirstAssembler() -> Bool {
+        waitUntil(timeout: 3) {
+            FileManager.default.fileExists(atPath: started.path)
+        }
+    }
+
+    func releaseAssembler() {
+        FileManager.default.createFile(atPath: release.path, contents: Data())
+    }
+
+    func saveConfiguration(profile: ProfileID) throws {
+        try ConfigStore(projectDirectory: directory).save(ProjectConfiguration(
+            profile: profile,
+            entry: "user_main",
+            sources: ["demo.s"],
+            outputName: "firmware"
+        ))
+    }
+
+    func stagingDirectories(profile: ProfileID) throws -> [URL] {
+        let buildRoot = directory.appendingPathComponent(".yagarto/build", isDirectory: true)
+        let prefix = ".\(profile.rawValue)-staging-"
+        return try FileManager.default.contentsOfDirectory(
+            at: buildRoot,
+            includingPropertiesForKeys: nil
+        ).filter { $0.lastPathComponent.hasPrefix(prefix) }
+    }
+
+    func cleanup() {
+        releaseAssembler()
+        for pid in assemblerPIDs where !processHasExited(pid) {
+            _ = Darwin.kill(pid, SIGKILL)
+        }
+        try? FileManager.default.removeItem(at: directory)
+    }
 }
 
 private struct CLIErrorEnvelope: Decodable {

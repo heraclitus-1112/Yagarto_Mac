@@ -489,6 +489,110 @@ private func waitForPTYCondition(
 }
 
 final class BuildExecutorTests: XCTestCase {
+    func testExecutorHoldsSafeCloseOnExecProfileLockBeforePreflightAndReleasesOnFailure() throws {
+        let directory = try TemporaryTestDirectory(component: "构建排他锁")
+        let plan = makeRealWritingPlan(directory: directory.url)
+        let lockFile = plan.outputDirectory.deletingLastPathComponent()
+            .appendingPathComponent(".arm7tdmi.lock")
+        var observedLockDescriptor: Int32?
+        let executor = BuildExecutor(
+            runner: RecordingProcessRunner(results: []),
+            atomicSwapPreflight: { _, _ in
+                var lockMetadata = stat()
+                let metadataResult = lockFile.withUnsafeFileSystemRepresentation { path in
+                    guard let path else { return Int32(-1) }
+                    return Darwin.lstat(path, &lockMetadata)
+                }
+                guard metadataResult == 0 else {
+                    XCTFail("swap preflight 前必须已创建 profile 锁")
+                    throw YagartoError.internalFailure("missing build lock")
+                }
+                XCTAssertEqual(lockMetadata.st_mode & S_IFMT, S_IFREG)
+                XCTAssertEqual(lockMetadata.st_nlink, 1)
+                XCTAssertEqual(lockMetadata.st_uid, geteuid())
+                XCTAssertEqual(lockMetadata.st_mode & 0o777, 0o600)
+
+                for descriptor in Int32(3)..<Int32(256) {
+                    var descriptorMetadata = stat()
+                    guard Darwin.fstat(descriptor, &descriptorMetadata) == 0,
+                          descriptorMetadata.st_dev == lockMetadata.st_dev,
+                          descriptorMetadata.st_ino == lockMetadata.st_ino else {
+                        continue
+                    }
+                    observedLockDescriptor = descriptor
+                    let flags = Darwin.fcntl(descriptor, F_GETFD)
+                    XCTAssertNotEqual(flags, -1)
+                    XCTAssertNotEqual(flags & FD_CLOEXEC, 0)
+                    break
+                }
+                XCTAssertNotNil(observedLockDescriptor)
+                throw YagartoError.atomicDirectorySwapUnsupported(
+                    plan.outputDirectory.path,
+                    "intentional preflight failure"
+                )
+            }
+        )
+
+        XCTAssertThrowsError(try executor.execute(plan)) { error in
+            XCTAssertEqual(
+                (error as? YagartoError)?.diagnosticCode,
+                "build.atomic_publish_unsupported"
+            )
+        }
+        XCTAssertNotNil(observedLockDescriptor)
+
+        let independentProbe = try ProcessRunner().run(CommandSpec(
+            executable: "/usr/bin/python3",
+            args: [
+                "-c",
+                "import fcntl, os, sys; fd=os.open(sys.argv[1], os.O_RDWR | os.O_NOFOLLOW); fcntl.lockf(fd, fcntl.LOCK_EX | fcntl.LOCK_NB); os.close(fd)",
+                lockFile.path
+            ],
+            workingDirectory: directory.url
+        ))
+        XCTAssertEqual(
+            independentProbe.exitStatus,
+            0,
+            "preflight 失败返回后，独立进程必须可取得同一锁：\(independentProbe.toolOutput ?? "")"
+        )
+    }
+
+    func testExecutorRejectsProfileLockSymlinkAndHardLinkBeforePreflightOrTools() throws {
+        enum LinkKind: String { case symbolic, hard }
+
+        for kind in [LinkKind.symbolic, .hard] {
+            let directory = try TemporaryTestDirectory(component: "不安全构建锁-\(kind.rawValue)")
+            let outside = try TemporaryTestDirectory(component: "构建锁 victim-\(kind.rawValue)")
+            let plan = makeRealWritingPlan(directory: directory.url)
+            let buildRoot = plan.outputDirectory.deletingLastPathComponent()
+            try FileManager.default.createDirectory(at: buildRoot, withIntermediateDirectories: true)
+            let victim = outside.url.appendingPathComponent("victim")
+            try Data("keep".utf8).write(to: victim)
+            let lockFile = buildRoot.appendingPathComponent(".arm7tdmi.lock")
+            switch kind {
+            case .symbolic:
+                try FileManager.default.createSymbolicLink(
+                    atPath: lockFile.path,
+                    withDestinationPath: victim.path
+                )
+            case .hard:
+                try FileManager.default.linkItem(at: victim, to: lockFile)
+            }
+            let runner = RecordingProcessRunner(results: [])
+            var preflightCalls = 0
+
+            XCTAssertThrowsError(try BuildExecutor(
+                runner: runner,
+                atomicSwapPreflight: { _, _ in preflightCalls += 1 }
+            ).execute(plan)) { error in
+                XCTAssertEqual((error as? YagartoError)?.diagnosticCode, "build.lock_unsafe")
+            }
+            XCTAssertEqual(preflightCalls, 0)
+            XCTAssertTrue(runner.commands.isEmpty)
+            XCTAssertEqual(try String(contentsOf: victim, encoding: .utf8), "keep")
+        }
+    }
+
     func testExecutorRejectsUnsupportedAtomicSwapBeforeToolsOrPublishedOutputChange() throws {
         let directory = try TemporaryTestDirectory(component: "不支持原子交换")
         let plan = makeRealWritingPlan(directory: directory.url)
@@ -599,6 +703,68 @@ final class BuildExecutorTests: XCTestCase {
             inspectProbeRoot: { _ in XCTFail("mkdir 失败后不得检查竞争者目录") }
         ))
         XCTAssertEqual(try String(contentsOf: marker, encoding: .utf8), "keep")
+    }
+
+    func testAtomicSwapProbeCleansOwnedFirstEndpointAndRootWhenSecondPhaseFails() throws {
+        let directory = try TemporaryTestDirectory(component: "交换探测部分失败")
+        let output = directory.url.appendingPathComponent(
+            ".yagarto/build/arm7tdmi",
+            isDirectory: true
+        )
+        let identifier = UUID(uuidString: "33333333-3333-4333-8333-333333333333")!
+        var probeRoot: URL?
+
+        XCTAssertThrowsError(try ProjectPathGuard.requireAtomicDirectorySwapSupport(
+            projectDirectory: directory.url,
+            outputDirectory: output,
+            identifier: identifier,
+            beforeSecondProbeDirectory: { root in
+                probeRoot = root
+                throw YagartoError.internalFailure("injected second mkdir failure")
+            },
+            inspectProbeRoot: { _ in XCTFail("第二阶段失败后不得执行 swap") }
+        ))
+
+        let root = try XCTUnwrap(probeRoot)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("a").path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.path))
+    }
+
+    func testAtomicSwapProbeCleansOwnedFirstEndpointWithoutDeletingSecondEndpointCompetitor() throws {
+        let directory = try TemporaryTestDirectory(component: "交换探测 b 竞争者")
+        let output = directory.url.appendingPathComponent(
+            ".yagarto/build/arm7tdmi",
+            isDirectory: true
+        )
+        let identifier = UUID(uuidString: "44444444-4444-4444-8444-444444444444")!
+        var competitorMarker: URL?
+
+        XCTAssertThrowsError(try ProjectPathGuard.requireAtomicDirectorySwapSupport(
+            projectDirectory: directory.url,
+            outputDirectory: output,
+            identifier: identifier,
+            beforeSecondProbeDirectory: { root in
+                let second = root.appendingPathComponent("b", isDirectory: true)
+                try FileManager.default.createDirectory(
+                    at: second,
+                    withIntermediateDirectories: false
+                )
+                let marker = second.appendingPathComponent("competitor")
+                try Data("keep".utf8).write(to: marker)
+                competitorMarker = marker
+            },
+            inspectProbeRoot: { _ in XCTFail("b 碰撞后不得执行 swap") }
+        ))
+
+        let marker = try XCTUnwrap(competitorMarker)
+        XCTAssertEqual(try String(contentsOf: marker, encoding: .utf8), "keep")
+        XCTAssertFalse(
+            FileManager.default.fileExists(
+                atPath: marker.deletingLastPathComponent()
+                    .deletingLastPathComponent()
+                    .appendingPathComponent("a").path
+            )
+        )
     }
 
     func testInjectedSuccessfulAtomicSwapPreflightDoesNotNeedToCreateBuildParent() throws {

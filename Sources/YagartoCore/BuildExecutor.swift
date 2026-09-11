@@ -21,6 +21,13 @@ public struct BuildExecutor {
 
     @discardableResult
     public func execute(_ plan: BuildPlan) throws -> [ProcessResult] {
+        let executionLock = try ProjectPathGuard.acquireBuildExecutionLock(
+            profile: plan.profile,
+            projectDirectory: plan.projectDirectory,
+            outputDirectory: plan.outputDirectory
+        )
+        defer { executionLock.release() }
+
         try atomicSwapPreflight(plan.projectDirectory, plan.outputDirectory)
         try ProjectPathGuard.cleanupStaleBuildDirectories(
             profile: plan.profile,

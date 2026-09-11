@@ -107,6 +107,29 @@ final class BuildPlannerTests: XCTestCase {
         XCTAssertEqual(plan.startupObjectFile?.lastPathComponent, "stm32f4-startup.o")
     }
 
+    func testStartupProfilesRejectUnclassifiedOrphanSectionsAtLinkTime() throws {
+        for profile in [ProfileID.cortexM4, .stm32f4Discovery] {
+            let plan = try makePlanner().plan(
+                configuration: ProjectConfiguration(
+                    profile: profile,
+                    entry: "user_main",
+                    sources: ["demo.s"]
+                ),
+                projectDirectory: projectDirectory
+            )
+            let linker = try XCTUnwrap(plan.commands.first(where: {
+                $0.executable == tools[.linker]
+            }))
+            XCTAssertTrue(linker.args.contains("--orphan-handling=error"), profile.rawValue)
+        }
+
+        let arm7 = try makePlanner().plan(
+            configuration: ProjectConfiguration(sources: ["demo.s"]),
+            projectDirectory: projectDirectory
+        )
+        XCTAssertFalse(arm7.commands.flatMap(\.args).contains("--orphan-handling=error"))
+    }
+
     func testCortexM4ConfiguredEntryAcceptsUnicodeSymbolWithoutCommandMetacharacters() throws {
         let plan = try makePlanner().plan(
             configuration: ProjectConfiguration(
@@ -305,6 +328,58 @@ final class BuildPlannerTests: XCTestCase {
         }
     }
 
+    func testLexicalBuildOutputSymlinksAreRejectedBeforeResolvingTheirTargets() throws {
+        for useProjectRootSymlink in [false, true] {
+            let root = try BuildTemporaryDirectory()
+            let realProject = root.url.appendingPathComponent("real-project", isDirectory: true)
+            try FileManager.default.createDirectory(
+                at: realProject.appendingPathComponent("sources", isDirectory: true),
+                withIntermediateDirectories: true
+            )
+            let target = realProject.appendingPathComponent("sources/real.s")
+            try Data(".text\n".utf8).write(to: target)
+            let project: URL
+            if useProjectRootSymlink {
+                project = root.url.appendingPathComponent("project-alias", isDirectory: true)
+                try FileManager.default.createSymbolicLink(
+                    atPath: project.path,
+                    withDestinationPath: realProject.path
+                )
+            } else {
+                project = realProject
+            }
+
+            for configuredPath in [
+                ".yagarto/build/arm7tdmi/source-link.s",
+                ".yagarto/build/cortex-m4/source-link.s"
+            ] {
+                let link = realProject.appendingPathComponent(configuredPath)
+                try FileManager.default.createDirectory(
+                    at: link.deletingLastPathComponent(),
+                    withIntermediateDirectories: true
+                )
+                try FileManager.default.createSymbolicLink(
+                    atPath: link.path,
+                    withDestinationPath: target.path
+                )
+
+                XCTAssertThrowsError(try makePlanner().plan(
+                    configuration: ProjectConfiguration(
+                        profile: .arm7tdmi,
+                        sources: [configuredPath]
+                    ),
+                    projectDirectory: project
+                )) { error in
+                    XCTAssertEqual(
+                        (error as? YagartoError)?.diagnosticCode,
+                        "configuration.source_in_output",
+                        "project symlink=\(useProjectRootSymlink), path=\(configuredPath)"
+                    )
+                }
+            }
+        }
+    }
+
     func testRebaseOnlyRewritesExactKnownOutputPathsNotArbitraryOutputTreeInputs() {
         let project = URL(fileURLWithPath: "/tmp/project", isDirectory: true)
         let output = project.appendingPathComponent(
@@ -443,9 +518,17 @@ final class BuildPlannerTests: XCTestCase {
                 XCTAssertTrue(script.contains("_estack = ORIGIN(STACK) + LENGTH(STACK)"))
                 XCTAssertTrue(script.contains("__stack_limit__ = ORIGIN(STACK)"))
                 XCTAssertTrue(script.contains(".noinit (NOLOAD)"))
-                XCTAssertTrue(
-                    script.contains("INPUT_SECTION_FLAGS (SHF_ALLOC & SHF_WRITE) *(*)")
-                )
+                XCTAssertFalse(script.contains("INPUT_SECTION_FLAGS"))
+                for standardMetadataSection in [
+                    ".stab.excl", ".debug             0", ".line              0",
+                    ".debug_pubtypes", ".debug_weaknames", ".gnu.build.attributes",
+                    ".note.gnu.arm.ident", ".gnu_debuglink", ".gnu.lto_*"
+                ] {
+                    XCTAssertTrue(
+                        script.contains(standardMetadataSection),
+                        "\(filename) 未显式处理 \(standardMetadataSection)"
+                    )
+                }
             }
             for fragment in fragments {
                 XCTAssertTrue(script.contains(fragment), "\(filename) 缺少 \(fragment)")
@@ -548,7 +631,9 @@ final class BuildPlannerTests: XCTestCase {
             linkObjects.insert(startupObject, at: 0)
         }
         let linkEntry = startupName == nil ? entry : "Reset_Handler"
-        var linkArguments = ["-T", "/scripts/\(scriptName)", "-e", linkEntry]
+        var linkArguments = startupName == nil
+            ? ["-T", "/scripts/\(scriptName)", "-e", linkEntry]
+            : ["--orphan-handling=error", "-T", "/scripts/\(scriptName)", "-e", linkEntry]
         if startupName != nil {
             linkArguments.append("--defsym=__yagarto_entry=\(entry)")
         }

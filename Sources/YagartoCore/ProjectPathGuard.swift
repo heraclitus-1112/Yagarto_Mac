@@ -73,6 +73,27 @@ enum ProjectPathGuard {
         }
     }
 
+    static func validateConfiguredSourceOutsideManagedBuildRoot(
+        relativePath: String,
+        projectDirectory: URL
+    ) throws {
+        let canonicalProject = projectDirectory
+            .standardizedFileURL
+            .resolvingSymlinksInPath()
+            .standardizedFileURL
+        let lexicalSource = canonicalProject
+            .appendingPathComponent(relativePath, isDirectory: false)
+            .standardizedFileURL
+        let managedBuildRoot = canonicalProject
+            .appendingPathComponent(".yagarto", isDirectory: true)
+            .appendingPathComponent("build", isDirectory: true)
+            .standardizedFileURL
+        guard lexicalSource != managedBuildRoot,
+              !contains(lexicalSource, within: managedBuildRoot) else {
+            throw YagartoError.sourceInsideBuildOutput(relativePath)
+        }
+    }
+
     static func createOutputDirectory(
         projectDirectory: URL,
         outputDirectory: URL
@@ -182,6 +203,7 @@ enum ProjectPathGuard {
         projectDirectory: URL,
         outputDirectory: URL,
         identifier: UUID,
+        beforeSecondProbeDirectory: (URL) throws -> Void = { _ in },
         inspectProbeRoot: (URL) throws -> Void
     ) throws {
         let output = outputDirectory.standardizedFileURL
@@ -203,6 +225,8 @@ enum ProjectPathGuard {
         let second = probeRoot.appendingPathComponent("b", isDirectory: true)
         var ownedRoot: DirectoryIdentity?
         var ownedChildren = Set<DirectoryIdentity>()
+        var firstIdentity: DirectoryIdentity?
+        var secondIdentity: DirectoryIdentity?
         defer {
             for child in [first, second] {
                 guard let current = try? metadata(at: child),
@@ -224,11 +248,20 @@ enum ProjectPathGuard {
             }
         }
 
-        let rootBefore = try createPrivateDirectory(probeRoot, errorPath: output.path)
-        ownedRoot = DirectoryIdentity(rootBefore)
-        let firstBefore = try createPrivateDirectory(first, errorPath: output.path)
-        let secondBefore = try createPrivateDirectory(second, errorPath: output.path)
-        ownedChildren = [DirectoryIdentity(firstBefore), DirectoryIdentity(secondBefore)]
+        try createPrivateDirectory(probeRoot, errorPath: output.path) { metadata in
+            ownedRoot = DirectoryIdentity(metadata)
+        }
+        try createPrivateDirectory(first, errorPath: output.path) { metadata in
+            let identity = DirectoryIdentity(metadata)
+            firstIdentity = identity
+            ownedChildren.insert(identity)
+        }
+        try beforeSecondProbeDirectory(probeRoot)
+        try createPrivateDirectory(second, errorPath: output.path) { metadata in
+            let identity = DirectoryIdentity(metadata)
+            secondIdentity = identity
+            ownedChildren.insert(identity)
+        }
         try inspectProbeRoot(probeRoot)
         let result = first.withUnsafeFileSystemRepresentation { firstPath in
             second.withUnsafeFileSystemRepresentation { secondPath in
@@ -242,10 +275,12 @@ enum ProjectPathGuard {
                 String(cString: strerror(errno))
             )
         }
-        guard let firstAfter = try metadata(at: first),
+        guard let firstIdentity,
+              let secondIdentity,
+              let firstAfter = try metadata(at: first),
               let secondAfter = try metadata(at: second),
-              firstAfter.st_ino == secondBefore.st_ino,
-              secondAfter.st_ino == firstBefore.st_ino else {
+              DirectoryIdentity(firstAfter) == secondIdentity,
+              DirectoryIdentity(secondAfter) == firstIdentity else {
             throw YagartoError.atomicDirectorySwapUnsupported(
                 output.path,
                 "同卷目录交换未保持预期原子语义。"
@@ -361,8 +396,9 @@ enum ProjectPathGuard {
 
     private static func createPrivateDirectory(
         _ directory: URL,
-        errorPath: String
-    ) throws -> stat {
+        errorPath: String,
+        recordOwnership: (stat) -> Void
+    ) throws {
         let result = directory.withUnsafeFileSystemRepresentation { path in
             guard let path else { return Int32(-1) }
             return Darwin.mkdir(path, S_IRWXU)
@@ -373,15 +409,20 @@ enum ProjectPathGuard {
                 String(cString: strerror(errno))
             )
         }
-        guard let created = try metadata(at: directory),
-              (created.st_mode & S_IFMT) == S_IFDIR,
+        guard let created = try metadata(at: directory) else {
+            throw YagartoError.atomicDirectorySwapUnsupported(
+                errorPath,
+                "无法读取刚创建的探测目录。"
+            )
+        }
+        recordOwnership(created)
+        guard (created.st_mode & S_IFMT) == S_IFDIR,
               (created.st_mode & 0o777) == S_IRWXU else {
             throw YagartoError.atomicDirectorySwapUnsupported(
                 errorPath,
                 "探测目录不是权限为 0700 的普通目录。"
             )
         }
-        return created
     }
 
     private static func isStrictStaleBuildDirectoryName(
