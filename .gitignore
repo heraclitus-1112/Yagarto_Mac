@@ -5,6 +5,7 @@
 .yagarto/
 .planning/
 DerivedData/
+dist/
 work/
 outputs/
 task_plan.md

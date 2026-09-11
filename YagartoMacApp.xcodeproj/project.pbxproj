@@ -1,0 +1,282 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		A10000000000000000000001 /* AppRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000001 /* AppRuntime.swift */; };
+		A10000000000000000000002 /* WorkbenchView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000002 /* WorkbenchView.swift */; };
+		A10000000000000000000003 /* YagartoMacApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000003 /* YagartoMacApp.swift */; };
+		A10000000000000000000006 /* WindowCloseGuard.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000005 /* WindowCloseGuard.swift */; };
+		A10000000000000000000004 /* YagartoAppSupport in Frameworks */ = {isa = PBXBuildFile; productRef = A90000000000000000000001 /* YagartoAppSupport */; };
+		A10000000000000000000005 /* YagartoCore in Frameworks */ = {isa = PBXBuildFile; productRef = A90000000000000000000002 /* YagartoCore */; };
+		B10000000000000000000001 /* YagartoMacAppUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000001 /* YagartoMacAppUITests.swift */; };
+		B10000000000000000000002 /* XCTest.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B20000000000000000000002 /* XCTest.framework */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		B30000000000000000000001 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = C10000000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = A70000000000000000000001;
+			remoteInfo = YagartoMacApp;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		A20000000000000000000001 /* AppRuntime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/YagartoMacApp/AppRuntime.swift; sourceTree = "<group>"; };
+		A20000000000000000000002 /* WorkbenchView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/YagartoMacApp/WorkbenchView.swift; sourceTree = "<group>"; };
+		A20000000000000000000003 /* YagartoMacApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/YagartoMacApp/YagartoMacApp.swift; sourceTree = "<group>"; };
+		A20000000000000000000004 /* YagartoMacApp.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = YagartoMacApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A20000000000000000000005 /* WindowCloseGuard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/YagartoMacApp/WindowCloseGuard.swift; sourceTree = "<group>"; };
+		B20000000000000000000001 /* YagartoMacAppUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = YagartoMacAppUITests/YagartoMacAppUITests.swift; sourceTree = "<group>"; };
+		B20000000000000000000002 /* XCTest.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = XCTest.framework; path = System/Library/Frameworks/XCTest.framework; sourceTree = SDKROOT; };
+		B20000000000000000000003 /* YagartoMacAppUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = YagartoMacAppUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		A40000000000000000000001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A10000000000000000000004 /* YagartoAppSupport in Frameworks */,
+				A10000000000000000000005 /* YagartoCore in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		B40000000000000000000001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B10000000000000000000002 /* XCTest.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		A50000000000000000000001 = {
+			isa = PBXGroup;
+			children = (
+				A50000000000000000000002 /* App Sources */,
+				A50000000000000000000003 /* UI Tests */,
+				A50000000000000000000004 /* Frameworks */,
+				A50000000000000000000005 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		A50000000000000000000002 /* App Sources */ = {
+			isa = PBXGroup;
+			children = (
+				A20000000000000000000001 /* AppRuntime.swift */,
+				A20000000000000000000002 /* WorkbenchView.swift */,
+				A20000000000000000000003 /* YagartoMacApp.swift */,
+				A20000000000000000000005 /* WindowCloseGuard.swift */,
+			);
+			name = "App Sources";
+			sourceTree = "<group>";
+		};
+		A50000000000000000000003 /* UI Tests */ = {
+			isa = PBXGroup;
+			children = (
+				B20000000000000000000001 /* YagartoMacAppUITests.swift */,
+			);
+			name = "UI Tests";
+			sourceTree = "<group>";
+		};
+		A50000000000000000000004 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				B20000000000000000000002 /* XCTest.framework */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+		A50000000000000000000005 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				A20000000000000000000004 /* YagartoMacApp.app */,
+				B20000000000000000000003 /* YagartoMacAppUITests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		A70000000000000000000001 /* YagartoMacApp */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A80000000000000000000001 /* Build configuration list for PBXNativeTarget "YagartoMacApp" */;
+			buildPhases = (
+				A60000000000000000000001 /* Sources */,
+				A40000000000000000000001 /* Frameworks */,
+				A60000000000000000000002 /* Resources */,
+			);
+			buildRules = ();
+			dependencies = ();
+			name = YagartoMacApp;
+			packageProductDependencies = (
+				A90000000000000000000001 /* YagartoAppSupport */,
+				A90000000000000000000002 /* YagartoCore */,
+			);
+			productName = YagartoMacApp;
+			productReference = A20000000000000000000004 /* YagartoMacApp.app */;
+			productType = "com.apple.product-type.application";
+		};
+		B70000000000000000000001 /* YagartoMacAppUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = B80000000000000000000001 /* Build configuration list for PBXNativeTarget "YagartoMacAppUITests" */;
+			buildPhases = (
+				B60000000000000000000001 /* Sources */,
+				B40000000000000000000001 /* Frameworks */,
+				B60000000000000000000002 /* Resources */,
+			);
+			buildRules = ();
+			dependencies = (
+				B90000000000000000000001 /* PBXTargetDependency */,
+			);
+			name = YagartoMacAppUITests;
+			productName = YagartoMacAppUITests;
+			productReference = B20000000000000000000003 /* YagartoMacAppUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		C10000000000000000000001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 2660;
+				LastUpgradeCheck = 2660;
+				TargetAttributes = {
+					A70000000000000000000001 = {CreatedOnToolsVersion = 26.0; };
+					B70000000000000000000001 = {CreatedOnToolsVersion = 26.0; TestTargetID = A70000000000000000000001; };
+				};
+			};
+			buildConfigurationList = C20000000000000000000001 /* Build configuration list for PBXProject "YagartoMacApp" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (en, Base, zh-Hans);
+			mainGroup = A50000000000000000000001;
+			minimizedProjectReferenceProxies = 1;
+			packageReferences = (C30000000000000000000001 /* XCLocalSwiftPackageReference "." */);
+			preferredProjectObjectVersion = 77;
+			productRefGroup = A50000000000000000000005 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				A70000000000000000000001 /* YagartoMacApp */,
+				B70000000000000000000001 /* YagartoMacAppUITests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		A60000000000000000000002 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		B60000000000000000000002 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		A60000000000000000000001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A10000000000000000000001 /* AppRuntime.swift in Sources */,
+				A10000000000000000000002 /* WorkbenchView.swift in Sources */,
+				A10000000000000000000003 /* YagartoMacApp.swift in Sources */,
+				A10000000000000000000006 /* WindowCloseGuard.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		B60000000000000000000001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (B10000000000000000000001 /* YagartoMacAppUITests.swift in Sources */);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		B90000000000000000000001 /* PBXTargetDependency */ = {isa = PBXTargetDependency; target = A70000000000000000000001 /* YagartoMacApp */; targetProxy = B30000000000000000000001 /* PBXContainerItemProxy */; };
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		D10000000000000000000001 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {CLANG_ENABLE_MODULES = YES; MACOSX_DEPLOYMENT_TARGET = 15.0; SDKROOT = macosx; SWIFT_VERSION = 6.0; }; name = Debug; };
+		D10000000000000000000002 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {CLANG_ENABLE_MODULES = YES; MACOSX_DEPLOYMENT_TARGET = 15.0; SDKROOT = macosx; SWIFT_COMPILATION_MODE = wholemodule; SWIFT_VERSION = 6.0; }; name = Release; };
+		D20000000000000000000001 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {
+			CODE_SIGNING_ALLOWED = NO;
+			CODE_SIGNING_REQUIRED = NO;
+			CURRENT_PROJECT_VERSION = 4;
+			ENABLE_APP_SANDBOX = NO;
+			GENERATE_INFOPLIST_FILE = YES;
+			INFOPLIST_KEY_CFBundleDisplayName = "YAGARTO Mac";
+			INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
+			INFOPLIST_KEY_LSMinimumSystemVersion = 15.0;
+			INFOPLIST_KEY_NSHighResolutionCapable = YES;
+			MARKETING_VERSION = 0.4.0;
+			PRODUCT_BUNDLE_IDENTIFIER = org.yagarto.mac.app;
+			PRODUCT_NAME = "$(TARGET_NAME)";
+			SWIFT_STRICT_CONCURRENCY = complete;
+			SWIFT_TREAT_WARNINGS_AS_ERRORS = YES;
+		}; name = Debug; };
+		D20000000000000000000002 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {
+			CODE_SIGNING_ALLOWED = NO;
+			CODE_SIGNING_REQUIRED = NO;
+			CURRENT_PROJECT_VERSION = 4;
+			ENABLE_APP_SANDBOX = NO;
+			GENERATE_INFOPLIST_FILE = YES;
+			INFOPLIST_KEY_CFBundleDisplayName = "YAGARTO Mac";
+			INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
+			INFOPLIST_KEY_LSMinimumSystemVersion = 15.0;
+			INFOPLIST_KEY_NSHighResolutionCapable = YES;
+			MARKETING_VERSION = 0.4.0;
+			PRODUCT_BUNDLE_IDENTIFIER = org.yagarto.mac.app;
+			PRODUCT_NAME = "$(TARGET_NAME)";
+			SWIFT_STRICT_CONCURRENCY = complete;
+			SWIFT_TREAT_WARNINGS_AS_ERRORS = YES;
+		}; name = Release; };
+		D30000000000000000000001 /* Debug */ = {isa = XCBuildConfiguration; buildSettings = {
+			CODE_SIGNING_ALLOWED = NO;
+			CODE_SIGNING_REQUIRED = NO;
+			GENERATE_INFOPLIST_FILE = YES;
+			MACOSX_DEPLOYMENT_TARGET = 15.0;
+			PRODUCT_BUNDLE_IDENTIFIER = org.yagarto.mac.app.uitests;
+			PRODUCT_NAME = "$(TARGET_NAME)";
+			SWIFT_STRICT_CONCURRENCY = complete;
+			SWIFT_TREAT_WARNINGS_AS_ERRORS = YES;
+			TEST_TARGET_NAME = YagartoMacApp;
+		}; name = Debug; };
+		D30000000000000000000002 /* Release */ = {isa = XCBuildConfiguration; buildSettings = {
+			CODE_SIGNING_ALLOWED = NO;
+			CODE_SIGNING_REQUIRED = NO;
+			GENERATE_INFOPLIST_FILE = YES;
+			MACOSX_DEPLOYMENT_TARGET = 15.0;
+			PRODUCT_BUNDLE_IDENTIFIER = org.yagarto.mac.app.uitests;
+			PRODUCT_NAME = "$(TARGET_NAME)";
+			SWIFT_STRICT_CONCURRENCY = complete;
+			SWIFT_TREAT_WARNINGS_AS_ERRORS = YES;
+			TEST_TARGET_NAME = YagartoMacApp;
+		}; name = Release; };
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		C20000000000000000000001 /* Build configuration list for PBXProject "YagartoMacApp" */ = {isa = XCConfigurationList; buildConfigurations = (D10000000000000000000001 /* Debug */, D10000000000000000000002 /* Release */); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		A80000000000000000000001 /* Build configuration list for PBXNativeTarget "YagartoMacApp" */ = {isa = XCConfigurationList; buildConfigurations = (D20000000000000000000001 /* Debug */, D20000000000000000000002 /* Release */); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+		B80000000000000000000001 /* Build configuration list for PBXNativeTarget "YagartoMacAppUITests" */ = {isa = XCConfigurationList; buildConfigurations = (D30000000000000000000001 /* Debug */, D30000000000000000000002 /* Release */); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
+/* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		C30000000000000000000001 /* XCLocalSwiftPackageReference "." */ = {isa = XCLocalSwiftPackageReference; relativePath = .; };
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		A90000000000000000000001 /* YagartoAppSupport */ = {isa = XCSwiftPackageProductDependency; productName = YagartoAppSupport; };
+		A90000000000000000000002 /* YagartoCore */ = {isa = XCSwiftPackageProductDependency; productName = YagartoCore; };
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = C10000000000000000000001 /* Project object */;
+}

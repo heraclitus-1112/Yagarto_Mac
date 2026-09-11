@@ -10,7 +10,9 @@ let package = Package(
     ],
     products: [
         .library(name: "YagartoCore", targets: ["YagartoCore"]),
-        .executable(name: "yagarto-mac", targets: ["YagartoMacCLI"])
+        .library(name: "YagartoAppSupport", targets: ["YagartoAppSupport"]),
+        .executable(name: "yagarto-mac", targets: ["YagartoMacCLI"]),
+        .executable(name: "YagartoMacApp", targets: ["YagartoMacApp"])
     ],
     dependencies: [
         .package(
@@ -23,6 +25,10 @@ let package = Package(
             name: "YagartoCore",
             resources: [.process("Resources")]
         ),
+        .target(
+            name: "YagartoAppSupport",
+            dependencies: ["YagartoCore"]
+        ),
         .executableTarget(
             name: "YagartoMacCLI",
             dependencies: [
@@ -30,9 +36,17 @@ let package = Package(
                 .product(name: "ArgumentParser", package: "swift-argument-parser")
             ]
         ),
+        .executableTarget(
+            name: "YagartoMacApp",
+            dependencies: ["YagartoAppSupport", "YagartoCore"]
+        ),
         .testTarget(
             name: "YagartoCoreTests",
             dependencies: ["YagartoCore"]
+        ),
+        .testTarget(
+            name: "YagartoAppSupportTests",
+            dependencies: ["YagartoAppSupport", "YagartoCore"]
         )
     ]
 )
