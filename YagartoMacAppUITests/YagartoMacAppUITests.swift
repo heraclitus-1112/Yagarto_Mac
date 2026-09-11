@@ -35,11 +35,13 @@ final class YagartoMacAppUITests: XCTestCase {
         editor.typeText("MOV r0, #1\nBAD\n")
         app.buttons["toolbar-build"].click()
         let state = app.descendants(matching: .any)["debugger-state"]
+        let sourceLocation = app.descendants(matching: .any)["source-location-status"]
+        let currentLine = app.descendants(matching: .any)["current-line-status"]
 
         let buildError = app.buttons["build-diagnostic-2"]
         XCTAssertTrue(buildError.waitForExistence(timeout: 5))
         buildError.click()
-        waitForLabelContaining("已定位到第 2 行", element: state)
+        waitForLabel("已定位到第 2 行", element: sourceLocation)
 
         editor.click()
         editor.typeKey("a", modifierFlags: .command)
@@ -49,10 +51,12 @@ final class YagartoMacAppUITests: XCTestCase {
         waitForLabel("就绪", element: state)
 
         app.buttons["toolbar-debug"].click()
-        waitForLabelContaining("当前执行第 1 行", element: state)
+        waitForLabel("已暂停", element: state)
+        waitForLabelContaining("当前执行第 1 行", element: currentLine)
 
         app.buttons["toolbar-step-instruction"].click()
-        waitForLabelContaining("当前执行第 2 行", element: state)
+        waitForLabel("已暂停", element: state)
+        waitForLabelContaining("当前执行第 2 行", element: currentLine)
         let register = app.descendants(matching: .any)
             .matching(NSPredicate(format: "identifier CONTAINS %@", "register-row-r0"))
             .firstMatch
@@ -70,23 +74,24 @@ final class YagartoMacAppUITests: XCTestCase {
         XCTAssertTrue(app.textViews["source-editor"].waitForExistence(timeout: 5))
         app.buttons["toolbar-build"].click()
         let state = app.descendants(matching: .any)["debugger-state"]
+        let operationError = app.descendants(matching: .any)["operation-error"]
         waitForLabel("就绪", element: state)
 
         app.buttons["toolbar-debug"].click()
-        waitForLabelContaining("测试后端启动失败", element: state)
-        waitForLabelContaining("就绪", element: state)
+        waitForLabelContaining("测试后端启动失败", element: operationError)
+        waitForLabel("就绪", element: state)
 
         app.buttons["toolbar-build"].click()
         waitForLabel("就绪", element: state)
         app.buttons["toolbar-debug"].click()
-        waitForLabelContaining("已暂停", element: state)
-        waitForLabelContaining("测试调试器意外退出", element: state)
-        waitForLabelContaining("就绪", element: state)
+        waitForLabel("已暂停", element: state)
+        waitForLabelContaining("测试调试器意外退出", element: operationError)
+        waitForLabel("就绪", element: state)
 
         app.buttons["toolbar-build"].click()
         waitForLabel("就绪", element: state)
         app.buttons["toolbar-debug"].click()
-        waitForLabelContaining("已暂停", element: state)
+        waitForLabel("已暂停", element: state)
         app.buttons["toolbar-stop"].click()
         waitForLabel("就绪", element: state)
     }

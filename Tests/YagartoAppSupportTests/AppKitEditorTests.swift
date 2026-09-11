@@ -7,6 +7,48 @@ import XCTest
 
 @MainActor
 final class AppKitEditorTests: XCTestCase {
+    func testStatusLabelsRemainIndependentAccessibilityElementsInHostingHierarchy() throws {
+        let identifiers = [
+            AppAccessibilityIdentifier.debuggerState,
+            AppAccessibilityIdentifier.sourceLocationStatus,
+            AppAccessibilityIdentifier.currentLineStatus,
+            AppAccessibilityIdentifier.operationError
+        ]
+        let hosting = NSHostingView(rootView: AccessibleStatusStrip(
+            stateText: "就绪",
+            currentLineText: "→ 当前执行第 2 行",
+            sourceLocationText: "已定位到第 2 行",
+            operationErrorText: "⚠︎ 测试错误"
+        ))
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 800, height: 80),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.contentView = hosting
+        window.makeKeyAndOrderFront(nil)
+        defer {
+            window.orderOut(nil)
+            window.contentView = nil
+        }
+        hosting.layoutSubtreeIfNeeded()
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
+
+        let statusStack = try XCTUnwrap(findStatusStack(in: hosting))
+        XCTAssertEqual(statusStack.accessibilityRole(), .group)
+        let accessibilityChildren = try XCTUnwrap(statusStack.accessibilityChildren())
+        let actual = Set(accessibilityChildren.compactMap { child -> String? in
+            if let view = child as? NSView {
+                return view.accessibilityIdentifier()
+            }
+            return (child as? NSAccessibilityElement)?.accessibilityIdentifier()
+        })
+
+        XCTAssertTrue(Set(identifiers).isSubset(of: actual), "AX identifiers: \(actual.sorted())")
+    }
+
     func testApplyingHighlightPreservesStringSelectionAndUndoHistory() throws {
         let textView = NSTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 200))
         let window = NSWindow(contentRect: textView.frame, styleMask: [.titled], backing: .buffered, defer: false)
@@ -313,6 +355,19 @@ private func findTextView(in view: NSView) -> NSTextView? {
     if let textView = view as? NSTextView { return textView }
     for child in view.subviews {
         if let found = findTextView(in: child) { return found }
+    }
+    return nil
+}
+
+@MainActor
+private func findStatusStack(in view: NSView) -> StatusStackView? {
+    if let statusStack = view as? StatusStackView {
+        return statusStack
+    }
+    for child in view.subviews {
+        if let statusStack = findStatusStack(in: child) {
+            return statusStack
+        }
     }
     return nil
 }

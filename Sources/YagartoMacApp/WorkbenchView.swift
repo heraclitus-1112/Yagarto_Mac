@@ -29,42 +29,20 @@ struct WorkbenchView: View {
     }
 
     private var statusStrip: some View {
-        HStack(spacing: 14) {
-            Text(stateLabel)
-                .font(.caption.weight(.semibold))
-                .accessibilityElement(children: .ignore)
-                .accessibilityLabel(stateLabel)
-                .accessibilityIdentifier("debugger-state")
-            if let current = model.currentExecutionLine {
-                Label("当前执行第 \(current) 行", systemImage: "arrow.right")
-                    .font(.caption)
-                    .accessibilityElement(children: .ignore)
-                    .accessibilityLabel("当前执行第 \(current) 行")
-                    .accessibilityIdentifier("current-line-status")
-            }
-            if let range = model.selectedRange, let document = model.document {
-                let line = SourceLineMap(document.text).lineNumber(atUTF16Offset: range.location)
-                Text("已定位到第 \(line) 行")
-                    .font(.caption)
-                    .accessibilityElement(children: .ignore)
-                    .accessibilityLabel("已定位到第 \(line) 行")
-                    .accessibilityIdentifier("source-location-status")
-            }
-            Spacer()
-            if let error = model.errorMessage {
-                Label(error, systemImage: "exclamationmark.triangle")
-                    .font(.caption)
-                    .lineLimit(2)
-                    .foregroundStyle(.red)
-                    .accessibilityElement(children: .ignore)
-                    .accessibilityLabel(error)
-                    .accessibilityIdentifier("operation-error")
-            }
-        }
-        .padding(.horizontal, 12)
+        AccessibleStatusStrip(
+            stateText: stateLabel,
+            currentLineText: model.currentExecutionLine.map { "→ 当前执行第 \($0) 行" },
+            sourceLocationText: sourceLocationText,
+            operationErrorText: model.errorMessage.map { "⚠︎ \($0)" }
+        )
         .frame(minHeight: 30)
         .background(.bar)
-        .accessibilityElement(children: .contain)
+    }
+
+    private var sourceLocationText: String? {
+        guard let range = model.selectedRange, let document = model.document else { return nil }
+        let line = SourceLineMap(document.text).lineNumber(atUTF16Offset: range.location)
+        return "已定位到第 \(line) 行"
     }
 
     private var emptyState: some View {
