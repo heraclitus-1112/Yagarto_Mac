@@ -109,42 +109,97 @@ enum ProjectPathGuard {
         }
     }
 
-    static func createExclusiveArtifact(
-        _ artifact: URL,
+    static func createPrivateStagingDirectory(
+        projectDirectory: URL,
+        outputDirectory: URL
+    ) throws -> URL {
+        let parent = outputDirectory.standardizedFileURL.deletingLastPathComponent()
+        try createOutputDirectory(
+            projectDirectory: projectDirectory,
+            outputDirectory: parent
+        )
+        try validateOutputHierarchy(
+            projectDirectory: projectDirectory,
+            outputDirectory: outputDirectory
+        )
+
+        for _ in 0..<8 {
+            let candidate = parent.appendingPathComponent(
+                ".\(outputDirectory.lastPathComponent)-staging-\(UUID().uuidString.lowercased())",
+                isDirectory: true
+            )
+            let result = candidate.withUnsafeFileSystemRepresentation { path in
+                guard let path else { return Int32(-1) }
+                return Darwin.mkdir(path, S_IRWXU)
+            }
+            if result == 0 {
+                guard let created = try metadata(at: candidate),
+                      (created.st_mode & S_IFMT) == S_IFDIR,
+                      (created.st_mode & 0o777) == S_IRWXU else {
+                    try? FileManager.default.removeItem(at: candidate)
+                    throw YagartoError.unsafeBuildArtifact(candidate.path)
+                }
+                return candidate
+            }
+            if errno != EEXIST {
+                throw YagartoError.cannotWriteOutput(
+                    candidate.path,
+                    String(cString: strerror(errno))
+                )
+            }
+        }
+        throw YagartoError.cannotWriteOutput(
+            parent.path,
+            "无法分配唯一的构建 staging 目录。"
+        )
+    }
+
+    static func validateProducedArtifacts(
+        _ artifacts: [URL],
         outputDirectory: URL
     ) throws {
-        try validateArtifactPaths([artifact], outputDirectory: outputDirectory)
-        let candidate = artifact.standardizedFileURL
-        let descriptor = candidate.withUnsafeFileSystemRepresentation { path in
-            guard let path else { return Int32(-1) }
-            return Darwin.open(
-                path,
-                O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC,
-                S_IRUSR | S_IWUSR
-            )
-        }
-        guard descriptor >= 0 else {
-            let errorCode = errno
-            if errorCode == EEXIST || errorCode == ELOOP {
-                if let existing = try metadata(at: candidate), isSymbolicLink(existing) {
-                    throw YagartoError.outputSymlink(candidate.path)
-                }
-                throw YagartoError.outputArtifactExists(candidate.path)
+        let output = outputDirectory.standardizedFileURL
+        for artifact in artifacts {
+            let candidate = artifact.standardizedFileURL
+            guard contains(candidate, within: output) else {
+                throw YagartoError.pathTraversal(candidate.path)
             }
-            throw YagartoError.cannotWriteOutput(
-                candidate.path,
-                String(cString: strerror(errorCode))
-            )
+            guard let value = try metadata(at: candidate) else {
+                throw YagartoError.buildArtifactMissing(candidate.path)
+            }
+            guard (value.st_mode & S_IFMT) == S_IFREG, value.st_nlink == 1 else {
+                throw YagartoError.unsafeBuildArtifact(candidate.path)
+            }
         }
-        defer { Darwin.close(descriptor) }
+    }
 
-        guard let created = try metadata(at: candidate),
-              (created.st_mode & S_IFMT) == S_IFREG,
-              created.st_nlink == 1 else {
-            _ = candidate.withUnsafeFileSystemRepresentation { path in
-                path.map(Darwin.unlink) ?? Int32(-1)
+    static func publishStagingDirectory(
+        _ stagingDirectory: URL,
+        to outputDirectory: URL,
+        projectDirectory: URL
+    ) throws {
+        let staging = stagingDirectory.standardizedFileURL
+        let output = outputDirectory.standardizedFileURL
+        try validateOutputHierarchy(
+            projectDirectory: projectDirectory,
+            outputDirectory: output
+        )
+
+        let outputExists = try metadata(at: output) != nil
+        let result = staging.withUnsafeFileSystemRepresentation { stagingPath in
+            output.withUnsafeFileSystemRepresentation { outputPath in
+                guard let stagingPath, let outputPath else { return Int32(-1) }
+                if outputExists {
+                    return Darwin.renamex_np(stagingPath, outputPath, UInt32(RENAME_SWAP))
+                }
+                return Darwin.rename(stagingPath, outputPath)
             }
-            throw YagartoError.outputArtifactExists(candidate.path)
+        }
+        guard result == 0 else {
+            throw YagartoError.cannotWriteOutput(
+                output.path,
+                String(cString: strerror(errno))
+            )
         }
     }
 

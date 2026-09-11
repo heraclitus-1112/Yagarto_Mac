@@ -8,6 +8,9 @@ import YagartoCore
 @main
 enum YagartoMacMain {
     static func main() {
+        if CLIOutput.rejectDuplicateFormatIfPresent() {
+            Darwin.exit(YagartoExitCode.usage.rawValue)
+        }
         do {
             var command = try YagartoCLI.parseAsRoot()
             try command.run()

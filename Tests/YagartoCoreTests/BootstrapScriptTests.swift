@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import Foundation
+import Darwin
 import XCTest
 @testable import YagartoCore
 
@@ -84,6 +85,12 @@ final class BootstrapScriptTests: XCTestCase {
         XCTAssertFalse(script.contains("--disable-sim"))
         XCTAssertTrue(script.contains("-ex \"target sim\""))
         XCTAssertTrue(script.contains("arm-none-eabi-gdb-sim"))
+        XCTAssertTrue(script.contains("trap cleanup EXIT"))
+        XCTAssertFalse(script.contains("trap cleanup EXIT HUP INT TERM"))
+        XCTAssertTrue(script.contains("run_supervised configure_gdb"))
+        XCTAssertTrue(script.contains("run_supervised gmake -C \"$BUILD_DIRECTORY\" -j"))
+        XCTAssertTrue(script.contains("run_supervised gmake -C \"$BUILD_DIRECTORY\" install"))
+        XCTAssertTrue(script.contains("run_supervised_with_timeout \"$verify_timeout\" run_gdb_selftest"))
     }
 
     func testVerifyInstalledGDBRunsCompleteARM7SimulatorContractWithoutBuilding() throws {
@@ -202,6 +209,55 @@ final class BootstrapScriptTests: XCTestCase {
         XCTAssertTrue(result.stderr.contains("r0"))
     }
 
+    func testVerifyGDBForwardsAndEscalatesSignalsWithoutLeavingDescendants() throws {
+        let cases: [(signal: Int32, expectedStatus: Int32, name: String)] = [
+            (SIGHUP, 128 + SIGHUP, "SIGHUP"),
+            (SIGINT, 128 + SIGINT, "SIGINT"),
+            (SIGTERM, 128 + SIGTERM, "SIGTERM")
+        ]
+
+        for testCase in cases {
+            let fixture = try BootstrapSignalFixture(name: testCase.name)
+            defer { fixture.cleanup() }
+            let result = try runBootstrapAndSendSignal(
+                ["--verify-gdb", fixture.gdb.path],
+                environment: fixture.environment,
+                signal: testCase.signal,
+                pidFile: fixture.pidFile
+            )
+
+            XCTAssertFalse(result.watchdogFired, testCase.name)
+            XCTAssertEqual(result.process.exitStatus, testCase.expectedStatus, testCase.name)
+            XCTAssertLessThan(result.elapsed, 3, testCase.name)
+            XCTAssertFalse(result.process.stderr.contains("sed:"), result.process.stderr)
+            XCTAssertTrue(
+                result.descendantPIDs.allSatisfy(bootstrapProcessHasExited),
+                "\(testCase.name) 留下后代：\(result.descendantPIDs)"
+            )
+        }
+    }
+
+    func testVerifyGDBHasExplicitTimeoutAndReapsItsProcessGroup() throws {
+        let fixture = try BootstrapSignalFixture(name: "timeout")
+        defer { fixture.cleanup() }
+        var environment = fixture.environment
+        environment["YAGARTO_GDB_VERIFY_TIMEOUT_SECONDS"] = "1"
+
+        let result = try runBootstrapUntilExit(
+            ["--verify-gdb", fixture.gdb.path],
+            environment: environment,
+            pidFile: fixture.pidFile,
+            watchdogSeconds: 4
+        )
+
+        XCTAssertFalse(result.watchdogFired)
+        XCTAssertNotEqual(result.process.exitStatus, 0)
+        XCTAssertLessThan(result.elapsed, 3)
+        XCTAssertTrue(result.process.stderr.contains("超时"), result.process.stderr)
+        XCTAssertFalse(result.process.stderr.contains("sed:"), result.process.stderr)
+        XCTAssertTrue(result.descendantPIDs.allSatisfy(bootstrapProcessHasExited))
+    }
+
     private func runBootstrap(
         _ arguments: [String],
         environment: [String: String] = [:]
@@ -225,6 +281,192 @@ final class BootstrapScriptTests: XCTestCase {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
     }
+}
+
+private struct BootstrapSignalFixture {
+    let directory: URL
+    let tools: URL
+    let gdb: URL
+    let pidFile: URL
+
+    init(name: String) throws {
+        directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("bootstrap-signal-\(name)-\(UUID().uuidString)", isDirectory: true)
+        tools = directory.appendingPathComponent("tools", isDirectory: true)
+        gdb = tools.appendingPathComponent("arm-none-eabi-gdb")
+        pidFile = directory.appendingPathComponent("descendants.txt")
+        try FileManager.default.createDirectory(at: tools, withIntermediateDirectories: true)
+        let producer = """
+        #!/bin/sh
+        while [ "$#" -gt 0 ]; do
+            if [ "$1" = "-o" ]; then
+                : > "$2"
+                exit 0
+            fi
+            shift
+        done
+        exit 1
+        """
+        try writeBootstrapExecutable(
+            producer,
+            to: tools.appendingPathComponent("arm-none-eabi-as")
+        )
+        try writeBootstrapExecutable(
+            producer,
+            to: tools.appendingPathComponent("arm-none-eabi-ld")
+        )
+        try writeBootstrapExecutable(
+            """
+            #!/bin/sh
+            trap '' HUP INT TERM
+            /bin/sleep 30 &
+            grandchild=$!
+            printf '%s %s\n' "$$" "$grandchild" > "$YAGARTO_BOOTSTRAP_PID_FILE"
+            wait "$grandchild"
+            """,
+            to: gdb
+        )
+    }
+
+    var environment: [String: String] {
+        [
+            "PATH": "\(tools.path):/usr/bin:/bin",
+            "YAGARTO_BOOTSTRAP_PID_FILE": pidFile.path
+        ]
+    }
+
+    func cleanup() {
+        try? FileManager.default.removeItem(at: directory)
+    }
+}
+
+private struct BootstrapSupervisionResult {
+    let process: ProcessResult
+    let elapsed: TimeInterval
+    let watchdogFired: Bool
+    let descendantPIDs: [pid_t]
+}
+
+private func runBootstrapAndSendSignal(
+    _ arguments: [String],
+    environment: [String: String],
+    signal: Int32,
+    pidFile: URL
+) throws -> BootstrapSupervisionResult {
+    try runBootstrapProcess(
+        arguments,
+        environment: environment,
+        pidFile: pidFile,
+        watchdogSeconds: 4,
+        signal: signal
+    )
+}
+
+private func runBootstrapUntilExit(
+    _ arguments: [String],
+    environment: [String: String],
+    pidFile: URL,
+    watchdogSeconds: TimeInterval
+) throws -> BootstrapSupervisionResult {
+    try runBootstrapProcess(
+        arguments,
+        environment: environment,
+        pidFile: pidFile,
+        watchdogSeconds: watchdogSeconds,
+        signal: nil
+    )
+}
+
+private func runBootstrapProcess(
+    _ arguments: [String],
+    environment: [String: String],
+    pidFile: URL,
+    watchdogSeconds: TimeInterval,
+    signal: Int32?
+) throws -> BootstrapSupervisionResult {
+    let repositoryRoot = URL(fileURLWithPath: #filePath)
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+        .deletingLastPathComponent()
+    let capture = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(at: capture, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: capture) }
+    let stdoutURL = capture.appendingPathComponent("stdout")
+    let stderrURL = capture.appendingPathComponent("stderr")
+    FileManager.default.createFile(atPath: stdoutURL.path, contents: nil)
+    FileManager.default.createFile(atPath: stderrURL.path, contents: nil)
+    let stdout = try FileHandle(forWritingTo: stdoutURL)
+    let stderr = try FileHandle(forWritingTo: stderrURL)
+    defer {
+        try? stdout.close()
+        try? stderr.close()
+    }
+
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/bin/sh")
+    process.arguments = [repositoryRoot.appendingPathComponent("scripts/bootstrap-gdb-sim.sh").path]
+        + arguments
+    process.currentDirectoryURL = repositoryRoot
+    process.environment = ProcessInfo.processInfo.environment.merging(
+        environment,
+        uniquingKeysWith: { _, override in override }
+    )
+    process.standardOutput = stdout
+    process.standardError = stderr
+
+    let start = Date()
+    try process.run()
+    let markerDeadline = Date().addingTimeInterval(2)
+    while !FileManager.default.fileExists(atPath: pidFile.path),
+          process.isRunning,
+          Date() < markerDeadline {
+        usleep(10_000)
+    }
+    if let signal, process.isRunning {
+        _ = Darwin.kill(process.processIdentifier, signal)
+    }
+
+    let deadline = Date().addingTimeInterval(watchdogSeconds)
+    while process.isRunning, Date() < deadline {
+        usleep(10_000)
+    }
+    let watchdogFired = process.isRunning
+    if watchdogFired {
+        _ = Darwin.kill(process.processIdentifier, SIGKILL)
+    }
+    process.waitUntilExit()
+
+    let descendants = ((try? String(contentsOf: pidFile, encoding: .utf8)) ?? "")
+        .split(whereSeparator: \ .isWhitespace)
+        .compactMap { pid_t($0) }
+    if watchdogFired {
+        for pid in descendants.reversed() {
+            _ = Darwin.kill(pid, SIGKILL)
+        }
+    }
+    for _ in 0..<100 where !descendants.allSatisfy(bootstrapProcessHasExited) {
+        usleep(10_000)
+    }
+
+    try stdout.close()
+    try stderr.close()
+    return BootstrapSupervisionResult(
+        process: ProcessResult(
+            exitStatus: process.terminationStatus,
+            stdout: String(decoding: try Data(contentsOf: stdoutURL), as: UTF8.self),
+            stderr: String(decoding: try Data(contentsOf: stderrURL), as: UTF8.self)
+        ),
+        elapsed: Date().timeIntervalSince(start),
+        watchdogFired: watchdogFired,
+        descendantPIDs: descendants
+    )
+}
+
+private func bootstrapProcessHasExited(_ pid: pid_t) -> Bool {
+    guard pid > 0 else { return true }
+    errno = 0
+    return Darwin.kill(pid, 0) == -1 && errno == ESRCH
 }
 
 private func writeBootstrapExecutable(_ contents: String, to url: URL) throws {

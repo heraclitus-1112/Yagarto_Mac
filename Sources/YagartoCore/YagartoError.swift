@@ -17,6 +17,8 @@ public enum YagartoError: Error, Equatable, Sendable {
     case duplicateSource(String)
     case invalidOutputName(String)
     case duplicateObjectName(String)
+    case buildArtifactMissing(String)
+    case unsafeBuildArtifact(String)
     case invalidEntry(String)
     case toolNotFound(String)
     case debugBackendUnavailable(ProfileID)
@@ -73,6 +75,10 @@ extension YagartoError: LocalizedError {
             return "configuration.invalid_output_name"
         case .duplicateObjectName:
             return "build.duplicate_object"
+        case .buildArtifactMissing:
+            return "build.artifact_missing"
+        case .unsafeBuildArtifact:
+            return "build.artifact_unsafe"
         case .invalidEntry:
             return "configuration.invalid_entry"
         case .toolNotFound:
@@ -138,6 +144,10 @@ extension YagartoError: LocalizedError {
             return "输出名“\(outputName)”必须是单个相对文件名，不能包含目录或路径穿越。"
         case .duplicateObjectName(let objectName):
             return "多个源文件会生成同名目标文件“\(objectName)”；请重命名其中一个源文件。"
+        case .buildArtifactMissing(let path):
+            return "构建工具成功退出，但未生成预期产物“\(path)”。"
+        case .unsafeBuildArtifact(let path):
+            return "构建产物“\(path)”不是安全的单链接普通文件。"
         case .invalidEntry(let entry):
             return "入口符号“\(entry)”无效；请使用汇编符号名，不能包含命令或控制字符。"
         case .toolNotFound(let tool):
@@ -186,6 +196,8 @@ extension YagartoError: LocalizedError {
             return "路径：\(path)；\(detail)"
         case .processIOFailed(let path, let detail):
             return "路径：\(path)；\(detail)"
+        case .buildArtifactMissing(let path), .unsafeBuildArtifact(let path):
+            return "路径：\(path)"
         case .processLaunchFailed(_, let detail):
             return detail
         case .terminatedBySignal(let signal):
@@ -230,7 +242,8 @@ extension YagartoError: LocalizedError {
             return .unsupported
         case .interrupted:
             return .interrupted
-        case .processIOFailed, .processLaunchFailed, .buildStepFailed, .cannotWriteOutput:
+        case .buildArtifactMissing, .unsafeBuildArtifact,
+             .processIOFailed, .processLaunchFailed, .buildStepFailed, .cannotWriteOutput:
             return .buildFailure
         case .internalFailure:
             return .unsupported

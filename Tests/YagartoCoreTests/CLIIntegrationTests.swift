@@ -46,6 +46,49 @@ final class CLIIntegrationTests: XCTestCase {
         XCTAssertTrue(result.stderr.contains("not-a-command"))
     }
 
+    func testDuplicateFormatIsRejectedConsistentlyBeforeCommandExecution() throws {
+        let directory = try CLITemporaryDirectory()
+        let commands = [
+            ["doctor"],
+            ["build"],
+            ["run", "firmware.elf", "--profile", "cortex-m4"],
+            ["debug", "firmware.elf", "--profile", "cortex-m4"],
+            ["flash", "firmware.elf", "--profile", "stm32f4-discovery", "--yes"]
+        ]
+        let duplicateSpellings = [
+            ["--format", "json", "--format=text"],
+            ["--format=text", "--format", "json"]
+        ]
+
+        for command in commands {
+            for formats in duplicateSpellings {
+                let result = try runCLI(command + formats, in: directory.url)
+
+                XCTAssertEqual(result.status, YagartoExitCode.usage.rawValue)
+                XCTAssertEqual(result.stdout, "")
+                let payload = try decodeErrorEnvelope(result.stderr)
+                XCTAssertEqual(payload.exitCode, YagartoExitCode.usage.rawValue)
+                XCTAssertEqual(payload.error.code, "usage.duplicate_option")
+                XCTAssertTrue(payload.error.message.contains("--format"))
+            }
+        }
+    }
+
+    func testDuplicateTextFormatUsesOnlyTextUsageDiagnostic() throws {
+        let directory = try CLITemporaryDirectory()
+
+        let result = try runCLI(
+            ["debug", "firmware.elf", "--format=text", "--format", "text"],
+            in: directory.url
+        )
+
+        XCTAssertEqual(result.status, YagartoExitCode.usage.rawValue)
+        XCTAssertEqual(result.stdout, "")
+        XCTAssertTrue(result.stderr.contains("usage.duplicate_option"))
+        XCTAssertTrue(result.stderr.contains("--format"))
+        XCTAssertThrowsError(try decodeErrorEnvelope(result.stderr))
+    }
+
     func testInvalidProfileWithJSONFormatEmitsStableStructuredChineseError() throws {
         let directory = try CLITemporaryDirectory()
         let arguments = ["init", "--profile", "invalid", "--format", "json"]
@@ -638,6 +681,34 @@ final class CLIIntegrationTests: XCTestCase {
         XCTAssertTrue(result.stderr.contains("Ctrl-C"))
     }
 
+    func testRunDoesNotMisreportNormalGDBExit130AsCtrlC() throws {
+        let directory = try CLITemporaryDirectory()
+        let tools = directory.url.appendingPathComponent("exit-130-tools", isDirectory: true)
+        try writeExecutable(
+            "#!/bin/sh\nexit 130\n",
+            to: tools.appendingPathComponent("arm-none-eabi-gdb")
+        )
+        try writeExecutable(
+            "#!/bin/sh\nexit 0\n",
+            to: tools.appendingPathComponent("qemu-system-arm")
+        )
+
+        let result = try runCLI(
+            [
+                "run", "firmware.elf",
+                "--profile", "cortex-m4",
+                "--format", "text"
+            ],
+            in: directory.url,
+            environment: ["PATH": "\(tools.path):/usr/bin:/bin"]
+        )
+
+        XCTAssertEqual(result.status, YagartoExitCode.buildFailure.rawValue)
+        XCTAssertTrue(result.stderr.contains("build.step_failed"), result.stderr)
+        XCTAssertFalse(result.stderr.contains("process.interrupted"), result.stderr)
+        XCTAssertFalse(result.stderr.contains("Ctrl-C"), result.stderr)
+    }
+
     func testRunEscalatesParentSignalsAndReapsIgnoringProcessGroupWithinBound() throws {
         let cases: [(
             signal: Int32,
@@ -1030,11 +1101,29 @@ final class CLIIntegrationTests: XCTestCase {
             outputName: "firmware"
         ))
         let tools = directory.url.appendingPathComponent("build-tools", isDirectory: true)
+        let producingTool = """
+        #!/bin/sh
+        name=${0##*/}
+        previous=
+        last=
+        for argument in "$@"; do
+            case "$previous" in
+                -o|-Map) : > "$argument" ;;
+            esac
+            previous=$argument
+            last=$argument
+        done
+        case "$name" in
+            *objcopy) : > "$last" ;;
+            *objdump) printf 'listing\n' ;;
+        esac
+        exit 0
+        """
         for tool in [
             "arm-none-eabi-as", "arm-none-eabi-gcc", "arm-none-eabi-ld",
             "arm-none-eabi-objcopy", "arm-none-eabi-objdump"
         ] {
-            try writeExecutable("#!/bin/sh\nexit 0\n", to: tools.appendingPathComponent(tool))
+            try writeExecutable(producingTool, to: tools.appendingPathComponent(tool))
         }
 
         let result = try runCLI(
@@ -1051,7 +1140,7 @@ final class CLIIntegrationTests: XCTestCase {
         XCTAssertTrue(artifacts.contains(where: { $0.hasSuffix("/cortex-m4-startup.o") }))
     }
 
-    func testRealBuildRejectsPreexistingMapSymlinkWithoutChangingVictim() throws {
+    func testRealBuildAtomicallyReplacesPreexistingMapSymlinkWithoutChangingVictim() throws {
         try requireARMBuildTools()
         let directory = try CLITemporaryDirectory()
         let outside = try CLITemporaryDirectory()
@@ -1082,16 +1171,19 @@ final class CLIIntegrationTests: XCTestCase {
 
         let result = try runCLI(["build", "--format", "json"], in: directory.url)
 
-        XCTAssertEqual(result.status, YagartoExitCode.configuration.rawValue)
-        let payload = try decodeErrorEnvelope(result.stderr)
-        XCTAssertEqual(payload.error.code, "configuration.output_symlink")
-        XCTAssertNil(payload.error.details)
+        XCTAssertEqual(result.status, 0, result.stderr)
+        XCTAssertNoThrow(try JSONSerialization.jsonObject(with: Data(result.stdout.utf8)))
         XCTAssertEqual(try String(contentsOf: victim, encoding: .utf8), "不可修改")
+        let mapAttributes = try FileManager.default.attributesOfItem(
+            atPath: outputDirectory.appendingPathComponent("firmware.map").path
+        )
+        XCTAssertEqual(mapAttributes[.type] as? FileAttributeType, .typeRegular)
+        XCTAssertEqual((mapAttributes[.referenceCount] as? NSNumber)?.intValue, 1)
         let objectFiles = try FileManager.default.contentsOfDirectory(
             at: outputDirectory,
             includingPropertiesForKeys: nil
         ).filter { $0.pathExtension == "o" }
-        XCTAssertTrue(objectFiles.isEmpty)
+        XCTAssertEqual(objectFiles.count, 1)
     }
 }
 

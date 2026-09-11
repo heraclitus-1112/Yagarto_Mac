@@ -6,20 +6,15 @@ public struct DebugPlanner {
     private let toolPaths: [ToolIdentifier: String]
     private let gdbSimulatorPath: String?
     private let openOCDBoardConfig: URL?
-    private let openOCDLogName: () -> String
 
     public init(
         toolPaths: [ToolIdentifier: String],
         gdbSimulatorPath: String? = nil,
-        openOCDBoardConfig: URL? = nil,
-        openOCDLogName: @escaping () -> String = {
-            "openocd-\(UUID().uuidString.lowercased()).log"
-        }
+        openOCDBoardConfig: URL? = nil
     ) {
         self.toolPaths = toolPaths
         self.gdbSimulatorPath = gdbSimulatorPath
         self.openOCDBoardConfig = openOCDBoardConfig
-        self.openOCDLogName = openOCDLogName
     }
 
     public func plan(
@@ -108,21 +103,7 @@ public struct DebugPlanner {
             guard let boardConfig = openOCDBoardConfig else {
                 throw YagartoError.toolNotFound("scripts/board/stm32f4discovery.cfg")
             }
-            let logsDirectory = project
-                .appendingPathComponent(".yagarto", isDirectory: true)
-                .appendingPathComponent("logs", isDirectory: true)
-            let logFile = logsDirectory
-                .appendingPathComponent(openOCDLogName(), isDirectory: false)
-                .standardizedFileURL
-            try ProjectPathGuard.validateOutputHierarchy(
-                projectDirectory: project,
-                outputDirectory: logsDirectory
-            )
-            try ProjectPathGuard.validateArtifactPaths(
-                [logFile],
-                outputDirectory: logsDirectory
-            )
-            let openOCDCommand = "gdb_port pipe; log_output \(try tclQuote(logFile.path, error: .unsafePipeValue(logFile.path)))"
+            let openOCDCommand = "gdb_port pipe; log_output /dev/stderr"
             let pipe = try pipeCommand(
                 executable: openOCD,
                 arguments: ["-f", boardConfig.path, "-c", openOCDCommand]
@@ -143,33 +124,9 @@ public struct DebugPlanner {
                 commands: commands,
                 warnings: [],
                 elf: elf,
-                project: project,
-                logFile: logFile
+                project: project
             )
         }
-    }
-
-    public static func prepareForLaunch(_ plan: DebugLaunchPlan) throws {
-        guard plan.backend == .openOCDSTM32F4Discovery else { return }
-        let project = URL(fileURLWithPath: plan.projectDirectory, isDirectory: true)
-        let logs = project
-            .appendingPathComponent(".yagarto", isDirectory: true)
-            .appendingPathComponent("logs", isDirectory: true)
-        guard let logFile = plan.logFile else {
-            throw YagartoError.internalFailure("OpenOCD 启动计划缺少日志路径。")
-        }
-        try ProjectPathGuard.createOutputDirectory(
-            projectDirectory: project,
-            outputDirectory: logs
-        )
-        try ProjectPathGuard.validateArtifactPaths(
-            [URL(fileURLWithPath: logFile)],
-            outputDirectory: logs
-        )
-        try ProjectPathGuard.createExclusiveArtifact(
-            URL(fileURLWithPath: logFile),
-            outputDirectory: logs
-        )
     }
 
     private func makePlan(
@@ -179,8 +136,7 @@ public struct DebugPlanner {
         commands: [String],
         warnings: [String],
         elf: URL,
-        project: URL,
-        logFile: URL? = nil
+        project: URL
     ) throws -> DebugLaunchPlan {
         try rejectControlCharacters(gdb, error: .unsafePipeValue(gdb))
         return DebugLaunchPlan(
@@ -191,8 +147,7 @@ public struct DebugPlanner {
             initCommands: commands,
             warnings: warnings,
             elf: elf.path,
-            projectDirectory: project.path,
-            logFile: logFile?.path
+            projectDirectory: project.path
         )
     }
 

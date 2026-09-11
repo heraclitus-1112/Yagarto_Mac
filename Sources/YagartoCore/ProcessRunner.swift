@@ -79,7 +79,7 @@ public struct ProcessRunner: ProcessRunning {
     }
 
     public func runInteractive(_ command: CommandSpec) throws -> Int32 {
-        let termination = try interactiveExecution(command)
+        let termination = try runInteractiveTermination(command)
         if termination.reason == .uncaughtSignal && termination.status == SIGINT {
             return YagartoExitCode.interrupted.rawValue
         }
@@ -87,6 +87,12 @@ public struct ProcessRunner: ProcessRunning {
             return 128 + termination.status
         }
         return termination.status
+    }
+
+    public func runInteractiveTermination(
+        _ command: CommandSpec
+    ) throws -> ProcessTermination {
+        try interactiveExecution(command)
     }
 
     public func run(_ command: CommandSpec) throws -> ProcessResult {
@@ -204,7 +210,7 @@ public struct ProcessRunner: ProcessRunning {
 
         var defaultSignals = sigset_t()
         sigemptyset(&defaultSignals)
-        for signalNumber in handledSignals + [SIGTTOU, SIGTTIN] {
+        for signalNumber in handledSignals + [SIGTTOU, SIGTTIN, SIGTSTP] {
             sigaddset(&defaultSignals, signalNumber)
         }
         var emptySignalMask = sigset_t()
@@ -258,38 +264,36 @@ public struct ProcessRunner: ProcessRunning {
             )
         }
 
-        let terminalFileDescriptor = STDIN_FILENO
-        let originalForegroundGroup = isatty(terminalFileDescriptor) == 1
-            ? tcgetpgrp(terminalFileDescriptor)
-            : pid_t(-1)
-        var previousTTOUHandler: sig_t?
-        if originalForegroundGroup >= 0 {
-            previousTTOUHandler = Darwin.signal(SIGTTOU, SIG_IGN)
-            if tcsetpgrp(terminalFileDescriptor, childPID) != 0 {
-                let errorCode = errno
-                _ = Darwin.kill(-childPID, SIGKILL)
-                _ = Darwin.kill(childPID, SIGCONT)
-                var ignoredStatus = Int32(0)
-                _ = waitpid(childPID, &ignoredStatus, 0)
-                throw YagartoError.processLaunchFailed(
-                    command.executable,
-                    String(cString: strerror(errorCode))
-                )
-            }
+        let terminalController: InteractiveTerminalController
+        do {
+            terminalController = try InteractiveTerminalController(
+                childProcessGroup: childPID,
+                executable: command.executable
+            )
+        } catch {
+            _ = Darwin.kill(-childPID, SIGKILL)
+            _ = Darwin.kill(childPID, SIGCONT)
+            var ignoredStatus = Int32(0)
+            _ = waitpid(childPID, &ignoredStatus, 0)
+            throw error
         }
-        defer {
-            if originalForegroundGroup >= 0 {
-                _ = tcsetpgrp(terminalFileDescriptor, originalForegroundGroup)
-                _ = Darwin.signal(SIGTTOU, previousTTOUHandler)
-            }
-        }
+        defer { terminalController.restoreForExit() }
 
         _ = Darwin.kill(childPID, SIGCONT)
-        return try superviseInteractiveProcess(
-            childPID: childPID,
-            signalMonitor: signalMonitor,
-            executable: command.executable
-        )
+        do {
+            return try superviseInteractiveProcess(
+                childPID: childPID,
+                signalMonitor: signalMonitor,
+                terminalController: terminalController,
+                executable: command.executable
+            )
+        } catch {
+            _ = Darwin.kill(-childPID, SIGKILL)
+            _ = Darwin.kill(childPID, SIGCONT)
+            var ignoredStatus = Int32(0)
+            _ = waitpid(childPID, &ignoredStatus, 0)
+            throw error
+        }
     }
 }
 
@@ -396,9 +400,88 @@ private final class InteractiveSignalMonitor {
     }
 }
 
+private final class InteractiveTerminalController {
+    private let descriptor = STDIN_FILENO
+    private let parentProcessGroup: pid_t
+    private let childProcessGroup: pid_t
+    private let executable: String
+    private let hasControllingTerminal: Bool
+    private var handedTerminalToChild = false
+
+    init(childProcessGroup: pid_t, executable: String) throws {
+        self.parentProcessGroup = getpgrp()
+        self.childProcessGroup = childProcessGroup
+        self.executable = executable
+        if isatty(descriptor) == 1, tcgetpgrp(descriptor) >= 0 {
+            hasControllingTerminal = true
+        } else {
+            hasControllingTerminal = false
+        }
+
+        if hasControllingTerminal, tcgetpgrp(descriptor) == parentProcessGroup {
+            try handTerminalToChild()
+        }
+    }
+
+    func childDidStop(signal stopSignal: Int32) throws {
+        guard hasControllingTerminal else { return }
+        reclaimTerminalIfOwnedByChild()
+
+        let previousHandler: sig_t?
+        if stopSignal == SIGSTOP {
+            previousHandler = nil
+        } else {
+            previousHandler = Darwin.signal(stopSignal, SIG_DFL)
+        }
+        _ = Darwin.kill(0, stopSignal)
+        if stopSignal != SIGSTOP {
+            _ = Darwin.signal(stopSignal, previousHandler)
+        }
+
+        // `fg` makes our group foreground before SIGCONT, while `bg` does not.
+        // Only the former receives the TTY; both resume the stopped child group.
+        if tcgetpgrp(descriptor) == parentProcessGroup {
+            try handTerminalToChild()
+        }
+        _ = Darwin.kill(-childProcessGroup, SIGCONT)
+    }
+
+    func restoreForExit() {
+        guard hasControllingTerminal else { return }
+        reclaimTerminalIfOwnedByChild()
+    }
+
+    private func handTerminalToChild() throws {
+        guard tcgetpgrp(descriptor) == parentProcessGroup else { return }
+        try setForegroundProcessGroup(childProcessGroup)
+        handedTerminalToChild = true
+    }
+
+    private func reclaimTerminalIfOwnedByChild() {
+        guard handedTerminalToChild,
+              tcgetpgrp(descriptor) == childProcessGroup else {
+            return
+        }
+        try? setForegroundProcessGroup(parentProcessGroup)
+        handedTerminalToChild = false
+    }
+
+    private func setForegroundProcessGroup(_ processGroup: pid_t) throws {
+        let previousHandler = Darwin.signal(SIGTTOU, SIG_IGN)
+        defer { _ = Darwin.signal(SIGTTOU, previousHandler) }
+        guard tcsetpgrp(descriptor, processGroup) == 0 else {
+            throw YagartoError.processLaunchFailed(
+                executable,
+                String(cString: strerror(errno))
+            )
+        }
+    }
+}
+
 private func superviseInteractiveProcess(
     childPID: pid_t,
     signalMonitor: InteractiveSignalMonitor,
+    terminalController: InteractiveTerminalController,
     executable: String
 ) throws -> ProcessTermination {
     enum EscalationStage {
@@ -419,8 +502,21 @@ private func superviseInteractiveProcess(
 
     while true {
         if !childReaped {
-            let waitResult = waitpid(childPID, &waitStatus, WNOHANG)
+            let waitResult = waitpid(
+                childPID,
+                &waitStatus,
+                WNOHANG | WUNTRACED | WCONTINUED
+            )
             if waitResult == childPID {
+                let statusKind = waitStatus & 0x7F
+                let stopSignal = (waitStatus >> 8) & 0xFF
+                if statusKind == 0x7F, stopSignal == SIGCONT {
+                    continue
+                }
+                if statusKind == 0x7F {
+                    try terminalController.childDidStop(signal: stopSignal)
+                    continue
+                }
                 childReaped = true
             } else if waitResult == -1, errno != EINTR {
                 let errorCode = errno

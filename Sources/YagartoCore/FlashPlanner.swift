@@ -107,20 +107,24 @@ public struct SystemProfilerSTLinkUSBEnumerator: STLinkUSBEnumerating {
         do {
             object = try JSONSerialization.jsonObject(with: Data(result.stdout.utf8))
         } catch {
-            let output = result.toolOutput.map { "\($0)\n" } ?? ""
             throw YagartoError.buildStepFailed(
                 executable,
                 1,
-                "\(output)无法解析 USB 枚举 JSON：\(error.localizedDescription)"
+                Self.enumerationFailureOutput(
+                    result: result,
+                    reason: "无法解析 USB 枚举 JSON。"
+                )
             )
         }
         guard let root = object as? [String: Any],
               let devices = root["SPUSBDataType"] as? [Any] else {
-            let output = result.toolOutput.map { "\($0)\n" } ?? ""
             throw YagartoError.buildStepFailed(
                 executable,
                 1,
-                "\(output)USB 枚举 JSON 缺少 SPUSBDataType 数组。"
+                Self.enumerationFailureOutput(
+                    result: result,
+                    reason: "USB 枚举 JSON 缺少 SPUSBDataType 数组。"
+                )
             )
         }
         return Self.containsSTLink(in: devices) ? .present : .absent
@@ -128,8 +132,20 @@ public struct SystemProfilerSTLinkUSBEnumerator: STLinkUSBEnumerating {
 
     private static let stLinkProductIDs: Set<Int> = [
         0x3744, 0x3748, 0x374B, 0x374D, 0x374E,
-        0x374F, 0x3752, 0x3753, 0x3754
+        0x374F, 0x3752, 0x3753, 0x3754, 0x3755, 0x3757
     ]
+
+    private static func enumerationFailureOutput(
+        result: ProcessResult,
+        reason: String
+    ) -> String {
+        let standardError = ProcessResult(
+            exitStatus: result.exitStatus,
+            stdout: "",
+            stderr: result.stderr
+        ).toolOutput
+        return [standardError, reason].compactMap { $0 }.joined(separator: "\n")
+    }
 
     private static func containsSTLink(in value: Any) -> Bool {
         if let dictionary = value as? [String: Any] {
@@ -153,7 +169,7 @@ public struct SystemProfilerSTLinkUSBEnumerator: STLinkUSBEnumerating {
         guard let string = value as? String else { return nil }
         if let range = string.range(
             of: #"0x[0-9a-fA-F]+"#,
-            options: .regularExpression
+            options: [.regularExpression, .caseInsensitive]
         ) {
             return Int(string[range].dropFirst(2), radix: 16)
         }

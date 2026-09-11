@@ -262,21 +262,17 @@ private func printDebugLaunchPlan(
 }
 
 private func executeDebugLaunchPlan(_ plan: DebugLaunchPlan) throws {
-    try DebugPlanner.prepareForLaunch(plan)
     for warning in plan.warnings {
         CLIOutput.write("警告：\(warning)\n", to: .standardError)
     }
-    let status = try ProcessRunner().runInteractive(plan.command)
-    if status == YagartoExitCode.interrupted.rawValue {
-        throw YagartoError.interrupted
+    let termination = try ProcessRunner().runInteractiveTermination(plan.command)
+    if termination.reason == .uncaughtSignal {
+        if termination.status == SIGINT {
+            throw YagartoError.interrupted
+        }
+        throw YagartoError.terminatedBySignal(termination.status)
     }
-    if status == YagartoExitCode.hangup.rawValue {
-        throw YagartoError.terminatedBySignal(SIGHUP)
-    }
-    if status == YagartoExitCode.terminated.rawValue {
-        throw YagartoError.terminatedBySignal(SIGTERM)
-    }
-    guard status == 0 else {
-        throw YagartoError.buildStepFailed(plan.gdbExecutable, status, "")
+    guard termination.status == 0 else {
+        throw YagartoError.buildStepFailed(plan.gdbExecutable, termination.status, "")
     }
 }

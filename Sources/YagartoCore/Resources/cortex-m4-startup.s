@@ -7,7 +7,7 @@
 .align 2
 .global __isr_vector
 __isr_vector:
-    .word 0x20400000
+    .word _estack
     .word Reset_Handler
     .rept 14
     .word 0

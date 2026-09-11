@@ -143,7 +143,7 @@ final class DebugPlannerTests: XCTestCase {
         }
     }
 
-    func testSTM32DebugUsesInstalledBoardConfigPipeAndProtectedLog() throws {
+    func testSTM32DebugUsesInstalledBoardConfigPipeAndInheritedStderrLog() throws {
         let board = URL(fileURLWithPath: "/opt/Open OCD/scripts/board/stm32f4discovery.cfg")
         let plan = try planner(openOCD: "/tools/openocd", board: board).plan(
             mode: .debug,
@@ -156,7 +156,7 @@ final class DebugPlannerTests: XCTestCase {
         XCTAssertEqual(plan.initCommands[0], "file \"/tmp/调试 项目/.yagarto/build/arm7tdmi/演示 固件.elf\"")
         XCTAssertEqual(
             plan.initCommands[1],
-            "target extended-remote | exec '/tools/openocd' '-f' '/opt/Open OCD/scripts/board/stm32f4discovery.cfg' '-c' 'gdb_port pipe; log_output {/tmp/调试 项目/.yagarto/logs/openocd.log}'"
+            "target extended-remote | exec '/tools/openocd' '-f' '/opt/Open OCD/scripts/board/stm32f4discovery.cfg' '-c' 'gdb_port pipe; log_output /dev/stderr'"
         )
         XCTAssertEqual(Array(plan.initCommands.suffix(3)), [
             "monitor reset halt", "tbreak main", "continue"
@@ -180,36 +180,7 @@ final class DebugPlannerTests: XCTestCase {
         XCTAssertFalse(plan.initCommands.contains(where: { $0.hasPrefix("tbreak ") }))
     }
 
-    func testSTM32PlansUseUniqueLogFilesInsideProtectedDirectory() throws {
-        let planner = DebugPlanner(
-            toolPaths: [
-                .gdb: "/tools/arm-none-eabi-gdb",
-                .openOCD: "/tools/openocd"
-            ],
-            openOCDBoardConfig: URL(fileURLWithPath: "/board.cfg")
-        )
-        let first = try planner.plan(
-            mode: .debug,
-            configuration: ProjectConfiguration(profile: .stm32f4Discovery),
-            elf: elf,
-            projectDirectory: project
-        )
-        let second = try planner.plan(
-            mode: .debug,
-            configuration: ProjectConfiguration(profile: .stm32f4Discovery),
-            elf: elf,
-            projectDirectory: project
-        )
-
-        let firstLog = try XCTUnwrap(first.logFile)
-        let secondLog = try XCTUnwrap(second.logFile)
-        XCTAssertNotEqual(firstLog, secondLog)
-        XCTAssertTrue(firstLog.hasPrefix("\(project.path)/.yagarto/logs/openocd-"))
-        XCTAssertTrue(firstLog.hasSuffix(".log"))
-        XCTAssertTrue(first.initCommands[1].contains(firstLog))
-    }
-
-    func testSTM32RejectsLogHierarchySymlink() throws {
+    func testSTM32PlanningDoesNotCreateOrInspectProjectLogPaths() throws {
         let root = try DebugTemporaryDirectory()
         let outside = try DebugTemporaryDirectory()
         try FileManager.default.createSymbolicLink(
@@ -217,83 +188,6 @@ final class DebugPlannerTests: XCTestCase {
             withDestinationPath: outside.url.path
         )
 
-        XCTAssertThrowsError(try planner(
-            openOCD: "/tools/openocd",
-            board: URL(fileURLWithPath: "/board.cfg")
-        ).plan(
-            mode: .debug,
-            configuration: ProjectConfiguration(profile: .stm32f4Discovery),
-            elf: root.url.appendingPathComponent("demo.elf"),
-            projectDirectory: root.url
-        )) { error in
-            XCTAssertEqual((error as? YagartoError)?.diagnosticCode, "configuration.output_symlink")
-        }
-    }
-
-    func testSTM32RejectsSpecificOpenOCDLogSymlink() throws {
-        let root = try DebugTemporaryDirectory()
-        let outside = try DebugTemporaryDirectory()
-        let logs = root.url.appendingPathComponent(".yagarto/logs", isDirectory: true)
-        try FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)
-        let victim = outside.url.appendingPathComponent("victim.log")
-        try Data("保持不变".utf8).write(to: victim)
-        try FileManager.default.createSymbolicLink(
-            atPath: logs.appendingPathComponent("openocd.log").path,
-            withDestinationPath: victim.path
-        )
-
-        XCTAssertThrowsError(try planner(
-            openOCD: "/tools/openocd",
-            board: URL(fileURLWithPath: "/board.cfg")
-        ).plan(
-            mode: .debug,
-            configuration: ProjectConfiguration(profile: .stm32f4Discovery),
-            elf: root.url.appendingPathComponent("demo.elf"),
-            projectDirectory: root.url
-        )) { error in
-            XCTAssertEqual((error as? YagartoError)?.diagnosticCode, "configuration.output_symlink")
-        }
-        XCTAssertEqual(try String(contentsOf: victim, encoding: .utf8), "保持不变")
-    }
-
-    func testSTM32RechecksOpenOCDLogArtifactImmediatelyBeforeLaunch() throws {
-        let root = try DebugTemporaryDirectory()
-        let outside = try DebugTemporaryDirectory()
-        let plan = try planner(
-            openOCD: "/tools/openocd",
-            board: URL(fileURLWithPath: "/board.cfg")
-        ).plan(
-            mode: .debug,
-            configuration: ProjectConfiguration(profile: .stm32f4Discovery),
-            elf: root.url.appendingPathComponent("demo.elf"),
-            projectDirectory: root.url
-        )
-        let logs = root.url.appendingPathComponent(".yagarto/logs", isDirectory: true)
-        try FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)
-        let victim = outside.url.appendingPathComponent("victim.log")
-        try Data("保持不变".utf8).write(to: victim)
-        try FileManager.default.createSymbolicLink(
-            atPath: logs.appendingPathComponent("openocd.log").path,
-            withDestinationPath: victim.path
-        )
-
-        XCTAssertThrowsError(try DebugPlanner.prepareForLaunch(plan)) { error in
-            XCTAssertEqual((error as? YagartoError)?.diagnosticCode, "configuration.output_symlink")
-        }
-        XCTAssertEqual(try String(contentsOf: victim, encoding: .utf8), "保持不变")
-    }
-
-    func testSTM32RejectsPreexistingOpenOCDLogHardLinkBeforeLaunch() throws {
-        let root = try DebugTemporaryDirectory()
-        let outside = try DebugTemporaryDirectory()
-        let logs = root.url.appendingPathComponent(".yagarto/logs", isDirectory: true)
-        try FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)
-        let victim = outside.url.appendingPathComponent("victim.log")
-        try Data("保持不变".utf8).write(to: victim)
-        try FileManager.default.linkItem(
-            at: victim,
-            to: logs.appendingPathComponent("openocd.log")
-        )
         let plan = try planner(
             openOCD: "/tools/openocd",
             board: URL(fileURLWithPath: "/board.cfg")
@@ -304,35 +198,15 @@ final class DebugPlannerTests: XCTestCase {
             projectDirectory: root.url
         )
 
-        XCTAssertThrowsError(try DebugPlanner.prepareForLaunch(plan)) { error in
-            XCTAssertEqual(
-                (error as? YagartoError)?.diagnosticCode,
-                "configuration.output_exists"
+        XCTAssertEqual(
+            plan.initCommands[1],
+            "target extended-remote | exec '/tools/openocd' '-f' '/board.cfg' '-c' 'gdb_port pipe; log_output /dev/stderr'"
+        )
+        XCTAssertFalse(
+            FileManager.default.fileExists(
+                atPath: outside.url.appendingPathComponent("logs").path
             )
-        }
-        XCTAssertEqual(try String(contentsOf: victim, encoding: .utf8), "保持不变")
-    }
-
-    func testSTM32PrepareCreatesExclusivePrivateRegularLogFile() throws {
-        let root = try DebugTemporaryDirectory()
-        let plan = try planner(
-            openOCD: "/tools/openocd",
-            board: URL(fileURLWithPath: "/board.cfg")
-        ).plan(
-            mode: .debug,
-            configuration: ProjectConfiguration(profile: .stm32f4Discovery),
-            elf: root.url.appendingPathComponent("demo.elf"),
-            projectDirectory: root.url
         )
-
-        try DebugPlanner.prepareForLaunch(plan)
-
-        let logFile = try XCTUnwrap(plan.logFile)
-        let attributes = try FileManager.default.attributesOfItem(atPath: logFile)
-        XCTAssertEqual((attributes[.posixPermissions] as? NSNumber)?.intValue, 0o600)
-        XCTAssertEqual((attributes[.referenceCount] as? NSNumber)?.intValue, 1)
-        XCTAssertEqual((attributes[.size] as? NSNumber)?.intValue, 0)
-        XCTAssertNotEqual(attributes[.type] as? FileAttributeType, .typeSymbolicLink)
     }
 
     func testPipeArgumentsRejectNewlineAndNULInjection() {
@@ -371,8 +245,7 @@ final class DebugPlannerTests: XCTestCase {
         return DebugPlanner(
             toolPaths: tools,
             gdbSimulatorPath: gdbSimulator,
-            openOCDBoardConfig: board,
-            openOCDLogName: { "openocd.log" }
+            openOCDBoardConfig: board
         )
     }
 

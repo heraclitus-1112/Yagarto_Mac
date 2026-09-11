@@ -336,6 +336,9 @@ final class BuildPlannerTests: XCTestCase {
                 XCTAssertTrue(script.contains("ENTRY(Reset_Handler)"))
                 XCTAssertTrue(script.contains("KEEP(*(.isr_vector))"))
                 XCTAssertTrue(script.contains("__data_load__ = LOADADDR(.data)"))
+                XCTAssertTrue(script.contains("_estack = ORIGIN(RAM) + LENGTH(RAM)"))
+                XCTAssertTrue(script.contains("__stack_limit__ = _estack - 0x1000"))
+                XCTAssertTrue(script.contains("ASSERT(__bss_end__ <= __stack_limit__"))
             }
             for fragment in fragments {
                 XCTAssertTrue(script.contains(fragment), "\(filename) 缺少 \(fragment)")
@@ -349,7 +352,8 @@ final class BuildPlannerTests: XCTestCase {
 
         XCTAssertEqual(url.lastPathComponent, "cortex-m4-startup.s")
         XCTAssertTrue(source.contains(".section .isr_vector"))
-        XCTAssertTrue(source.contains(".word 0x20400000"))
+        XCTAssertTrue(source.contains(".word _estack"))
+        XCTAssertFalse(source.contains(".word 0x20400000"))
         XCTAssertTrue(source.contains(".word Reset_Handler"))
         XCTAssertTrue(source.contains(".thumb_func"))
         XCTAssertTrue(source.contains("__data_load__"))
@@ -369,7 +373,8 @@ final class BuildPlannerTests: XCTestCase {
 
         XCTAssertEqual(url.lastPathComponent, "stm32f4-startup.s")
         XCTAssertTrue(source.contains(".section .isr_vector"))
-        XCTAssertTrue(source.contains(".word 0x20020000"))
+        XCTAssertTrue(source.contains(".word _estack"))
+        XCTAssertFalse(source.contains(".word 0x20020000"))
         XCTAssertTrue(source.contains(".word Reset_Handler"))
         XCTAssertTrue(source.contains("__data_load__"))
         XCTAssertTrue(source.contains("__data_start__"))

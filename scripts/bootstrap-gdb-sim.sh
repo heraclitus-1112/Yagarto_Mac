@@ -73,12 +73,144 @@ while [ "$#" -gt 0 ]; do
 done
 
 WORK_DIRECTORY=
+ACTIVE_PID=
+WATCHDOG_PID=
+RECEIVED_SIGNAL_NUMBER=
+RECEIVED_SIGNAL_NAME=
+SUPERVISED_TIMED_OUT=
+SUPERVISOR_PID=$$
 cleanup() {
     if [ -n "$WORK_DIRECTORY" ] && [ -d "$WORK_DIRECTORY" ]; then
         rm -rf "$WORK_DIRECTORY"
     fi
 }
-trap cleanup EXIT HUP INT TERM
+trap cleanup EXIT
+
+process_group_has_live_members() {
+    group_to_check=$1
+    ps -axo pgid=,stat= 2>/dev/null | awk -v group="$group_to_check" '
+        $1 == group && $2 !~ /^Z/ { found = 1 }
+        END { exit found ? 0 : 1 }
+    '
+}
+
+wait_for_process_group() {
+    group_to_wait_for=$1
+    wait_iteration=0
+    while [ "$wait_iteration" -lt 4 ]; do
+        if ! process_group_has_live_members "$group_to_wait_for"; then
+            return 0
+        fi
+        /bin/sleep 0.05
+        wait_iteration=$((wait_iteration + 1))
+    done
+    ! process_group_has_live_members "$group_to_wait_for"
+}
+
+stop_watchdog() {
+    if [ -n "$WATCHDOG_PID" ]; then
+        kill -TERM -- "-${WATCHDOG_PID}" 2>/dev/null || true
+        wait "$WATCHDOG_PID" 2>/dev/null || true
+        WATCHDOG_PID=
+    fi
+}
+
+reap_active_process_group() {
+    if [ -z "$ACTIVE_PID" ]; then
+        return 0
+    fi
+    if ! wait_for_process_group "$ACTIVE_PID"; then
+        kill -TERM -- "-${ACTIVE_PID}" 2>/dev/null || true
+        if ! wait_for_process_group "$ACTIVE_PID"; then
+            kill -KILL -- "-${ACTIVE_PID}" 2>/dev/null || true
+            wait_for_process_group "$ACTIVE_PID" || true
+        fi
+    fi
+    wait "$ACTIVE_PID" 2>/dev/null || true
+}
+
+record_signal() {
+    signal_name=$1
+    signal_number=$2
+    if [ -z "$RECEIVED_SIGNAL_NUMBER" ]; then
+        RECEIVED_SIGNAL_NAME=$signal_name
+        RECEIVED_SIGNAL_NUMBER=$signal_number
+    fi
+    if [ -n "$ACTIVE_PID" ]; then
+        kill -"$signal_name" -- "-${ACTIVE_PID}" 2>/dev/null || true
+    else
+        trap '' HUP INT TERM
+        exit $((128 + signal_number))
+    fi
+}
+
+record_timeout() {
+    SUPERVISED_TIMED_OUT=1
+    if [ -n "$ACTIVE_PID" ]; then
+        kill -TERM -- "-${ACTIVE_PID}" 2>/dev/null || true
+    fi
+}
+
+trap 'record_signal HUP 1' HUP
+trap 'record_signal INT 2' INT
+trap 'record_signal TERM 15' TERM
+trap 'record_timeout' ALRM
+
+run_supervised_with_timeout() {
+    supervised_timeout=$1
+    shift
+    RECEIVED_SIGNAL_NUMBER=
+    RECEIVED_SIGNAL_NAME=
+    SUPERVISED_TIMED_OUT=
+
+    # POSIX monitor mode assigns this background job its own process group.
+    # Turn it off immediately so the non-interactive shell stays quiet.
+    set -m
+    "$@" &
+    ACTIVE_PID=$!
+    set +m
+
+    if [ "$supervised_timeout" -gt 0 ]; then
+        set -m
+        (
+            /bin/sleep "$supervised_timeout"
+            kill -ALRM "$SUPERVISOR_PID" 2>/dev/null || true
+        ) &
+        WATCHDOG_PID=$!
+        set +m
+    fi
+
+    if wait "$ACTIVE_PID" 2>/dev/null; then
+        supervised_status=0
+    else
+        supervised_status=$?
+    fi
+
+    stop_watchdog
+    if [ -n "$RECEIVED_SIGNAL_NUMBER" ]; then
+        trap '' HUP INT TERM
+        reap_active_process_group
+        ACTIVE_PID=
+        exit $((128 + RECEIVED_SIGNAL_NUMBER))
+    fi
+    if [ -n "$SUPERVISED_TIMED_OUT" ]; then
+        trap '' HUP INT TERM
+        reap_active_process_group
+        ACTIVE_PID=
+        trap 'record_signal HUP 1' HUP
+        trap 'record_signal INT 2' INT
+        trap 'record_signal TERM 15' TERM
+        echo "受控命令执行超时（${supervised_timeout} 秒）。" >&2
+        return 124
+    fi
+
+    ACTIVE_PID=
+    return "$supervised_status"
+}
+
+run_supervised() {
+    run_supervised_with_timeout 0 "$@"
+}
 
 verify_installed_gdb() {
     gdb_to_verify=$1
@@ -111,17 +243,24 @@ _start:
 1:
     b 1b
 EOF
-    "$arm_assembler" -mcpu=arm7tdmi -g \
+    run_supervised "$arm_assembler" -mcpu=arm7tdmi -g \
         -o "${selftest_directory}/selftest.o" \
         "${selftest_directory}/selftest.s"
-    "$arm_linker" -Ttext=0x00008000 -e _start \
+    run_supervised "$arm_linker" -Ttext=0x00008000 -e _start \
         -o "${selftest_directory}/selftest.elf" \
         "${selftest_directory}/selftest.o"
 
     selftest_output="${selftest_directory}/gdb-output.log"
-    if ! (
+    verify_timeout=${YAGARTO_GDB_VERIFY_TIMEOUT_SECONDS:-30}
+    case "$verify_timeout" in
+        ''|*[!0-9]*|0)
+            echo "YAGARTO_GDB_VERIFY_TIMEOUT_SECONDS 必须是正整数。" >&2
+            return 1
+            ;;
+    esac
+    run_gdb_selftest() (
         cd "$selftest_directory"
-        "$gdb_to_verify" -q -nx -batch \
+        exec "$gdb_to_verify" -q -nx -batch \
             -ex "file selftest.elf" \
             -ex "target sim" \
             -ex "load" \
@@ -129,7 +268,9 @@ EOF
             -ex "run" \
             -ex "stepi" \
             -ex "info registers r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 sp lr pc cpsr"
-    ) >"$selftest_output" 2>&1; then
+    )
+    if ! run_supervised_with_timeout "$verify_timeout" run_gdb_selftest \
+        >"$selftest_output" 2>&1; then
         echo "安装后的 GDB 未通过完整 ARM7 simulator 自测：" >&2
         sed -n '1,160p' "$selftest_output" >&2
         return 1
@@ -278,7 +419,7 @@ else
     WORK_DIRECTORY=$(mktemp -d "${TMPDIR:-/tmp}/yagarto-gdb.XXXXXX")
     ARCHIVE_PATH="${WORK_DIRECTORY}/${GDB_ARCHIVE}"
     echo "下载 ${GDB_URL}"
-    curl --fail --location --proto '=https' --tlsv1.2 \
+    run_supervised curl --fail --location --proto '=https' --tlsv1.2 \
         --output "$ARCHIVE_PATH" "$GDB_URL"
 fi
 
@@ -323,7 +464,7 @@ if [ -z "$WORK_DIRECTORY" ]; then
 fi
 SOURCE_DIRECTORY="${WORK_DIRECTORY}/gdb-${GDB_VERSION}"
 BUILD_DIRECTORY="${WORK_DIRECTORY}/build"
-tar -xf "$ARCHIVE_PATH" -C "$WORK_DIRECTORY"
+run_supervised tar -xf "$ARCHIVE_PATH" -C "$WORK_DIRECTORY"
 if [ ! -x "${SOURCE_DIRECTORY}/configure" ]; then
     echo "归档内容无效：缺少 gdb-${GDB_VERSION}/configure。" >&2
     exit 1
@@ -331,21 +472,22 @@ fi
 mkdir -p "$BUILD_DIRECTORY"
 
 echo "配置 GNU GDB ${GDB_VERSION}（target: arm-none-eabi，simulator 保持启用）"
-(
+configure_gdb() (
     cd "$BUILD_DIRECTORY"
-    env CPPFLAGS="$GDB_CPPFLAGS" LDFLAGS="$GDB_LDFLAGS" \
+    exec env CPPFLAGS="$GDB_CPPFLAGS" LDFLAGS="$GDB_LDFLAGS" \
         "${SOURCE_DIRECTORY}/configure" \
         --target=arm-none-eabi \
         --prefix="$INSTALL_PREFIX" \
         --disable-werror
 )
+run_supervised configure_gdb
 
 JOB_COUNT=$(sysctl -n hw.logicalcpu 2>/dev/null || printf '2')
 case "$JOB_COUNT" in
     ''|*[!0-9]*) JOB_COUNT=2 ;;
 esac
-gmake -C "$BUILD_DIRECTORY" -j "$JOB_COUNT"
-gmake -C "$BUILD_DIRECTORY" install
+run_supervised gmake -C "$BUILD_DIRECTORY" -j "$JOB_COUNT"
+run_supervised gmake -C "$BUILD_DIRECTORY" install
 
 INSTALLED_GDB="${INSTALL_PREFIX}/bin/arm-none-eabi-gdb"
 SIMULATOR_ALIAS="${INSTALL_PREFIX}/bin/arm-none-eabi-gdb-sim"

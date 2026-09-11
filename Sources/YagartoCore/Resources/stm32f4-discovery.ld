@@ -7,6 +7,9 @@ MEMORY
     RAM   (rwx) : ORIGIN = 0x20000000, LENGTH = 128K
 }
 
+_estack = ORIGIN(RAM) + LENGTH(RAM);
+__stack_limit__ = _estack - 0x1000;
+
 SECTIONS
 {
     .text :
@@ -32,4 +35,6 @@ SECTIONS
         *(COMMON)
         __bss_end__ = .;
     } > RAM
+
+    ASSERT(__bss_end__ <= __stack_limit__, "RAM overflow into reserved 4 KiB stack")
 }

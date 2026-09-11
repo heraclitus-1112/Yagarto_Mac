@@ -11,15 +11,15 @@ public struct BuildExecutor {
 
     @discardableResult
     public func execute(_ plan: BuildPlan) throws -> [ProcessResult] {
-        try ProjectPathGuard.createOutputDirectory(
+        let stagingDirectory = try ProjectPathGuard.createPrivateStagingDirectory(
             projectDirectory: plan.projectDirectory,
             outputDirectory: plan.outputDirectory
         )
-        try validateOutputPaths(for: plan)
+        defer { try? FileManager.default.removeItem(at: stagingDirectory) }
+        let stagedPlan = plan.rebased(to: stagingDirectory)
 
         var results: [ProcessResult] = []
-        for step in plan.steps {
-            try validateOutputPaths(for: plan)
+        for step in stagedPlan.steps {
             let result = try runner.run(step.command)
             guard result.exitStatus == 0 else {
                 throw YagartoError.buildStepFailed(
@@ -31,7 +31,7 @@ public struct BuildExecutor {
             if let destination = step.standardOutputFile {
                 try ProjectPathGuard.validateArtifactPaths(
                     [destination],
-                    outputDirectory: plan.outputDirectory
+                    outputDirectory: stagedPlan.outputDirectory
                 )
                 do {
                     try Data(result.stdout.utf8).write(to: destination, options: .atomic)
@@ -44,17 +44,15 @@ public struct BuildExecutor {
             }
             results.append(result)
         }
+        try ProjectPathGuard.validateProducedArtifacts(
+            stagedPlan.artifactFiles,
+            outputDirectory: stagedPlan.outputDirectory
+        )
+        try ProjectPathGuard.publishStagingDirectory(
+            stagingDirectory,
+            to: plan.outputDirectory,
+            projectDirectory: plan.projectDirectory
+        )
         return results
-    }
-
-    private func validateOutputPaths(for plan: BuildPlan) throws {
-        try ProjectPathGuard.validateOutputHierarchy(
-            projectDirectory: plan.projectDirectory,
-            outputDirectory: plan.outputDirectory
-        )
-        try ProjectPathGuard.validateArtifactPaths(
-            plan.artifactFiles,
-            outputDirectory: plan.outputDirectory
-        )
     }
 }

@@ -60,4 +60,48 @@ public struct BuildPlan: Equatable, Sendable {
                 seen.insert(url.standardizedFileURL.path).inserted
             }
     }
+
+    func rebased(to stagedOutputDirectory: URL) -> BuildPlan {
+        let originalRoot = outputDirectory.standardizedFileURL.path
+        let stagedRoot = stagedOutputDirectory.standardizedFileURL.path
+
+        func rebase(_ url: URL) -> URL {
+            let path = url.standardizedFileURL.path
+            guard path == originalRoot || path.hasPrefix(originalRoot + "/") else {
+                return url
+            }
+            let suffix = String(path.dropFirst(originalRoot.count))
+            return URL(fileURLWithPath: stagedRoot + suffix, isDirectory: false)
+        }
+
+        func rebase(_ value: String) -> String {
+            guard value == originalRoot || value.hasPrefix(originalRoot + "/") else {
+                return value
+            }
+            return stagedRoot + value.dropFirst(originalRoot.count)
+        }
+
+        let stagedSteps = steps.map { step in
+            BuildStep(
+                command: CommandSpec(
+                    executable: step.command.executable,
+                    args: step.command.args.map(rebase),
+                    workingDirectory: step.command.workingDirectory
+                ),
+                standardOutputFile: step.standardOutputFile.map(rebase)
+            )
+        }
+        return BuildPlan(
+            profile: profile,
+            projectDirectory: projectDirectory,
+            outputDirectory: stagedOutputDirectory,
+            objectFiles: objectFiles.map(rebase),
+            startupObjectFile: startupObjectFile.map(rebase),
+            elfFile: rebase(elfFile),
+            mapFile: rebase(mapFile),
+            binaryFile: rebase(binaryFile),
+            listingFile: rebase(listingFile),
+            steps: stagedSteps
+        )
+    }
 }

@@ -23,7 +23,6 @@ public struct DebugLaunchPlan: Codable, Equatable, Sendable {
     public let warnings: [String]
     public let elf: String
     public let projectDirectory: String
-    public let logFile: String?
 
     public init(
         profile: ProfileID,
@@ -33,8 +32,7 @@ public struct DebugLaunchPlan: Codable, Equatable, Sendable {
         initCommands: [String],
         warnings: [String],
         elf: String,
-        projectDirectory: String,
-        logFile: String? = nil
+        projectDirectory: String
     ) {
         self.profile = profile
         self.backend = backend
@@ -44,7 +42,6 @@ public struct DebugLaunchPlan: Codable, Equatable, Sendable {
         self.warnings = warnings
         self.elf = elf
         self.projectDirectory = projectDirectory
-        self.logFile = logFile
     }
 
     public var command: CommandSpec {

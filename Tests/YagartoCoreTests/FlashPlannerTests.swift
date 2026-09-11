@@ -198,6 +198,26 @@ final class FlashPlannerTests: XCTestCase {
         )])
     }
 
+    func testSystemProfilerEnumeratorRecognizesNewSTLinkPIDsAcrossNestedRepresentations() throws {
+        let fixtures = [
+            #"{"SPUSBDataType":[{"hub":{"device":{"vendor_id":1155,"product_id":14165}}}]}"#,
+            #"{"SPUSBDataType":[{"items":[{"vendor_id":"0X0483","product_id":"0X3757"}]}]}"#
+        ]
+
+        for fixture in fixtures {
+            let runner = FlashRecordingRunner(result: ProcessResult(
+                exitStatus: 0,
+                stdout: fixture,
+                stderr: ""
+            ))
+            XCTAssertEqual(
+                try SystemProfilerSTLinkUSBEnumerator(runner: runner).presence(),
+                .present,
+                fixture
+            )
+        }
+    }
+
     func testSystemProfilerEnumeratorReportsExplicitAbsenceForUnrelatedUSBDevices() throws {
         let runner = FlashRecordingRunner(result: ProcessResult(
             exitStatus: 0,
@@ -243,6 +263,32 @@ final class FlashPlannerTests: XCTestCase {
             XCTAssertTrue(
                 (error as? YagartoError)?.toolOutput?.contains("SPUSBDataType") == true
             )
+        }
+    }
+
+    func testSystemProfilerEnumeratorParseAndSchemaErrorsDoNotLeakUSBStdout() {
+        let secret = "SERIAL-DO-NOT-ECHO-1234"
+        let fixtures: [(stdout: String, expectedReason: String)] = [
+            ("not json \(secret)", "无法解析 USB 枚举 JSON"),
+            (#"{"serial_number":"\#(secret)"}"#, "缺少 SPUSBDataType 数组")
+        ]
+
+        for fixture in fixtures {
+            let runner = FlashRecordingRunner(result: ProcessResult(
+                exitStatus: 0,
+                stdout: fixture.stdout,
+                stderr: "system_profiler warning"
+            ))
+
+            XCTAssertThrowsError(try SystemProfilerSTLinkUSBEnumerator(
+                runner: runner
+            ).presence()) { error in
+                let output = (error as? YagartoError)?.toolOutput ?? ""
+                XCTAssertTrue(output.contains(fixture.expectedReason), output)
+                XCTAssertTrue(output.contains("system_profiler warning"), output)
+                XCTAssertFalse(output.contains(secret), output)
+                XCTAssertFalse(output.contains(fixture.stdout), output)
+            }
         }
     }
 

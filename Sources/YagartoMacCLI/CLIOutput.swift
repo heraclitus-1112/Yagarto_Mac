@@ -4,6 +4,27 @@ import Foundation
 import YagartoCore
 
 enum CLIOutput {
+    static func rejectDuplicateFormatIfPresent(
+        arguments: [String] = CommandLine.arguments
+    ) -> Bool {
+        let count = arguments.dropFirst().reduce(into: 0) { result, argument in
+            if argument == "--format" || argument.hasPrefix("--format=") {
+                result += 1
+            }
+        }
+        guard count > 1 else { return false }
+        writeDiagnostic(
+            Diagnostic(
+                code: "usage.duplicate_option",
+                message: "命令行选项 --format 只能提供一次。请删除重复选项后重试。",
+                details: "重复选项：--format"
+            ),
+            exitCode: .usage,
+            arguments: arguments
+        )
+        return true
+    }
+
     static func printJSON<Value: Encodable>(_ value: Value) throws {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
