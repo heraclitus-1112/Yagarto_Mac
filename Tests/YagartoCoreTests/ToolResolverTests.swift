@@ -90,6 +90,21 @@ final class ToolResolverTests: XCTestCase {
         XCTAssertFalse(report.requiredToolsAvailable)
     }
 
+    func testDoctorDoesNotSelectQEMUProfilesWhenQEMUExecutableIsMissing() throws {
+        let resolver = ToolResolver(
+            environment: ["PATH": "/tools"],
+            fileExists: { $0 == "/tools/arm-none-eabi-gdb" },
+            capabilityProbe: { _ in false }
+        )
+
+        let report = resolver.doctor()
+
+        XCTAssertFalse(try XCTUnwrap(report.debugSelection(for: .arm7tdmi)).available)
+        XCTAssertNil(report.debugSelection(for: .arm7tdmi)?.backend)
+        XCTAssertFalse(try XCTUnwrap(report.debugSelection(for: .cortexM4)).available)
+        XCTAssertNil(report.debugSelection(for: .cortexM4)?.backend)
+    }
+
     func testDoctorJSONIncludesExplicitBoardConfigAvailabilityWhenMissing() throws {
         let report = ToolResolver(
             environment: ["PATH": ""],
@@ -123,23 +138,49 @@ final class ToolResolverTests: XCTestCase {
         ))
     }
 
-    func testDoctorReportsSimulatorEnvironmentOverrideAsSelectedGDB() {
+    func testDoctorReportsNormalAndSimulatorGDBSeparatelyWithProfileSelections() {
         let resolver = ToolResolver(
             environment: [
                 "PATH": "/tools",
                 "YAGARTO_MAC_GDB_SIM": "/custom/gdb-sim"
             ],
             fileExists: {
-                $0 == "/custom/gdb-sim" || $0 == "/tools/arm-none-eabi-gdb"
+                [
+                    "/custom/gdb-sim",
+                    "/tools/arm-none-eabi-gdb",
+                    "/tools/qemu-system-arm"
+                ].contains($0)
             },
             capabilityProbe: { $0.executable == "/custom/gdb-sim" }
         )
 
-        let entry = resolver.doctor().entry(for: .gdb)
+        let report = resolver.doctor()
+        let entry = report.entry(for: .gdb)
 
-        XCTAssertEqual(entry?.path, "/custom/gdb-sim")
+        XCTAssertEqual(entry?.path, "/tools/arm-none-eabi-gdb")
         XCTAssertEqual(entry?.executablePresent, true)
-        XCTAssertEqual(entry?.targetSimCapable, true)
+        XCTAssertEqual(entry?.targetSimCapable, false)
+        XCTAssertEqual(report.normalGDB.path, "/tools/arm-none-eabi-gdb")
+        XCTAssertFalse(report.normalGDB.targetSimCapable)
+        XCTAssertEqual(report.simulatorGDB.path, "/custom/gdb-sim")
+        XCTAssertTrue(report.simulatorGDB.targetSimCapable)
+        XCTAssertEqual(
+            report.debugSelection(for: .arm7tdmi),
+            DoctorDebugSelection(
+                profile: .arm7tdmi,
+                backend: .gdbSimulator,
+                gdbExecutable: "/custom/gdb-sim",
+                warnings: []
+            )
+        )
+        XCTAssertEqual(
+            report.debugSelection(for: .cortexM4)?.gdbExecutable,
+            "/tools/arm-none-eabi-gdb"
+        )
+        XCTAssertEqual(
+            report.debugSelection(for: .cortexM4)?.backend,
+            .qemuMPS2AN386
+        )
     }
 
     func testDoctorSkipsIncapableSimulatorOverrideLikeRuntimeResolution() {
@@ -158,6 +199,24 @@ final class ToolResolverTests: XCTestCase {
 
         XCTAssertEqual(entry?.path, "/tools/arm-none-eabi-gdb")
         XCTAssertEqual(entry?.targetSimCapable, true)
+    }
+
+    func testDoctorDistinguishesPresentSimulatorCandidateFromFailedCapability() throws {
+        let resolver = ToolResolver(
+            environment: [
+                "PATH": "",
+                "YAGARTO_MAC_GDB_SIM": "/custom/incapable-gdb"
+            ],
+            fileExists: { $0 == "/custom/incapable-gdb" },
+            capabilityProbe: { _ in false }
+        )
+
+        let report = resolver.doctor()
+
+        XCTAssertEqual(report.simulatorGDB.path, "/custom/incapable-gdb")
+        XCTAssertTrue(report.simulatorGDB.executablePresent)
+        XCTAssertFalse(report.simulatorGDB.targetSimCapable)
+        XCTAssertFalse(try XCTUnwrap(report.debugSelection(for: .arm7tdmi)).available)
     }
 
     func testExplicitGDBOverrideCanSelectSimulatorButOrdinaryGDBMustBeCapable() throws {

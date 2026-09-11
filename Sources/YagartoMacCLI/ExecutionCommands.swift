@@ -23,6 +23,9 @@ struct RunCommand: ParsableCommand {
     var format: OutputFormat = .text
 
     mutating func run() throws {
+        if !dryRun, case .json = format {
+            throw YagartoError.interactiveJSONUnsupported
+        }
         let plan = try makeDebugLaunchPlan(
             mode: .run,
             elfArgument: elf,
@@ -55,6 +58,9 @@ struct DebugCommand: ParsableCommand {
     var format: OutputFormat = .text
 
     mutating func run() throws {
+        if !dryRun, case .json = format {
+            throw YagartoError.interactiveJSONUnsupported
+        }
         let plan = try makeDebugLaunchPlan(
             mode: .debug,
             elfArgument: elf,
@@ -83,11 +89,14 @@ struct FlashCommand: ParsableCommand {
     @Flag(name: .long, help: "确认执行真实硬件烧录。")
     var yes = false
 
+    @Flag(name: .long, help: "只输出烧录计划，不探测或写入硬件。")
+    var dryRun = false
+
     @Option(name: .long, help: "输出格式：text 或 json。")
     var format: OutputFormat = .text
 
     mutating func run() throws {
-        guard yes else {
+        guard dryRun || yes else {
             throw ValidationError("flash 会写入真实硬件；请显式提供 --yes。")
         }
         if let profile, profile != .stm32f4Discovery {
@@ -135,6 +144,10 @@ struct FlashCommand: ParsableCommand {
             elf: elfURL,
             projectDirectory: directory
         )
+        if dryRun {
+            try printFlashPlan(plan, format: format)
+            return
+        }
         _ = try FlashExecutor().execute(plan)
         let output = FlashOutput(
             status: "ok",
@@ -147,6 +160,19 @@ struct FlashCommand: ParsableCommand {
         case .text:
             print("烧录完成（\(configuration.profile.rawValue)）：\(plan.elf)")
         }
+    }
+}
+
+private func printFlashPlan(_ plan: FlashPlan, format: OutputFormat) throws {
+    switch format {
+    case .json:
+        try CLIOutput.printJSON(plan)
+    case .text:
+        print("profile：\(plan.profile.rawValue)")
+        print("ELF：\(plan.elf)")
+        print("OpenOCD：\(plan.command.executable)")
+        print("board config：\(plan.boardConfig)")
+        print("参数：\(plan.command.args.joined(separator: " "))")
     }
 }
 
@@ -237,6 +263,9 @@ private func printDebugLaunchPlan(
 
 private func executeDebugLaunchPlan(_ plan: DebugLaunchPlan) throws {
     try DebugPlanner.prepareForLaunch(plan)
+    for warning in plan.warnings {
+        CLIOutput.write("警告：\(warning)\n", to: .standardError)
+    }
     let status = try ProcessRunner().runInteractive(plan.command)
     if status == YagartoExitCode.interrupted.rawValue {
         throw YagartoError.interrupted

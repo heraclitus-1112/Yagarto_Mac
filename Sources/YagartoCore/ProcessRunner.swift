@@ -162,27 +162,228 @@ public struct ProcessRunner: ProcessRunning {
     }
 
     private static func executeInteractively(_ command: CommandSpec) throws -> ProcessTermination {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: command.executable)
-        process.arguments = command.args
-        process.currentDirectoryURL = command.workingDirectory
-        process.standardInput = FileHandle.standardInput
-        process.standardOutput = FileHandle.standardOutput
-        process.standardError = FileHandle.standardError
+        InteractiveProcessSignalState.lock.lock()
+        defer { InteractiveProcessSignalState.lock.unlock() }
+        InteractiveProcessSignalState.processGroup = 0
+        InteractiveProcessSignalState.receivedSignal = 0
 
-        do {
-            try process.run()
-            process.waitUntilExit()
-        } catch {
+        let handledSignals = [SIGINT, SIGTERM, SIGHUP]
+        let previousHandlers = handledSignals.map {
+            Darwin.signal($0, forwardInteractiveProcessSignal)
+        }
+        defer {
+            InteractiveProcessSignalState.processGroup = 0
+            for (signalNumber, previousHandler) in zip(handledSignals, previousHandlers) {
+                _ = Darwin.signal(signalNumber, previousHandler)
+            }
+        }
+
+        var fileActions: posix_spawn_file_actions_t?
+        var attributes: posix_spawnattr_t?
+        let fileActionsStatus = posix_spawn_file_actions_init(&fileActions)
+        guard fileActionsStatus == 0 else {
             throw YagartoError.processLaunchFailed(
                 command.executable,
-                error.localizedDescription
+                String(cString: strerror(fileActionsStatus))
+            )
+        }
+        defer { posix_spawn_file_actions_destroy(&fileActions) }
+
+        let chdirStatus = command.workingDirectory.path.withCString {
+            addSpawnWorkingDirectory(&fileActions, $0)
+        }
+        guard chdirStatus == 0 else {
+            throw YagartoError.processLaunchFailed(
+                command.executable,
+                String(cString: strerror(chdirStatus))
             )
         }
 
-        let reason: ProcessTermination.Reason = process.terminationReason == .uncaughtSignal
-            ? .uncaughtSignal
-            : .exit
-        return ProcessTermination(reason: reason, status: process.terminationStatus)
+        let attributesStatus = posix_spawnattr_init(&attributes)
+        guard attributesStatus == 0 else {
+            throw YagartoError.processLaunchFailed(
+                command.executable,
+                String(cString: strerror(attributesStatus))
+            )
+        }
+        defer { posix_spawnattr_destroy(&attributes) }
+
+        var defaultSignals = sigset_t()
+        sigemptyset(&defaultSignals)
+        for signalNumber in handledSignals + [SIGTTOU, SIGTTIN] {
+            sigaddset(&defaultSignals, signalNumber)
+        }
+        var emptySignalMask = sigset_t()
+        sigemptyset(&emptySignalMask)
+        let spawnFlags = Int16(
+            POSIX_SPAWN_SETPGROUP
+                | POSIX_SPAWN_SETSIGDEF
+                | POSIX_SPAWN_SETSIGMASK
+                | POSIX_SPAWN_START_SUSPENDED
+        )
+        for status in [
+            posix_spawnattr_setflags(&attributes, spawnFlags),
+            posix_spawnattr_setpgroup(&attributes, 0),
+            posix_spawnattr_setsigdefault(&attributes, &defaultSignals),
+            posix_spawnattr_setsigmask(&attributes, &emptySignalMask)
+        ] where status != 0 {
+            throw YagartoError.processLaunchFailed(
+                command.executable,
+                String(cString: strerror(status))
+            )
+        }
+
+        var childPID = pid_t(0)
+        var arguments = ([command.executable] + command.args).map { strdup($0) }
+        guard arguments.allSatisfy({ $0 != nil }) else {
+            for pointer in arguments {
+                if let pointer { free(pointer) }
+            }
+            throw YagartoError.internalFailure("无法分配交互进程参数。")
+        }
+        defer {
+            for pointer in arguments {
+                if let pointer { free(pointer) }
+            }
+        }
+        arguments.append(nil)
+        let spawnStatus = arguments.withUnsafeMutableBufferPointer { buffer in
+            posix_spawn(
+                &childPID,
+                buffer[0],
+                &fileActions,
+                &attributes,
+                buffer.baseAddress,
+                environ
+            )
+        }
+        guard spawnStatus == 0 else {
+            throw YagartoError.processLaunchFailed(
+                command.executable,
+                String(cString: strerror(spawnStatus))
+            )
+        }
+
+        InteractiveProcessSignalState.processGroup = childPID
+        let terminalFileDescriptor = STDIN_FILENO
+        let originalForegroundGroup = isatty(terminalFileDescriptor) == 1
+            ? tcgetpgrp(terminalFileDescriptor)
+            : pid_t(-1)
+        var previousTTOUHandler: sig_t?
+        if originalForegroundGroup >= 0 {
+            previousTTOUHandler = Darwin.signal(SIGTTOU, SIG_IGN)
+            if tcsetpgrp(terminalFileDescriptor, childPID) != 0 {
+                let errorCode = errno
+                _ = Darwin.kill(-childPID, SIGKILL)
+                _ = Darwin.kill(childPID, SIGCONT)
+                var ignoredStatus = Int32(0)
+                _ = waitpid(childPID, &ignoredStatus, 0)
+                throw YagartoError.processLaunchFailed(
+                    command.executable,
+                    String(cString: strerror(errorCode))
+                )
+            }
+        }
+        defer {
+            if originalForegroundGroup >= 0 {
+                _ = tcsetpgrp(terminalFileDescriptor, originalForegroundGroup)
+                _ = Darwin.signal(SIGTTOU, previousTTOUHandler)
+            }
+        }
+
+        if InteractiveProcessSignalState.receivedSignal != 0 {
+            _ = Darwin.kill(
+                -childPID,
+                InteractiveProcessSignalState.receivedSignal
+            )
+        }
+        _ = Darwin.kill(childPID, SIGCONT)
+
+        var waitStatus = Int32(0)
+        while true {
+            let result = waitpid(childPID, &waitStatus, 0)
+            if result == childPID {
+                break
+            }
+            if result == -1 && errno == EINTR {
+                continue
+            }
+            if result == -1 {
+                throw YagartoError.processLaunchFailed(
+                    command.executable,
+                    String(cString: strerror(errno))
+                )
+            }
+        }
+        terminateRemainingProcessGroup(childPID)
+
+        if InteractiveProcessSignalState.receivedSignal != 0 {
+            return ProcessTermination(
+                reason: .uncaughtSignal,
+                status: InteractiveProcessSignalState.receivedSignal
+            )
+        }
+
+        let terminatingSignal = waitStatus & 0x7F
+        if terminatingSignal != 0 && terminatingSignal != 0x7F {
+            return ProcessTermination(reason: .uncaughtSignal, status: terminatingSignal)
+        }
+        return ProcessTermination(reason: .exit, status: (waitStatus >> 8) & 0xFF)
     }
+}
+
+private enum InteractiveProcessSignalState {
+    static let lock = NSLock()
+    nonisolated(unsafe) static var processGroup = pid_t(0)
+    nonisolated(unsafe) static var receivedSignal = Int32(0)
+}
+
+private func forwardInteractiveProcessSignal(_ signalNumber: Int32) {
+    InteractiveProcessSignalState.receivedSignal = signalNumber
+    let processGroup = InteractiveProcessSignalState.processGroup
+    if processGroup > 0 {
+        _ = Darwin.kill(-processGroup, signalNumber)
+    }
+}
+
+private func terminateRemainingProcessGroup(_ processGroup: pid_t) {
+    guard processGroup > 0 else { return }
+    errno = 0
+    guard Darwin.kill(-processGroup, 0) == 0 || errno != ESRCH else { return }
+
+    _ = Darwin.kill(-processGroup, SIGTERM)
+    for _ in 0..<100 {
+        errno = 0
+        if Darwin.kill(-processGroup, 0) == -1, errno == ESRCH {
+            return
+        }
+        usleep(10_000)
+    }
+    _ = Darwin.kill(-processGroup, SIGKILL)
+    for _ in 0..<100 {
+        errno = 0
+        if Darwin.kill(-processGroup, 0) == -1, errno == ESRCH {
+            return
+        }
+        usleep(10_000)
+    }
+}
+
+private typealias SpawnAddChdir = @convention(c) (
+    UnsafeMutablePointer<posix_spawn_file_actions_t?>?,
+    UnsafePointer<CChar>?
+) -> Int32
+
+private func addSpawnWorkingDirectory(
+    _ fileActions: UnsafeMutablePointer<posix_spawn_file_actions_t?>,
+    _ path: UnsafePointer<CChar>
+) -> Int32 {
+    guard let symbol = dlsym(
+        UnsafeMutableRawPointer(bitPattern: -2),
+        "posix_spawn_file_actions_addchdir_np"
+    ) else {
+        return ENOSYS
+    }
+    let function = unsafeBitCast(symbol, to: SpawnAddChdir.self)
+    return function(fileActions, path)
 }

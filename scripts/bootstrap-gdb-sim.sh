@@ -9,7 +9,9 @@ GDB_URL="https://ftp.gnu.org/gnu/gdb/${GDB_ARCHIVE}"
 
 usage() {
     cat <<EOF
-用法：bootstrap-gdb-sim.sh --prefix DIR --sha256 HEX [--archive FILE]
+用法：
+  bootstrap-gdb-sim.sh --prefix DIR --sha256 HEX [--archive FILE]
+  bootstrap-gdb-sim.sh --verify-gdb FILE
 
 构建并安装带 ARM simulator 的 GNU GDB ${GDB_VERSION}。
 
@@ -19,6 +21,8 @@ usage() {
 
 可选：
   --archive FILE   使用本地 ${GDB_ARCHIVE}，避免下载
+  --verify-gdb FILE
+                   仅对已安装的 GDB 执行完整 ARM7 simulator 自测
   -h, --help       显示帮助
 
 固定来源：${GDB_URL}
@@ -33,6 +37,7 @@ fi
 INSTALL_PREFIX=
 EXPECTED_SHA256=
 LOCAL_ARCHIVE=
+VERIFY_GDB=
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
@@ -51,6 +56,11 @@ while [ "$#" -gt 0 ]; do
             LOCAL_ARCHIVE=$2
             shift 2
             ;;
+        --verify-gdb)
+            [ "$#" -ge 2 ] || { echo "--verify-gdb 缺少可执行文件参数。" >&2; exit 2; }
+            VERIFY_GDB=$2
+            shift 2
+            ;;
         -h|--help)
             usage
             exit 0
@@ -61,6 +71,93 @@ while [ "$#" -gt 0 ]; do
             ;;
     esac
 done
+
+WORK_DIRECTORY=
+cleanup() {
+    if [ -n "$WORK_DIRECTORY" ] && [ -d "$WORK_DIRECTORY" ]; then
+        rm -rf "$WORK_DIRECTORY"
+    fi
+}
+trap cleanup EXIT HUP INT TERM
+
+verify_installed_gdb() {
+    gdb_to_verify=$1
+    if [ ! -x "$gdb_to_verify" ]; then
+        echo "GDB 自测目标不可执行：${gdb_to_verify}" >&2
+        return 1
+    fi
+
+    arm_assembler=$(command -v arm-none-eabi-as 2>/dev/null || true)
+    arm_linker=$(command -v arm-none-eabi-ld 2>/dev/null || true)
+    if [ -z "$arm_assembler" ] || [ -z "$arm_linker" ]; then
+        echo "完整 GDB 自测需要 arm-none-eabi-as 和 arm-none-eabi-ld。" >&2
+        return 1
+    fi
+
+    if [ -z "$WORK_DIRECTORY" ]; then
+        WORK_DIRECTORY=$(mktemp -d "${TMPDIR:-/tmp}/yagarto-gdb.XXXXXX")
+    fi
+    selftest_directory="${WORK_DIRECTORY}/gdb-simulator-selftest"
+    mkdir -p "$selftest_directory"
+    cat > "${selftest_directory}/selftest.s" <<'EOF'
+.syntax unified
+.cpu arm7tdmi
+.text
+.global _start
+.type _start, %function
+_start:
+    mov r0, #1
+    add r0, r0, #1
+1:
+    b 1b
+EOF
+    "$arm_assembler" -mcpu=arm7tdmi -g \
+        -o "${selftest_directory}/selftest.o" \
+        "${selftest_directory}/selftest.s"
+    "$arm_linker" -Ttext=0x00008000 -e _start \
+        -o "${selftest_directory}/selftest.elf" \
+        "${selftest_directory}/selftest.o"
+
+    selftest_output="${selftest_directory}/gdb-output.log"
+    if ! (
+        cd "$selftest_directory"
+        "$gdb_to_verify" -q -nx -batch \
+            -ex "file selftest.elf" \
+            -ex "target sim" \
+            -ex "load" \
+            -ex "break _start" \
+            -ex "run" \
+            -ex "stepi" \
+            -ex "info registers r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 cpsr"
+    ) >"$selftest_output" 2>&1; then
+        echo "安装后的 GDB 未通过完整 ARM7 simulator 自测：" >&2
+        sed -n '1,160p' "$selftest_output" >&2
+        return 1
+    fi
+
+    for register in r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 r13 r14 r15 cpsr; do
+        if ! grep -E "^[[:space:]]*${register}[[:space:]]" "$selftest_output" >/dev/null 2>&1; then
+            echo "完整 GDB 自测未能读取寄存器 ${register}：" >&2
+            sed -n '1,160p' "$selftest_output" >&2
+            return 1
+        fi
+    done
+    if ! grep -Ei '^[[:space:]]*r0[[:space:]]+0x0*1([[:space:]]|$)' "$selftest_output" >/dev/null 2>&1; then
+        echo "完整 GDB 自测的 stepi 未得到预期 r0=1：" >&2
+        sed -n '1,160p' "$selftest_output" >&2
+        return 1
+    fi
+    echo "完整 ARM7 simulator 自测通过：target sim、ELF load、断点、单步和 r0-r15/cpsr。"
+}
+
+if [ -n "$VERIFY_GDB" ]; then
+    if [ -n "$INSTALL_PREFIX" ] || [ -n "$EXPECTED_SHA256" ] || [ -n "$LOCAL_ARCHIVE" ]; then
+        echo "--verify-gdb 不能与安装参数同时使用。" >&2
+        exit 2
+    fi
+    verify_installed_gdb "$VERIFY_GDB"
+    exit 0
+fi
 
 if [ -z "$INSTALL_PREFIX" ]; then
     echo "必须显式提供 --prefix DIR。" >&2
@@ -148,14 +245,6 @@ if [ "$INSTALL_PREFIX" = "/" ]; then
     echo "拒绝把系统根目录用作 --prefix。" >&2
     exit 2
 fi
-
-WORK_DIRECTORY=
-cleanup() {
-    if [ -n "$WORK_DIRECTORY" ] && [ -d "$WORK_DIRECTORY" ]; then
-        rm -rf "$WORK_DIRECTORY"
-    fi
-}
-trap cleanup EXIT HUP INT TERM
 
 verify_archive() {
     archive_to_verify=$1
@@ -264,10 +353,7 @@ if [ ! -x "$INSTALLED_GDB" ]; then
     echo "安装后未找到 ${INSTALLED_GDB}。" >&2
     exit 1
 fi
-if ! "$INSTALLED_GDB" -q -nx -batch -ex "target sim" >/dev/null 2>&1; then
-    echo "安装后的 GDB 未通过 target sim 能力验证。" >&2
-    exit 1
-fi
+verify_installed_gdb "$INSTALLED_GDB"
 ln -sf "arm-none-eabi-gdb" "$SIMULATOR_ALIAS"
 
 echo "已安装并验证：${SIMULATOR_ALIAS}"

@@ -23,9 +23,22 @@ struct DoctorCommand: ParsableCommand {
                 let status = entry.path.map { "已找到：\($0)" } ?? "未找到"
                 print("[必需] \(entry.tool.rawValue)：\(status)")
             }
-            let gdb = report.entry(for: .gdb)
-            print("[可选] GDB 可执行文件：\(gdb?.path.map { "已找到：\($0)" } ?? "未找到")")
-            print("[能力] GDB target sim：\(gdb?.targetSimCapable == true ? "支持" : "不支持")")
+            print(
+                "[可选] 常规 GDB 可执行文件："
+                    + (report.normalGDB.path.map { "已找到：\($0)" } ?? "未找到")
+            )
+            print(
+                "[可选] Simulator GDB 可执行文件："
+                    + (report.simulatorGDB.path.map { "已找到：\($0)" } ?? "未找到")
+            )
+            print(
+                "[能力] 常规 GDB target sim："
+                    + (report.normalGDB.targetSimCapable ? "支持" : "不支持")
+            )
+            print(
+                "[能力] Simulator GDB target sim："
+                    + (report.simulatorGDB.targetSimCapable ? "支持" : "不支持")
+            )
             let qemu = report.entry(for: .qemuSystemARM)
             print("[可选] QEMU：\(qemu?.path.map { "已找到：\($0)" } ?? "未找到")")
             let openOCD = report.entry(for: .openOCD)
@@ -34,6 +47,17 @@ struct DoctorCommand: ParsableCommand {
                 "[资源] STM32F4 Discovery board config："
                     + (report.stm32f4BoardConfig.map { "已找到：\($0)" } ?? "未找到")
             )
+            for selection in report.debugSelections {
+                if let backend = selection.backend,
+                   let gdbExecutable = selection.gdbExecutable {
+                    print(
+                        "[选择] \(selection.profile.rawValue)："
+                            + "\(backend.rawValue)，GDB \(gdbExecutable)"
+                    )
+                } else {
+                    print("[选择] \(selection.profile.rawValue)：不可用")
+                }
+            }
         }
     }
 }

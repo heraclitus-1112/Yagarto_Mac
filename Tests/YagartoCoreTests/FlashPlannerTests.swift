@@ -127,6 +127,53 @@ final class FlashPlannerTests: XCTestCase {
         }
     }
 
+    func testHardwareProbePrioritizesActionableErrorsOverNoDeviceMarkers() {
+        let diagnostics = [
+            "no device found\nError: LIBUSB_ERROR_ACCESS permission denied",
+            "no device found\nError: USB access failed",
+            "LIBUSB_ERROR_NO_DEVICE\nError: debug adapter is busy",
+            "no cmsis-dap device found\nError: invalid board configuration",
+            "no cmsis-dap device found\nError: invalid config script",
+            "no device found\nError: transport initialization failed",
+            "unable to find any matching cmsis-dap device\nError: adapter driver unavailable"
+        ]
+
+        for diagnostic in diagnostics {
+            let probe = OpenOCDHardwareProbe(runner: FlashRecordingRunner(result: ProcessResult(
+                exitStatus: 1,
+                stdout: "",
+                stderr: diagnostic
+            )))
+
+            XCTAssertThrowsError(try probe.isBoardConnected(
+                openOCDExecutable: "/tools/openocd",
+                boardConfig: URL(fileURLWithPath: "/board.cfg"),
+                projectDirectory: URL(fileURLWithPath: "/tmp/project", isDirectory: true)
+            ), "不应把可操作错误降级为无板：\(diagnostic)") { error in
+                XCTAssertEqual((error as? YagartoError)?.diagnosticCode, "build.step_failed")
+                XCTAssertEqual((error as? YagartoError)?.toolOutput, diagnostic)
+            }
+        }
+    }
+
+    func testHardwareProbeDoesNotTreatAmbiguousOpenFailureAsNoBoard() {
+        let diagnostic = "Error: open failed"
+        let probe = OpenOCDHardwareProbe(runner: FlashRecordingRunner(result: ProcessResult(
+            exitStatus: 1,
+            stdout: "",
+            stderr: diagnostic
+        )))
+
+        XCTAssertThrowsError(try probe.isBoardConnected(
+            openOCDExecutable: "/tools/openocd",
+            boardConfig: URL(fileURLWithPath: "/board.cfg"),
+            projectDirectory: URL(fileURLWithPath: "/tmp/project", isDirectory: true)
+        )) { error in
+            XCTAssertEqual((error as? YagartoError)?.diagnosticCode, "build.step_failed")
+            XCTAssertEqual((error as? YagartoError)?.toolOutput, diagnostic)
+        }
+    }
+
     func testFlashExecutorReturnsExitSixAndDoesNotProgramWhenBoardIsAbsent() throws {
         let project = URL(fileURLWithPath: "/tmp/烧录项目", isDirectory: true)
         let plan = try FlashPlanner(

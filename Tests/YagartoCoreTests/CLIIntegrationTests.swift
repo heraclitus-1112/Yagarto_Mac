@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import Foundation
+import Darwin
 import XCTest
 @testable import YagartoCore
 
@@ -379,10 +380,72 @@ final class CLIIntegrationTests: XCTestCase {
 
         XCTAssertEqual(result.status, 0, result.stderr)
         XCTAssertTrue(result.stdout.contains("GDB 可执行文件"))
+        XCTAssertTrue(result.stdout.contains("常规 GDB target sim：支持"))
         XCTAssertTrue(result.stdout.contains("GDB target sim：支持"))
         XCTAssertTrue(result.stdout.contains("QEMU"))
         XCTAssertTrue(result.stdout.contains("OpenOCD"))
         XCTAssertTrue(result.stdout.contains("stm32f4discovery.cfg"))
+    }
+
+    func testDoctorProfileSelectionsMatchAllDebugDryRunPlans() throws {
+        let directory = try CLITemporaryDirectory()
+        let prefix = directory.url.appendingPathComponent("selection-tools", isDirectory: true)
+        let bin = prefix.appendingPathComponent("bin", isDirectory: true)
+        let normalGDB = bin.appendingPathComponent("arm-none-eabi-gdb")
+        let simulatorGDB = bin.appendingPathComponent("arm-none-eabi-gdb-sim")
+        try writeExecutable("#!/bin/sh\nexit 1\n", to: normalGDB)
+        try writeExecutable("#!/bin/sh\nexit 0\n", to: simulatorGDB)
+        try writeExecutable("#!/bin/sh\nexit 0\n", to: bin.appendingPathComponent("qemu-system-arm"))
+        try writeExecutable("#!/bin/sh\nexit 0\n", to: bin.appendingPathComponent("openocd"))
+        let board = prefix.appendingPathComponent(
+            "share/openocd/scripts/board/stm32f4discovery.cfg"
+        )
+        try FileManager.default.createDirectory(
+            at: board.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data("# fake board config\n".utf8).write(to: board)
+        let environment = [
+            "PATH": "\(bin.path):/usr/bin:/bin",
+            "YAGARTO_MAC_GDB_SIM": simulatorGDB.path
+        ]
+
+        let doctorResult = try runCLI(
+            ["doctor", "--format", "json"],
+            in: directory.url,
+            environment: environment
+        )
+        XCTAssertEqual(doctorResult.status, 0, doctorResult.stderr)
+        let report = try JSONDecoder().decode(
+            DoctorReport.self,
+            from: Data(doctorResult.stdout.utf8)
+        )
+        XCTAssertEqual(report.schemaVersion, 1)
+        XCTAssertEqual(report.normalGDB.path, normalGDB.path)
+        XCTAssertEqual(report.simulatorGDB.path, simulatorGDB.path)
+
+        for profile in ProfileID.allCases {
+            let planResult = try runCLI(
+                [
+                    "debug", "firmware.elf",
+                    "--profile", profile.rawValue,
+                    "--dry-run",
+                    "--format", "json"
+                ],
+                in: directory.url,
+                environment: environment
+            )
+            XCTAssertEqual(planResult.status, 0, "\(profile): \(planResult.stderr)")
+            let plan = try JSONDecoder().decode(
+                DebugLaunchPlan.self,
+                from: Data(planResult.stdout.utf8)
+            )
+            let selection = try XCTUnwrap(report.debugSelection(for: profile))
+            XCTAssertTrue(selection.available)
+            XCTAssertEqual(selection.backend, plan.backend)
+            XCTAssertEqual(selection.gdbExecutable, plan.gdbExecutable)
+            XCTAssertEqual(selection.warnings, plan.warnings)
+        }
     }
 
     func testDebugDryRunJSONUsesConfiguredELFAndGDBSimulatorPlan() throws {
@@ -444,7 +507,110 @@ final class CLIIntegrationTests: XCTestCase {
         XCTAssertFalse(result.stdout.contains("tbreak"))
     }
 
-    func testRunMapsInteractiveGDBInterruptToExit130JSONEnvelope() throws {
+    func testActualARM926FallbackPrintsWarningBeforeLaunchingGDB() throws {
+        let directory = try CLITemporaryDirectory()
+        let tools = directory.url.appendingPathComponent("warning-tools", isDirectory: true)
+        let marker = directory.url.appendingPathComponent("gdb-launched")
+        try writeExecutable(
+            """
+            #!/bin/sh
+            case " $* " in
+                *" target sim "*) exit 1 ;;
+            esac
+            printf 'GDB 已启动\n' >&2
+            : > "$YAGARTO_GDB_LAUNCH_MARKER"
+            exit 0
+            """,
+            to: tools.appendingPathComponent("arm-none-eabi-gdb")
+        )
+        try writeExecutable(
+            "#!/bin/sh\nexit 0\n",
+            to: tools.appendingPathComponent("qemu-system-arm")
+        )
+
+        let result = try runCLI(
+            ["run", "firmware.elf", "--profile", "arm7tdmi", "--format", "text"],
+            in: directory.url,
+            environment: [
+                "PATH": "\(tools.path):/usr/bin:/bin",
+                "YAGARTO_GDB_LAUNCH_MARKER": marker.path
+            ]
+        )
+
+        XCTAssertEqual(result.status, 0, result.stderr)
+        XCTAssertEqual(result.stdout, "")
+        XCTAssertTrue(result.stderr.contains("警告"))
+        XCTAssertTrue(result.stderr.contains("ARM926"))
+        XCTAssertTrue(result.stderr.contains("非精确模型"))
+        XCTAssertLessThan(
+            try XCTUnwrap(result.stderr.range(of: "警告")).lowerBound,
+            try XCTUnwrap(result.stderr.range(of: "GDB 已启动")).lowerBound
+        )
+        XCTAssertTrue(FileManager.default.fileExists(atPath: marker.path))
+    }
+
+    func testARM926FallbackDryRunJSONCarriesWarningWithoutMixingStderr() throws {
+        let directory = try CLITemporaryDirectory()
+        let tools = directory.url.appendingPathComponent("warning-json-tools", isDirectory: true)
+        try writeExecutable(
+            "#!/bin/sh\nexit 1\n",
+            to: tools.appendingPathComponent("arm-none-eabi-gdb")
+        )
+        try writeExecutable(
+            "#!/bin/sh\nexit 0\n",
+            to: tools.appendingPathComponent("qemu-system-arm")
+        )
+
+        let result = try runCLI(
+            [
+                "debug", "firmware.elf",
+                "--profile", "arm7tdmi",
+                "--dry-run",
+                "--format", "json"
+            ],
+            in: directory.url,
+            environment: ["PATH": "\(tools.path):/usr/bin:/bin"]
+        )
+
+        XCTAssertEqual(result.status, 0, result.stderr)
+        XCTAssertEqual(result.stderr, "")
+        let plan = try JSONDecoder().decode(DebugLaunchPlan.self, from: Data(result.stdout.utf8))
+        XCTAssertEqual(plan.backend, .qemuARM926Compatible)
+        XCTAssertEqual(plan.warnings, ["ARM926 是 ARM7TDMI 兼容超集，非精确模型"])
+    }
+
+    func testInteractiveRunAndDebugRejectJSONBeforeLaunchingGDB() throws {
+        for command in ["run", "debug"] {
+            let directory = try CLITemporaryDirectory()
+            let tools = directory.url.appendingPathComponent("json-tools", isDirectory: true)
+            let marker = directory.url.appendingPathComponent("gdb-launched")
+            try writeExecutable(
+                "#!/bin/sh\n: > \"$YAGARTO_GDB_LAUNCH_MARKER\"\nexit 0\n",
+                to: tools.appendingPathComponent("arm-none-eabi-gdb")
+            )
+            try writeExecutable(
+                "#!/bin/sh\nexit 0\n",
+                to: tools.appendingPathComponent("qemu-system-arm")
+            )
+
+            let result = try runCLI(
+                [command, "firmware.elf", "--profile", "cortex-m4", "--format", "json"],
+                in: directory.url,
+                environment: [
+                    "PATH": "\(tools.path):/usr/bin:/bin",
+                    "YAGARTO_GDB_LAUNCH_MARKER": marker.path
+                ]
+            )
+
+            XCTAssertEqual(result.status, YagartoExitCode.usage.rawValue, command)
+            XCTAssertEqual(result.stdout, "")
+            let payload = try decodeErrorEnvelope(result.stderr)
+            XCTAssertEqual(payload.error.code, "usage.interactive_json_unsupported")
+            XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
+        }
+    }
+
+    func testRunMapsInteractiveGDBInterruptToExit130TextDiagnostic() throws {
         let directory = try CLITemporaryDirectory()
         let tools = directory.url.appendingPathComponent("interrupt-tools", isDirectory: true)
         try writeExecutable(
@@ -460,7 +626,7 @@ final class CLIIntegrationTests: XCTestCase {
             [
                 "run", "firmware.elf",
                 "--profile", "cortex-m4",
-                "--format", "json"
+                "--format", "text"
             ],
             in: directory.url,
             environment: ["PATH": "\(tools.path):/usr/bin:/bin"]
@@ -468,9 +634,47 @@ final class CLIIntegrationTests: XCTestCase {
 
         XCTAssertEqual(result.status, YagartoExitCode.interrupted.rawValue)
         XCTAssertEqual(result.stdout, "")
-        let payload = try decodeErrorEnvelope(result.stderr)
-        XCTAssertEqual(payload.exitCode, YagartoExitCode.interrupted.rawValue)
-        XCTAssertEqual(payload.error.code, "process.interrupted")
+        XCTAssertTrue(result.stderr.contains("process.interrupted"))
+        XCTAssertTrue(result.stderr.contains("Ctrl-C"))
+    }
+
+    func testRunForwardsParentSIGINTAndReapsChildProcessGroup() throws {
+        let directory = try CLITemporaryDirectory()
+        let tools = directory.url.appendingPathComponent("signal-tools", isDirectory: true)
+        let pidFile = directory.url.appendingPathComponent("descendant-pids.txt")
+        try writeExecutable(
+            """
+            #!/bin/sh
+            cleanup_signal() {
+                exit 130
+            }
+            trap cleanup_signal INT TERM HUP
+            /bin/sleep 30 &
+            grandchild=$!
+            printf '%s %s\n' "$$" "$grandchild" > "$YAGARTO_SIGNAL_PID_FILE"
+            wait "$grandchild"
+            """,
+            to: tools.appendingPathComponent("arm-none-eabi-gdb")
+        )
+        try writeExecutable(
+            "#!/bin/sh\nexit 0\n",
+            to: tools.appendingPathComponent("qemu-system-arm")
+        )
+
+        let result = try runCLIAndSendSignal(
+            ["run", "firmware.elf", "--profile", "cortex-m4", "--format", "text"],
+            in: directory.url,
+            environment: [
+                "PATH": "\(tools.path):/usr/bin:/bin",
+                "YAGARTO_SIGNAL_PID_FILE": pidFile.path
+            ],
+            signal: SIGINT,
+            pidFile: pidFile
+        )
+
+        XCTAssertEqual(result.status, YagartoExitCode.interrupted.rawValue, result.stderr)
+        let remaining = result.descendantPIDs.filter { !processHasExited($0) }
+        XCTAssertTrue(remaining.isEmpty, "信号后仍存在 PID：\(remaining)")
     }
 
     func testDebugLaunchesSelectedGDBAndReturnsItsSuccessfulStatus() throws {
@@ -493,7 +697,7 @@ final class CLIIntegrationTests: XCTestCase {
         XCTAssertEqual(result.stderr, "")
     }
 
-    func testRunMapsNonzeroGDBStatusToControlledFailureEnvelope() throws {
+    func testRunMapsNonzeroGDBStatusToControlledTextFailure() throws {
         let directory = try CLITemporaryDirectory()
         let tools = directory.url.appendingPathComponent("failed-tools", isDirectory: true)
         try writeExecutable("#!/bin/sh\nexit 7\n", to: tools.appendingPathComponent("arm-none-eabi-gdb"))
@@ -503,16 +707,15 @@ final class CLIIntegrationTests: XCTestCase {
             [
                 "run", "firmware.elf",
                 "--profile", "cortex-m4",
-                "--format", "json"
+                "--format", "text"
             ],
             in: directory.url,
             environment: ["PATH": "\(tools.path):/usr/bin:/bin"]
         )
 
         XCTAssertEqual(result.status, YagartoExitCode.buildFailure.rawValue)
-        let payload = try decodeErrorEnvelope(result.stderr)
-        XCTAssertEqual(payload.error.code, "build.step_failed")
-        XCTAssertTrue(payload.error.message.contains("7"))
+        XCTAssertTrue(result.stderr.contains("build.step_failed"))
+        XCTAssertTrue(result.stderr.contains("7"))
     }
 
     func testFlashRequiresExplicitYesBeforeResolvingToolsOrHardware() throws {
@@ -532,6 +735,66 @@ final class CLIIntegrationTests: XCTestCase {
         let payload = try decodeErrorEnvelope(result.stderr)
         XCTAssertEqual(payload.error.code, "usage.confirmation_required")
         XCTAssertTrue(payload.error.message.contains("--yes"))
+    }
+
+    func testFlashDryRunTextAndJSONNeedNoConfirmationAndDoNotProbeOrProgram() throws {
+        let directory = try CLITemporaryDirectory()
+        let prefix = directory.url.appendingPathComponent("dry-run-openocd", isDirectory: true)
+        let openOCD = prefix.appendingPathComponent("bin/openocd")
+        let marker = directory.url.appendingPathComponent("openocd-executed")
+        try writeExecutable(
+            "#!/bin/sh\n: > \"$YAGARTO_OPENOCD_MARKER\"\nexit 0\n",
+            to: openOCD
+        )
+        let board = prefix.appendingPathComponent(
+            "share/openocd/scripts/board/stm32f4discovery.cfg"
+        )
+        try FileManager.default.createDirectory(
+            at: board.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try Data("# fake board config\n".utf8).write(to: board)
+
+        let result = try runCLI(
+            [
+                "flash", "固件 文件.elf",
+                "--profile", "stm32f4-discovery",
+                "--dry-run",
+                "--format", "json"
+            ],
+            in: directory.url,
+            environment: [
+                "PATH": "\(prefix.appendingPathComponent("bin").path):/usr/bin:/bin",
+                "YAGARTO_OPENOCD_MARKER": marker.path
+            ]
+        )
+
+        XCTAssertEqual(result.status, 0, result.stderr)
+        XCTAssertEqual(result.stderr, "")
+        let plan = try JSONDecoder().decode(FlashPlan.self, from: Data(result.stdout.utf8))
+        XCTAssertEqual(plan.profile, .stm32f4Discovery)
+        XCTAssertTrue(plan.elf.hasSuffix("/固件 文件.elf"))
+        XCTAssertEqual(plan.command.executable, openOCD.path)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
+
+        let textResult = try runCLI(
+            [
+                "flash", "固件 文件.elf",
+                "--profile", "stm32f4-discovery",
+                "--dry-run",
+                "--format", "text"
+            ],
+            in: directory.url,
+            environment: [
+                "PATH": "\(prefix.appendingPathComponent("bin").path):/usr/bin:/bin",
+                "YAGARTO_OPENOCD_MARKER": marker.path
+            ]
+        )
+        XCTAssertEqual(textResult.status, 0, textResult.stderr)
+        XCTAssertTrue(textResult.stdout.contains("profile：stm32f4-discovery"))
+        XCTAssertTrue(textResult.stdout.contains("OpenOCD：\(openOCD.path)"))
+        XCTAssertTrue(textResult.stdout.contains("program"))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: marker.path))
     }
 
     func testFlashRejectsNonDiscoveryProfileAsUsageBeforeToolLookup() throws {
@@ -786,6 +1049,13 @@ private struct CLIResult {
     let stderr: String
 }
 
+private struct SignalledCLIResult {
+    let status: Int32
+    let stdout: String
+    let stderr: String
+    let descendantPIDs: [pid_t]
+}
+
 private struct CLIErrorEnvelope: Decodable {
     struct ErrorBody: Decodable {
         let code: String
@@ -866,6 +1136,98 @@ private func runCapturedProcess(
         stdout: String(decoding: stdout, as: UTF8.self),
         stderr: String(decoding: stderr, as: UTF8.self)
     )
+}
+
+private func runCLIAndSendSignal(
+    _ arguments: [String],
+    in directory: URL,
+    environment: [String: String],
+    signal: Int32,
+    pidFile: URL
+) throws -> SignalledCLIResult {
+    let captureDirectory = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(at: captureDirectory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: captureDirectory) }
+    let stdoutURL = captureDirectory.appendingPathComponent("stdout")
+    let stderrURL = captureDirectory.appendingPathComponent("stderr")
+    FileManager.default.createFile(atPath: stdoutURL.path, contents: nil)
+    FileManager.default.createFile(atPath: stderrURL.path, contents: nil)
+    let stdoutHandle = try FileHandle(forWritingTo: stdoutURL)
+    let stderrHandle = try FileHandle(forWritingTo: stderrURL)
+
+    let process = Process()
+    process.executableURL = cliExecutableURL()
+    process.arguments = arguments
+    process.currentDirectoryURL = directory
+    process.environment = ProcessInfo.processInfo.environment.merging(
+        environment,
+        uniquingKeysWith: { _, override in override }
+    )
+    process.standardOutput = stdoutHandle
+    process.standardError = stderrHandle
+    var descendants: [pid_t] = []
+    defer {
+        if process.isRunning {
+            Darwin.kill(process.processIdentifier, SIGKILL)
+            process.waitUntilExit()
+        }
+        for pid in descendants where !processHasExited(pid) {
+            Darwin.kill(pid, SIGKILL)
+        }
+        try? stdoutHandle.close()
+        try? stderrHandle.close()
+    }
+
+    try process.run()
+    guard waitUntil(timeout: 5, condition: {
+        FileManager.default.fileExists(atPath: pidFile.path)
+    }) else {
+        throw YagartoError.internalFailure("等待受控子进程 PID 超时。")
+    }
+    let pidText = try String(contentsOf: pidFile, encoding: .utf8)
+    descendants = pidText.split(whereSeparator: \.isWhitespace).compactMap {
+        pid_t($0)
+    }
+    guard descendants.count == 2 else {
+        throw YagartoError.internalFailure("受控子进程未记录完整 PID。")
+    }
+
+    XCTAssertEqual(Darwin.kill(process.processIdentifier, signal), 0)
+    guard waitUntil(timeout: 5, condition: { !process.isRunning }) else {
+        throw YagartoError.internalFailure("CLI 收到信号后未及时退出。")
+    }
+    process.waitUntilExit()
+    _ = waitUntil(timeout: 2, condition: {
+        descendants.allSatisfy(processHasExited)
+    })
+    try stdoutHandle.close()
+    try stderrHandle.close()
+    return SignalledCLIResult(
+        status: process.terminationStatus,
+        stdout: String(decoding: try Data(contentsOf: stdoutURL), as: UTF8.self),
+        stderr: String(decoding: try Data(contentsOf: stderrURL), as: UTF8.self),
+        descendantPIDs: descendants
+    )
+}
+
+private func waitUntil(
+    timeout: TimeInterval,
+    condition: () -> Bool
+) -> Bool {
+    let deadline = Date().addingTimeInterval(timeout)
+    while Date() < deadline {
+        if condition() {
+            return true
+        }
+        Thread.sleep(forTimeInterval: 0.02)
+    }
+    return condition()
+}
+
+private func processHasExited(_ pid: pid_t) -> Bool {
+    errno = 0
+    return Darwin.kill(pid, 0) == -1 && errno == ESRCH
 }
 
 private func writeExecutable(_ contents: String, to url: URL) throws {

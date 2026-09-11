@@ -93,12 +93,33 @@ public struct OpenOCDHardwareProbe: HardwareProbing {
             "unable to find any matching cmsis-dap device",
             "could not find or open device"
         ]
+        let actionableErrorMarkers = [
+            "permission",
+            "libusb_error_access",
+            "access",
+            "busy",
+            "configuration",
+            "config",
+            "syntax error",
+            "driver"
+        ]
+        let contradictoryErrorLine = normalized
+            .split(whereSeparator: \Character.isNewline)
+            .contains { line in
+                let isError = line.contains("error:") || line.contains("fatal:")
+                let isOnlyNoDevice = noDeviceMarkers.contains { line.contains($0) }
+                return isError && !isOnlyNoDevice
+            }
+        if actionableErrorMarkers.contains(where: { normalized.contains($0) })
+            || contradictoryErrorLine {
+            throw YagartoError.buildStepFailed(
+                openOCDExecutable,
+                result.exitStatus,
+                output
+            )
+        }
         let explicitlyMissing = noDeviceMarkers.contains { normalized.contains($0) }
-        let genericOpenFailure = normalized.contains("open failed")
-            && !normalized.contains("permission")
-            && !normalized.contains("access")
-            && !normalized.contains("busy")
-        if explicitlyMissing || genericOpenFailure {
+        if explicitlyMissing {
             return false
         }
         throw YagartoError.buildStepFailed(

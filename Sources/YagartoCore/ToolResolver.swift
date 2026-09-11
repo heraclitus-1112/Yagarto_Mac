@@ -45,13 +45,60 @@ public struct DoctorEntry: Codable, Equatable, Sendable {
     }
 }
 
+public struct DoctorGDBStatus: Codable, Equatable, Sendable {
+    public let path: String?
+    public let executablePresent: Bool
+    public let targetSimCapable: Bool
+
+    public init(path: String?, targetSimCapable: Bool) {
+        self.path = path
+        self.executablePresent = path != nil
+        self.targetSimCapable = targetSimCapable
+    }
+}
+
+public struct DoctorDebugSelection: Codable, Equatable, Sendable {
+    public let profile: ProfileID
+    public let available: Bool
+    public let backend: DebugBackend?
+    public let gdbExecutable: String?
+    public let warnings: [String]
+
+    public init(
+        profile: ProfileID,
+        backend: DebugBackend?,
+        gdbExecutable: String?,
+        warnings: [String]
+    ) {
+        self.profile = profile
+        self.available = backend != nil && gdbExecutable != nil
+        self.backend = backend
+        self.gdbExecutable = gdbExecutable
+        self.warnings = warnings
+    }
+}
+
 public struct DoctorReport: Codable, Equatable, Sendable {
+    public let schemaVersion: Int
     public let entries: [DoctorEntry]
+    public let normalGDB: DoctorGDBStatus
+    public let simulatorGDB: DoctorGDBStatus
+    public let debugSelections: [DoctorDebugSelection]
     public let stm32f4BoardConfig: String?
     public let stm32f4BoardConfigAvailable: Bool
 
-    public init(entries: [DoctorEntry], stm32f4BoardConfig: String? = nil) {
+    public init(
+        entries: [DoctorEntry],
+        normalGDB: DoctorGDBStatus,
+        simulatorGDB: DoctorGDBStatus,
+        debugSelections: [DoctorDebugSelection],
+        stm32f4BoardConfig: String? = nil
+    ) {
+        self.schemaVersion = 1
         self.entries = entries
+        self.normalGDB = normalGDB
+        self.simulatorGDB = simulatorGDB
+        self.debugSelections = debugSelections
         self.stm32f4BoardConfig = stm32f4BoardConfig
         self.stm32f4BoardConfigAvailable = stm32f4BoardConfig != nil
     }
@@ -62,6 +109,10 @@ public struct DoctorReport: Codable, Equatable, Sendable {
 
     public func entry(for tool: ToolIdentifier) -> DoctorEntry? {
         entries.first { $0.tool == tool }
+    }
+
+    public func debugSelection(for profile: ProfileID) -> DoctorDebugSelection? {
+        debugSelections.first { $0.profile == profile }
     }
 }
 
@@ -107,28 +158,80 @@ public struct ToolResolver {
     public func doctor(
         overrides: [ToolIdentifier: String] = [:]
     ) -> DoctorReport {
-        var paths = Dictionary(uniqueKeysWithValues: ToolIdentifier.allCases.map { tool in
+        let paths = Dictionary(uniqueKeysWithValues: ToolIdentifier.allCases.map { tool in
             (tool, resolvedPath(for: tool, overrides: overrides))
         })
+        let normalGDB = paths[.gdb] ?? nil
+        let qemu = paths[.qemuSystemARM] ?? nil
+        let openOCD = paths[.openOCD] ?? nil
+        let normalGDBTargetSimCapable = normalGDB.map(isTargetSimCapable) ?? false
         let simulator = resolvedGDBSimulator(overrides: overrides)
-        if let simulator {
-            paths[.gdb] = simulator
-        }
+        let simulatorCandidate = simulator
+            ?? gdbSimulatorCandidates(overrides: overrides).first(where: fileExists)
         let entries = ToolIdentifier.allCases.map { tool in
             let path = paths[tool] ?? nil
             return DoctorEntry(
                 tool: tool,
                 required: tool.isRequired,
                 path: path,
-                targetSimCapable: tool == .gdb
-                    && simulator != nil
-                    && path == simulator
+                targetSimCapable: tool == .gdb && normalGDBTargetSimCapable
             )
         }
-        let boardConfig = (paths[.openOCD] ?? nil).flatMap { openOCD in
+        let boardConfig = openOCD.flatMap { openOCD in
             try? resolveSTM32F4BoardConfig(openOCDPath: openOCD)
         }
-        return DoctorReport(entries: entries, stm32f4BoardConfig: boardConfig)
+        var debugSelections: [DoctorDebugSelection] = []
+        if let simulator {
+            debugSelections.append(DoctorDebugSelection(
+                profile: .arm7tdmi,
+                backend: .gdbSimulator,
+                gdbExecutable: simulator,
+                warnings: []
+            ))
+        } else if let normalGDB, qemu != nil {
+            debugSelections.append(DoctorDebugSelection(
+                profile: .arm7tdmi,
+                backend: .qemuARM926Compatible,
+                gdbExecutable: normalGDB,
+                warnings: ["ARM926 是 ARM7TDMI 兼容超集，非精确模型"]
+            ))
+        } else {
+            debugSelections.append(DoctorDebugSelection(
+                profile: .arm7tdmi,
+                backend: nil,
+                gdbExecutable: nil,
+                warnings: []
+            ))
+        }
+        debugSelections.append(DoctorDebugSelection(
+            profile: .cortexM4,
+            backend: normalGDB != nil && qemu != nil
+                ? .qemuMPS2AN386
+                : nil,
+            gdbExecutable: qemu != nil ? normalGDB : nil,
+            warnings: []
+        ))
+        debugSelections.append(DoctorDebugSelection(
+            profile: .stm32f4Discovery,
+            backend: normalGDB != nil && openOCD != nil && boardConfig != nil
+                ? .openOCDSTM32F4Discovery
+                : nil,
+            gdbExecutable: openOCD != nil && boardConfig != nil ? normalGDB : nil,
+            warnings: []
+        ))
+        return DoctorReport(
+            entries: entries,
+            normalGDB: DoctorGDBStatus(
+                path: normalGDB,
+                targetSimCapable: normalGDBTargetSimCapable
+            ),
+            simulatorGDB: DoctorGDBStatus(
+                path: simulatorCandidate,
+                targetSimCapable: simulator != nil
+            ),
+            debugSelections: debugSelections,
+            stm32f4BoardConfig: boardConfig
+        )
     }
 
     public func resolveGDBSimulator(
@@ -143,6 +246,17 @@ public struct ToolResolver {
     private func resolvedGDBSimulator(
         overrides: [ToolIdentifier: String]
     ) -> String? {
+        for candidate in gdbSimulatorCandidates(overrides: overrides) {
+            if fileExists(candidate), isTargetSimCapable(candidate) {
+                return candidate
+            }
+        }
+        return nil
+    }
+
+    private func gdbSimulatorCandidates(
+        overrides: [ToolIdentifier: String]
+    ) -> [String] {
         var candidates: [String] = []
         if let environmentOverride = environment["YAGARTO_MAC_GDB_SIM"],
            !environmentOverride.isEmpty {
@@ -156,12 +270,9 @@ public struct ToolResolver {
         }
 
         var seen = Set<String>()
-        for candidate in candidates where seen.insert(candidate).inserted {
-            if fileExists(candidate), isTargetSimCapable(candidate) {
-                return candidate
-            }
+        return candidates.filter { candidate in
+            seen.insert(candidate).inserted
         }
-        return nil
     }
 
     public func resolveSTM32F4BoardConfig(openOCDPath: String) throws -> String {

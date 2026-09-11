@@ -150,7 +150,9 @@ private struct CLIUsageDiagnostic {
             return
         }
 
-        if supplied.first == "flash", !supplied.contains("--yes") {
+        if supplied.first == "flash",
+           !supplied.contains("--yes"),
+           !supplied.contains("--dry-run") {
             diagnostic = Diagnostic(
                 code: "usage.confirmation_required",
                 message: "flash 会写入真实硬件；请确认目标后显式提供 --yes。",
@@ -195,7 +197,7 @@ private struct CLIUsageDiagnostic {
         case "run", "debug":
             return common.union(["--profile", "--dry-run"])
         case "flash":
-            return common.union(["--profile", "--yes"])
+            return common.union(["--profile", "--yes", "--dry-run"])
         case "profile":
             return common
         default:

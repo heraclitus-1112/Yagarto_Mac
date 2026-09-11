@@ -27,6 +27,7 @@ public enum YagartoError: Error, Equatable, Sendable {
     case missingResource(String)
     case processIOFailed(String, String)
     case processLaunchFailed(String, String)
+    case interactiveJSONUnsupported
     case interrupted
     case buildStepFailed(String, Int32, String)
     case cannotWriteOutput(String, String)
@@ -91,6 +92,8 @@ extension YagartoError: LocalizedError {
             return "process.io"
         case .processLaunchFailed:
             return "process.launch_failed"
+        case .interactiveJSONUnsupported:
+            return "usage.interactive_json_unsupported"
         case .interrupted:
             return "process.interrupted"
         case .buildStepFailed:
@@ -155,6 +158,8 @@ extension YagartoError: LocalizedError {
             return "无法创建或读取进程捕获文件。请检查临时目录权限和可用空间。"
         case .processLaunchFailed(let executable, _):
             return "无法启动“\(executable)”。请检查工具路径和执行权限。"
+        case .interactiveJSONUnsupported:
+            return "实际 run/debug 是交互式会话，不支持 --format json；请改用 --format text，或添加 --dry-run 输出 JSON 启动计划。"
         case .interrupted:
             return "操作已由 Ctrl-C 中断。"
         case .buildStepFailed(let executable, let status, _):
@@ -199,7 +204,7 @@ extension YagartoError: LocalizedError {
 
     public var exitCode: YagartoExitCode {
         switch self {
-        case .flashUnsupportedProfile:
+        case .flashUnsupportedProfile, .interactiveJSONUnsupported:
             return .usage
         case .toolNotFound, .debugBackendUnavailable:
             return .missingTool
