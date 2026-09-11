@@ -35,7 +35,7 @@ struct WorkbenchView: View {
             sourceLocationText: sourceLocationText,
             operationErrorText: model.errorMessage.map { "⚠︎ \($0)" }
         )
-        .frame(minHeight: 30)
+        .frame(height: StatusStackView.preferredHeight)
         .background(.bar)
     }
 

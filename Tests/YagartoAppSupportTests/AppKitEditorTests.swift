@@ -7,6 +7,84 @@ import XCTest
 
 @MainActor
 final class AppKitEditorTests: XCTestCase {
+    func testStatusStripStaysThirtyPointsHighInRealHostingWindow() throws {
+        let longError = String(repeating: "工具链缺失，请检查配置与路径。", count: 20)
+        let hosting = NSHostingView(rootView: VStack(spacing: 0) {
+            AccessibleStatusStrip(
+                stateText: "就绪",
+                currentLineText: "→ 当前执行第 2 行",
+                sourceLocationText: "已定位到第 2 行",
+                operationErrorText: "⚠︎ \(longError)"
+            )
+            .frame(minHeight: 30)
+            Divider()
+            Color.clear
+        })
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 1_000, height: 640),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.contentView = hosting
+        window.makeKeyAndOrderFront(nil)
+        defer {
+            window.orderOut(nil)
+            window.contentView = nil
+        }
+        hosting.layoutSubtreeIfNeeded()
+        RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
+
+        let statusStack = try XCTUnwrap(findStatusStack(in: hosting))
+
+        XCTAssertEqual(
+            statusStack.frame.height,
+            30,
+            accuracy: 1,
+            "frame=\(statusStack.frame.height) intrinsic=\(statusStack.intrinsicContentSize.height) "
+                + "fitting=\(statusStack.fittingSize.height) "
+                + "hugging=\(statusStack.contentHuggingPriority(for: .vertical).rawValue) "
+                + "compression=\(statusStack.contentCompressionResistancePriority(for: .vertical).rawValue)"
+        )
+        XCTAssertEqual(statusStack.intrinsicContentSize.height, 30)
+        XCTAssertLessThanOrEqual(statusStack.fittingSize.height, 30)
+        XCTAssertEqual(statusStack.contentHuggingPriority(for: .vertical), .required)
+        XCTAssertEqual(statusStack.contentCompressionResistancePriority(for: .vertical), .required)
+    }
+
+    func testLongStatusErrorIsOneVisualLineButKeepsFullAccessibilityValue() throws {
+        let longError = String(repeating: "无法找到调试工具；", count: 40)
+        let hosting = NSHostingView(rootView: AccessibleStatusStrip(
+            stateText: "就绪",
+            currentLineText: nil,
+            sourceLocationText: nil,
+            operationErrorText: longError
+        ))
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 600, height: 80),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.contentView = hosting
+        defer { window.contentView = nil }
+        hosting.layoutSubtreeIfNeeded()
+
+        let statusStack = try XCTUnwrap(findStatusStack(in: hosting))
+        let errorItem = try XCTUnwrap(
+            statusStack.accessibilityChildren()?
+                .compactMap { $0 as? NSView }
+                .first { $0.accessibilityIdentifier() == AppAccessibilityIdentifier.operationError }
+        )
+        let errorTextField = try XCTUnwrap(errorItem.subviews.compactMap { $0 as? NSTextField }.first)
+
+        XCTAssertEqual(errorTextField.maximumNumberOfLines, 1)
+        XCTAssertEqual(errorTextField.lineBreakMode, .byTruncatingTail)
+        XCTAssertEqual(errorItem.accessibilityValue() as? String, longError)
+    }
+
     func testStatusLabelsRemainIndependentAccessibilityElementsInHostingHierarchy() throws {
         let identifiers = [
             AppAccessibilityIdentifier.debuggerState,
