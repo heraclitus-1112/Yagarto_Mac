@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 set -eu
+umask 077
 
 GDB_VERSION=17.2
 GDB_ARCHIVE="gdb-${GDB_VERSION}.tar.xz"
@@ -75,6 +76,9 @@ done
 WORK_DIRECTORY=
 ACTIVE_PID=
 WATCHDOG_PID=
+LAUNCHING=
+PENDING_SIGNAL_NUMBER=
+PENDING_SIGNAL_NAME=
 RECEIVED_SIGNAL_NUMBER=
 RECEIVED_SIGNAL_NAME=
 SUPERVISED_TIMED_OUT=
@@ -138,6 +142,11 @@ record_signal() {
     fi
     if [ -n "$ACTIVE_PID" ]; then
         kill -"$signal_name" -- "-${ACTIVE_PID}" 2>/dev/null || true
+    elif [ -n "$LAUNCHING" ]; then
+        if [ -z "$PENDING_SIGNAL_NUMBER" ]; then
+            PENDING_SIGNAL_NAME=$signal_name
+            PENDING_SIGNAL_NUMBER=$signal_number
+        fi
     else
         trap '' HUP INT TERM
         exit $((128 + signal_number))
@@ -156,19 +165,55 @@ trap 'record_signal INT 2' INT
 trap 'record_signal TERM 15' TERM
 trap 'record_timeout' ALRM
 
+exercise_launch_gap_test_hook() {
+    command_name=$1
+    requested_target=${YAGARTO_BOOTSTRAP_TEST_LAUNCH_TARGET:-}
+    requested_signal=${YAGARTO_BOOTSTRAP_TEST_SIGNAL_DURING_LAUNCH:-}
+    ready_file=${YAGARTO_BOOTSTRAP_TEST_LAUNCH_READY_FILE:-}
+    if [ -z "$requested_target" ] || [ "$command_name" != "$requested_target" ]; then
+        return 0
+    fi
+    case "$requested_signal" in
+        HUP|INT|TERM) ;;
+        *) return 0 ;;
+    esac
+    if [ -n "$ready_file" ]; then
+        hook_iteration=0
+        while [ ! -f "$ready_file" ] && [ "$hook_iteration" -lt 200 ]; do
+            /bin/sleep 0.01
+            hook_iteration=$((hook_iteration + 1))
+        done
+    fi
+    kill -"$requested_signal" "$SUPERVISOR_PID"
+}
+
 run_supervised_with_timeout() {
     supervised_timeout=$1
     shift
     RECEIVED_SIGNAL_NUMBER=
     RECEIVED_SIGNAL_NAME=
     SUPERVISED_TIMED_OUT=
+    PENDING_SIGNAL_NUMBER=
+    PENDING_SIGNAL_NAME=
 
     # POSIX monitor mode assigns this background job its own process group.
     # Turn it off immediately so the non-interactive shell stays quiet.
+    LAUNCHING=1
     set -m
     "$@" &
-    ACTIVE_PID=$!
+    launched_pid=$!
+    exercise_launch_gap_test_hook "$1"
+    ACTIVE_PID=$launched_pid
+    LAUNCHING=
     set +m
+
+    if [ -n "$PENDING_SIGNAL_NUMBER" ]; then
+        kill -"$PENDING_SIGNAL_NAME" -- "-${ACTIVE_PID}" 2>/dev/null || true
+        trap '' HUP INT TERM
+        reap_active_process_group
+        ACTIVE_PID=
+        exit $((128 + PENDING_SIGNAL_NUMBER))
+    fi
 
     if [ "$supervised_timeout" -gt 0 ]; then
         set -m
@@ -434,22 +479,29 @@ verify_archive() {
     fi
 }
 
+if [ -z "$WORK_DIRECTORY" ]; then
+    WORK_DIRECTORY=$(mktemp -d "${TMPDIR:-/tmp}/yagarto-gdb.XXXXXX")
+fi
+
 if [ -n "$LOCAL_ARCHIVE" ]; then
-    ARCHIVE_PATH=$LOCAL_ARCHIVE
+    ARCHIVE_PATH="${WORK_DIRECTORY}/${GDB_ARCHIVE}.verified-snapshot"
+    if ! run_supervised cp "$LOCAL_ARCHIVE" "$ARCHIVE_PATH"; then
+        echo "无法创建本地源码归档快照。" >&2
+        exit 1
+    fi
+    if [ ! -f "$ARCHIVE_PATH" ] || [ -L "$ARCHIVE_PATH" ]; then
+        echo "本地源码归档快照不是安全的普通文件。" >&2
+        exit 1
+    fi
 else
     command -v curl >/dev/null 2>&1 || {
         echo "缺少 curl，无法下载固定 GDB 源码归档。" >&2
         exit 1
     }
-    WORK_DIRECTORY=$(mktemp -d "${TMPDIR:-/tmp}/yagarto-gdb.XXXXXX")
     ARCHIVE_PATH="${WORK_DIRECTORY}/${GDB_ARCHIVE}"
     echo "下载 ${GDB_URL}"
     run_supervised curl --fail --location --proto '=https' --tlsv1.2 \
         --output "$ARCHIVE_PATH" "$GDB_URL"
-fi
-
-if [ -z "$WORK_DIRECTORY" ]; then
-    WORK_DIRECTORY=$(mktemp -d "${TMPDIR:-/tmp}/yagarto-gdb.XXXXXX")
 fi
 verify_archive "$ARCHIVE_PATH"
 

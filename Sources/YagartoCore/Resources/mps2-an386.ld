@@ -21,14 +21,6 @@ SECTIONS
         *(.rodata*)
     } > CODE
 
-    .data :
-    {
-        __data_start__ = .;
-        *(.data*)
-        __data_end__ = .;
-    } > RAM AT > CODE
-    __data_load__ = LOADADDR(.data);
-
     .bss (NOLOAD) :
     {
         __bss_start__ = .;
@@ -41,4 +33,13 @@ SECTIONS
     {
         *(.noinit*)
     } > RAM
+
+    .data :
+    {
+        __data_start__ = .;
+        *(.data*)
+        INPUT_SECTION_FLAGS (SHF_ALLOC & SHF_WRITE) *(*)
+        __data_end__ = .;
+    } > RAM AT > CODE
+    __data_load__ = LOADADDR(.data);
 }

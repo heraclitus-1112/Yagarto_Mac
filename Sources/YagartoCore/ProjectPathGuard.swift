@@ -61,6 +61,18 @@ enum ProjectPathGuard {
         }
     }
 
+    static func validateSourceOutsideOutput(
+        _ source: URL,
+        outputDirectory: URL,
+        configuredPath: String
+    ) throws {
+        let candidate = source.standardizedFileURL
+        let output = outputDirectory.standardizedFileURL
+        guard candidate != output, !contains(candidate, within: output) else {
+            throw YagartoError.sourceInsideBuildOutput(configuredPath)
+        }
+    }
+
     static func createOutputDirectory(
         projectDirectory: URL,
         outputDirectory: URL
@@ -158,6 +170,20 @@ enum ProjectPathGuard {
         projectDirectory: URL,
         outputDirectory: URL
     ) throws {
+        try requireAtomicDirectorySwapSupport(
+            projectDirectory: projectDirectory,
+            outputDirectory: outputDirectory,
+            identifier: UUID(),
+            inspectProbeRoot: { _ in }
+        )
+    }
+
+    static func requireAtomicDirectorySwapSupport(
+        projectDirectory: URL,
+        outputDirectory: URL,
+        identifier: UUID,
+        inspectProbeRoot: (URL) throws -> Void
+    ) throws {
         let output = outputDirectory.standardizedFileURL
         let parent = output.deletingLastPathComponent()
         try createOutputDirectory(
@@ -169,29 +195,41 @@ enum ProjectPathGuard {
             outputDirectory: output
         )
 
-        let identifier = UUID().uuidString.lowercased()
-        let first = parent.appendingPathComponent(
-            ".\(output.lastPathComponent)-swap-probe-a-\(identifier)",
+        let probeRoot = parent.appendingPathComponent(
+            ".\(output.lastPathComponent)-swap-probe-\(identifier.uuidString.lowercased())",
             isDirectory: true
         )
-        let second = parent.appendingPathComponent(
-            ".\(output.lastPathComponent)-swap-probe-b-\(identifier)",
-            isDirectory: true
-        )
+        let first = probeRoot.appendingPathComponent("a", isDirectory: true)
+        let second = probeRoot.appendingPathComponent("b", isDirectory: true)
+        var ownedRoot: DirectoryIdentity?
+        var ownedChildren = Set<DirectoryIdentity>()
         defer {
-            try? FileManager.default.removeItem(at: first)
-            try? FileManager.default.removeItem(at: second)
+            for child in [first, second] {
+                guard let current = try? metadata(at: child),
+                      ownedChildren.contains(DirectoryIdentity(current)),
+                      (current.st_mode & S_IFMT) == S_IFDIR else {
+                    continue
+                }
+                child.withUnsafeFileSystemRepresentation { path in
+                    if let path { _ = Darwin.rmdir(path) }
+                }
+            }
+            if let ownedRoot,
+               let current = try? metadata(at: probeRoot),
+               DirectoryIdentity(current) == ownedRoot,
+               (current.st_mode & S_IFMT) == S_IFDIR {
+                probeRoot.withUnsafeFileSystemRepresentation { path in
+                    if let path { _ = Darwin.rmdir(path) }
+                }
+            }
         }
 
-        try createPrivateDirectory(first, errorPath: output.path)
-        try createPrivateDirectory(second, errorPath: output.path)
-        guard let firstBefore = try metadata(at: first),
-              let secondBefore = try metadata(at: second) else {
-            throw YagartoError.atomicDirectorySwapUnsupported(
-                output.path,
-                "无法读取同卷探测目录。"
-            )
-        }
+        let rootBefore = try createPrivateDirectory(probeRoot, errorPath: output.path)
+        ownedRoot = DirectoryIdentity(rootBefore)
+        let firstBefore = try createPrivateDirectory(first, errorPath: output.path)
+        let secondBefore = try createPrivateDirectory(second, errorPath: output.path)
+        ownedChildren = [DirectoryIdentity(firstBefore), DirectoryIdentity(secondBefore)]
+        try inspectProbeRoot(probeRoot)
         let result = first.withUnsafeFileSystemRepresentation { firstPath in
             second.withUnsafeFileSystemRepresentation { secondPath in
                 guard let firstPath, let secondPath else { return Int32(-1) }
@@ -324,27 +362,33 @@ enum ProjectPathGuard {
     private static func createPrivateDirectory(
         _ directory: URL,
         errorPath: String
-    ) throws {
+    ) throws -> stat {
         let result = directory.withUnsafeFileSystemRepresentation { path in
             guard let path else { return Int32(-1) }
             return Darwin.mkdir(path, S_IRWXU)
         }
-        guard result == 0,
-              let created = try metadata(at: directory),
-              (created.st_mode & S_IFMT) == S_IFDIR,
-              (created.st_mode & 0o777) == S_IRWXU else {
+        guard result == 0 else {
             throw YagartoError.atomicDirectorySwapUnsupported(
                 errorPath,
                 String(cString: strerror(errno))
             )
         }
+        guard let created = try metadata(at: directory),
+              (created.st_mode & S_IFMT) == S_IFDIR,
+              (created.st_mode & 0o777) == S_IRWXU else {
+            throw YagartoError.atomicDirectorySwapUnsupported(
+                errorPath,
+                "探测目录不是权限为 0700 的普通目录。"
+            )
+        }
+        return created
     }
 
     private static func isStrictStaleBuildDirectoryName(
         _ name: String,
         profile: ProfileID
     ) -> Bool {
-        for kind in ["staging", "old"] {
+        for kind in ["staging", "old", "swap-probe"] {
             let prefix = ".\(profile.rawValue)-\(kind)-"
             guard name.hasPrefix(prefix) else { continue }
             let suffix = String(name.dropFirst(prefix.count))
@@ -434,5 +478,15 @@ enum ProjectPathGuard {
 
     private static func isSymbolicLink(_ metadata: stat) -> Bool {
         (metadata.st_mode & S_IFMT) == S_IFLNK
+    }
+
+    private struct DirectoryIdentity: Hashable {
+        let device: UInt64
+        let inode: UInt64
+
+        init(_ metadata: stat) {
+            device = UInt64(metadata.st_dev)
+            inode = UInt64(metadata.st_ino)
+        }
     }
 }

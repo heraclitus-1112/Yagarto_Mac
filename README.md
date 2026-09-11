@@ -13,7 +13,7 @@ YAGARTO Mac 是一个面向 macOS 的非官方 YAGARTO 兼容命令行层，不�
 | `cortex-m4` | QEMU `mps2-an386` | 适合运行本项目生成的 Cortex-M4 裸机 ELF；它不是 STM32F407 外设模型。 |
 | `stm32f4-discovery` | OpenOCD + `stm32f4discovery.cfg` | 面向连接到 Mac 的真实开发板和调试器，不是 STM32 外设模拟器。`run`/`debug` 只 attach/reset，不写 Flash；烧录只能通过带确认门的 `flash`。 |
 
-`cortex-m4` 和 `stm32f4-discovery` 构建会自动加入内置向量表与 `Reset_Handler`。前者链接到 MPS2 的 0 地址代码区并使用链接器定义的 `0x20400000` 初始栈顶；后者链接到 `0x08000000` Flash 并使用链接器定义的 `0x20020000` 初始栈顶。两套链接脚本都把可用 RAM 与独立 4 KiB `STACK` MEMORY region 物理拆开，因此 `.data`、`.bss`、`.noinit` 及未显式列出的 writable section 都不能侵入栈。启动代码会复制 `.data`、清零 `.bss`，再调用 `yagarto.json` 中的用户 `entry`。
+`cortex-m4` 和 `stm32f4-discovery` 构建会自动加入内置向量表与 `Reset_Handler`。前者链接到 MPS2 的 0 地址代码区并使用链接器定义的 `0x20400000` 初始栈顶；后者链接到 `0x08000000` Flash 并使用链接器定义的 `0x20020000` 初始栈顶。两套链接脚本都把可用 RAM 与独立 4 KiB `STACK` MEMORY region 物理拆开，因此 `.data`、`.bss`、`.noinit` 及未显式列出的 writable section 都不能侵入栈。链接器会把其余带初值的 writable alloc section 一并纳入连续的 `.data` 复制范围；启动代码复制该范围、清零 `.bss`、保留 `.noinit`，再调用 `yagarto.json` 中的用户 `entry`。
 
 ## 使用
 
@@ -68,7 +68,7 @@ scripts/bootstrap-gdb-sim.sh \
 export YAGARTO_MAC_GDB_SIM="$PWD/.tools/gdb-sim/bin/arm-none-eabi-gdb-sim"
 ```
 
-已自行下载固定归档时可增加 `--archive /absolute/path/gdb-17.2.tar.xz`；SHA-256 仍然必填。
+已自行下载固定归档时可增加 `--archive /absolute/path/gdb-17.2.tar.xz`；SHA-256 仍然必填。脚本会先把本地归档复制到权限为 0700 的唯一临时工作目录，之后只校验并解压这一份私有快照，因此调用者路径在校验后被替换也不会改变本次构建输入。
 
 也可对现有 GDB 单独重跑相同的完整自测（不会下载或编译 GDB）：
 

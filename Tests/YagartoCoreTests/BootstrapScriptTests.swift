@@ -75,6 +75,87 @@ final class BootstrapScriptTests: XCTestCase {
         ))
     }
 
+    func testLocalArchiveUsesOnePrivateVerifiedSnapshotForHashAndExtraction() throws {
+        for sourceKind in BootstrapArchiveSnapshotFixture.SourceKind.allCases {
+            let fixture = try BootstrapArchiveSnapshotFixture(sourceKind: sourceKind)
+            defer { fixture.cleanup() }
+
+            let result = try runBootstrap(
+                [
+                    "--prefix", fixture.installPrefix.path,
+                    "--sha256", String(repeating: "0", count: 64),
+                    "--archive", fixture.archive.path
+                ],
+                environment: fixture.environment
+            )
+
+            XCTAssertEqual(result.exitStatus, 0, "\(sourceKind): \(result.stderr)")
+            let hashedPath = try String(contentsOf: fixture.hashedPathLog, encoding: .utf8)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let extractedPath = try String(contentsOf: fixture.extractedPathLog, encoding: .utf8)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            XCTAssertEqual(hashedPath, extractedPath, "\(sourceKind)")
+            XCTAssertNotEqual(hashedPath, fixture.archive.path, "\(sourceKind)")
+            XCTAssertTrue(hashedPath.contains("yagarto-gdb."), "\(sourceKind): \(hashedPath)")
+            XCTAssertEqual(
+                try String(contentsOf: fixture.extractedContentsLog, encoding: .utf8),
+                "verified snapshot\n",
+                "\(sourceKind) 解压必须使用校验过的私有快照"
+            )
+            XCTAssertEqual(
+                try String(contentsOf: fixture.snapshotModeLog, encoding: .utf8)
+                    .trimmingCharacters(in: .whitespacesAndNewlines),
+                "700",
+                "\(sourceKind) 工作目录必须仅当前用户可访问"
+            )
+            XCTAssertEqual(
+                try String(contentsOf: fixture.archive, encoding: .utf8),
+                "replacement after hash\n",
+                "测试必须确实在 hash 后替换调用者归档"
+            )
+        }
+    }
+
+    func testLocalArchiveSnapshotCopyFailureStopsBeforeHashAndExtraction() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("bootstrap-copy-failure-\(UUID().uuidString)", isDirectory: true)
+        let tools = directory.appendingPathComponent("tools", isDirectory: true)
+        let archive = directory.appendingPathComponent("gdb-17.2.tar.xz")
+        let copyMarker = directory.appendingPathComponent("copy-called")
+        let downstreamMarker = directory.appendingPathComponent("downstream-called")
+        try FileManager.default.createDirectory(at: tools, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try Data("archive\n".utf8).write(to: archive)
+        try writeBootstrapExecutable(
+            "#!/bin/sh\n: > \"$YAGARTO_COPY_MARKER\"\nexit 37\n",
+            to: tools.appendingPathComponent("cp")
+        )
+        for tool in ["shasum", "tar"] {
+            try writeBootstrapExecutable(
+                "#!/bin/sh\n: > \"$YAGARTO_DOWNSTREAM_MARKER\"\nexit 1\n",
+                to: tools.appendingPathComponent(tool)
+            )
+        }
+
+        let result = try runBootstrap(
+            [
+                "--prefix", directory.appendingPathComponent("install").path,
+                "--sha256", String(repeating: "0", count: 64),
+                "--archive", archive.path
+            ],
+            environment: [
+                "PATH": "\(tools.path):/usr/bin:/bin",
+                "YAGARTO_COPY_MARKER": copyMarker.path,
+                "YAGARTO_DOWNSTREAM_MARKER": downstreamMarker.path
+            ]
+        )
+
+        XCTAssertEqual(result.exitStatus, 1)
+        XCTAssertTrue(result.stderr.contains("归档快照"), result.stderr)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: copyMarker.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: downstreamMarker.path))
+    }
+
     func testScriptKeepsSimulatorBuildAndPostInstallVerificationContract() throws {
         let script = try String(contentsOf: scriptURL, encoding: .utf8)
 
@@ -283,6 +364,41 @@ final class BootstrapScriptTests: XCTestCase {
         }
     }
 
+    func testLaunchAccountingGapQueuesAndReapsEachTerminationSignal() throws {
+        let cases: [(signalName: String, expectedStatus: Int32)] = [
+            ("HUP", 128 + SIGHUP),
+            ("INT", 128 + SIGINT),
+            ("TERM", 128 + SIGTERM)
+        ]
+
+        for testCase in cases {
+            let fixture = try BootstrapLaunchGapFixture(signalName: testCase.signalName)
+            defer { fixture.cleanup() }
+            let result = try runBootstrapUntilExit(
+                [
+                    "--prefix", fixture.installPrefix.path,
+                    "--sha256", String(repeating: "0", count: 64),
+                    "--archive", fixture.archive.path
+                ],
+                environment: fixture.environment,
+                pidFile: fixture.pidFile,
+                watchdogSeconds: 4
+            )
+
+            XCTAssertFalse(result.watchdogFired, testCase.signalName)
+            XCTAssertEqual(
+                result.process.exitStatus,
+                testCase.expectedStatus,
+                "\(testCase.signalName): \(result.process.stderr)"
+            )
+            XCTAssertLessThan(result.elapsed, 3, testCase.signalName)
+            XCTAssertTrue(
+                result.descendantsExitedBeforeCleanup,
+                "launch gap \(testCase.signalName) 留下后代：\(result.descendantPIDs)"
+            )
+        }
+    }
+
     func testVerifyGDBHasExplicitTimeoutAndReapsItsProcessGroup() throws {
         let fixture = try BootstrapSignalFixture(name: "timeout")
         defer { fixture.cleanup() }
@@ -420,6 +536,202 @@ private struct BootstrapChecksumSignalFixture {
         [
             "PATH": "\(tools.path):/usr/bin:/bin",
             "YAGARTO_BOOTSTRAP_PID_FILE": pidFile.path
+        ]
+    }
+
+    func cleanup() {
+        try? FileManager.default.removeItem(at: directory)
+    }
+}
+
+private struct BootstrapArchiveSnapshotFixture {
+    enum SourceKind: String, CaseIterable {
+        case regular
+        case symbolicLink
+    }
+
+    let directory: URL
+    let tools: URL
+    let archive: URL
+    let installPrefix: URL
+    let hashedPathLog: URL
+    let extractedPathLog: URL
+    let extractedContentsLog: URL
+    let snapshotModeLog: URL
+
+    init(sourceKind: SourceKind) throws {
+        directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "bootstrap-snapshot-\(sourceKind.rawValue)-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        tools = directory.appendingPathComponent("tools", isDirectory: true)
+        archive = directory.appendingPathComponent("gdb-17.2.tar.xz")
+        installPrefix = directory.appendingPathComponent("install", isDirectory: true)
+        hashedPathLog = directory.appendingPathComponent("hashed-path.log")
+        extractedPathLog = directory.appendingPathComponent("extracted-path.log")
+        extractedContentsLog = directory.appendingPathComponent("extracted-contents.log")
+        snapshotModeLog = directory.appendingPathComponent("snapshot-mode.log")
+        try FileManager.default.createDirectory(at: tools, withIntermediateDirectories: true)
+
+        let backingArchive = directory.appendingPathComponent("archive-backing.tar.xz")
+        try Data("verified snapshot\n".utf8).write(to: backingArchive)
+        switch sourceKind {
+        case .regular:
+            try FileManager.default.copyItem(at: backingArchive, to: archive)
+        case .symbolicLink:
+            try FileManager.default.createSymbolicLink(
+                atPath: archive.path,
+                withDestinationPath: backingArchive.path
+            )
+        }
+        let replacementArchive = directory.appendingPathComponent("replacement.tar.xz")
+        try Data("replacement after hash\n".utf8).write(to: replacementArchive)
+
+        let configureTemplate = directory.appendingPathComponent("configure-template")
+        try writeBootstrapExecutable("#!/bin/sh\nexit 0\n", to: configureTemplate)
+        let gdbTemplate = directory.appendingPathComponent("gdb-template")
+        try writeBootstrapExecutable(
+            """
+            #!/bin/sh
+            for register in r0 r1 r2 r3 r4 r5 r6 r7 r8 r9 r10 r11 r12 sp lr pc cpsr; do
+                if [ "$register" = "r0" ]; then
+                    printf 'r0 0x1\n'
+                else
+                    printf '%s 0x0\n' "$register"
+                fi
+            done
+            """,
+            to: gdbTemplate
+        )
+
+        try writeBootstrapExecutable(
+            """
+            #!/bin/sh
+            archive=
+            for argument in "$@"; do archive=$argument; done
+            printf '%s\n' "$archive" > "$YAGARTO_HASHED_PATH_LOG"
+            /usr/bin/stat -f '%Lp' "${archive%/*}" > "$YAGARTO_SNAPSHOT_MODE_LOG"
+            /bin/mv "$YAGARTO_REPLACEMENT_ARCHIVE" "$YAGARTO_ORIGINAL_ARCHIVE"
+            printf '0000000000000000000000000000000000000000000000000000000000000000  %s\n' "$archive"
+            """,
+            to: tools.appendingPathComponent("shasum")
+        )
+        try writeBootstrapExecutable(
+            """
+            #!/bin/sh
+            archive=
+            destination=
+            while [ "$#" -gt 0 ]; do
+                case "$1" in
+                    -xf) archive=$2; shift 2 ;;
+                    -C) destination=$2; shift 2 ;;
+                    *) shift ;;
+                esac
+            done
+            printf '%s\n' "$archive" > "$YAGARTO_EXTRACTED_PATH_LOG"
+            /bin/cat "$archive" > "$YAGARTO_EXTRACTED_CONTENTS_LOG"
+            /bin/mkdir -p "$destination/gdb-17.2"
+            /bin/cp "$YAGARTO_CONFIGURE_TEMPLATE" "$destination/gdb-17.2/configure"
+            """,
+            to: tools.appendingPathComponent("tar")
+        )
+        try writeBootstrapExecutable(
+            """
+            #!/bin/sh
+            for argument in "$@"; do
+                if [ "$argument" = "install" ]; then
+                    /bin/mkdir -p "$YAGARTO_INSTALL_PREFIX/bin"
+                    /bin/cp "$YAGARTO_GDB_TEMPLATE" "$YAGARTO_INSTALL_PREFIX/bin/arm-none-eabi-gdb"
+                    /bin/chmod 755 "$YAGARTO_INSTALL_PREFIX/bin/arm-none-eabi-gdb"
+                fi
+            done
+            exit 0
+            """,
+            to: tools.appendingPathComponent("gmake")
+        )
+        try writeBootstrapExecutable("#!/bin/sh\nexit 0\n", to: tools.appendingPathComponent("makeinfo"))
+        try writeBootstrapExecutable(
+            "#!/bin/sh\nexit 0\n",
+            to: tools.appendingPathComponent("pkg-config")
+        )
+        try writeBootstrapExecutable("#!/bin/sh\nprintf '1\\n'\n", to: tools.appendingPathComponent("sysctl"))
+        let producer = """
+        #!/bin/sh
+        while [ "$#" -gt 0 ]; do
+            if [ "$1" = "-o" ]; then
+                : > "$2"
+                exit 0
+            fi
+            shift
+        done
+        exit 1
+        """
+        try writeBootstrapExecutable(producer, to: tools.appendingPathComponent("arm-none-eabi-as"))
+        try writeBootstrapExecutable(producer, to: tools.appendingPathComponent("arm-none-eabi-ld"))
+
+        environment = [
+            "PATH": "\(tools.path):/usr/bin:/bin",
+            "YAGARTO_ORIGINAL_ARCHIVE": archive.path,
+            "YAGARTO_REPLACEMENT_ARCHIVE": replacementArchive.path,
+            "YAGARTO_HASHED_PATH_LOG": hashedPathLog.path,
+            "YAGARTO_EXTRACTED_PATH_LOG": extractedPathLog.path,
+            "YAGARTO_EXTRACTED_CONTENTS_LOG": extractedContentsLog.path,
+            "YAGARTO_SNAPSHOT_MODE_LOG": snapshotModeLog.path,
+            "YAGARTO_CONFIGURE_TEMPLATE": configureTemplate.path,
+            "YAGARTO_GDB_TEMPLATE": gdbTemplate.path,
+            "YAGARTO_INSTALL_PREFIX": installPrefix.path
+        ]
+    }
+
+    let environment: [String: String]
+
+    func cleanup() {
+        try? FileManager.default.removeItem(at: directory)
+    }
+}
+
+private struct BootstrapLaunchGapFixture {
+    let directory: URL
+    let tools: URL
+    let archive: URL
+    let installPrefix: URL
+    let pidFile: URL
+    let signalName: String
+
+    init(signalName: String) throws {
+        directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(
+                "bootstrap-launch-gap-\(signalName)-\(UUID().uuidString)",
+                isDirectory: true
+            )
+        tools = directory.appendingPathComponent("tools", isDirectory: true)
+        archive = directory.appendingPathComponent("gdb-17.2.tar.xz")
+        installPrefix = directory.appendingPathComponent("install", isDirectory: true)
+        pidFile = directory.appendingPathComponent("copy-descendants.txt")
+        self.signalName = signalName
+        try FileManager.default.createDirectory(at: tools, withIntermediateDirectories: true)
+        try Data("archive\n".utf8).write(to: archive)
+        try writeBootstrapExecutable(
+            """
+            #!/bin/sh
+            trap '' HUP INT TERM
+            /bin/sleep 30 &
+            grandchild=$!
+            printf '%s %s\n' "$$" "$grandchild" > "$YAGARTO_BOOTSTRAP_PID_FILE"
+            wait "$grandchild"
+            """,
+            to: tools.appendingPathComponent("cp")
+        )
+    }
+
+    var environment: [String: String] {
+        [
+            "PATH": "\(tools.path):/usr/bin:/bin",
+            "YAGARTO_BOOTSTRAP_PID_FILE": pidFile.path,
+            "YAGARTO_BOOTSTRAP_TEST_LAUNCH_TARGET": "cp",
+            "YAGARTO_BOOTSTRAP_TEST_SIGNAL_DURING_LAUNCH": signalName,
+            "YAGARTO_BOOTSTRAP_TEST_LAUNCH_READY_FILE": pidFile.path
         ]
     }
 

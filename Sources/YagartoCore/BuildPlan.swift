@@ -65,20 +65,22 @@ public struct BuildPlan: Equatable, Sendable {
         let originalRoot = outputDirectory.standardizedFileURL.path
         let stagedRoot = stagedOutputDirectory.standardizedFileURL.path
 
+        let exactOutputPaths = artifactFiles.reduce(into: [String: String]()) { mapping, artifact in
+            let path = artifact.standardizedFileURL.path
+            guard path.hasPrefix(originalRoot + "/") else { return }
+            mapping[path] = stagedRoot + path.dropFirst(originalRoot.count)
+        }
+
         func rebase(_ url: URL) -> URL {
             let path = url.standardizedFileURL.path
-            guard path == originalRoot || path.hasPrefix(originalRoot + "/") else {
+            guard let rebasedPath = exactOutputPaths[path] else {
                 return url
             }
-            let suffix = String(path.dropFirst(originalRoot.count))
-            return URL(fileURLWithPath: stagedRoot + suffix, isDirectory: false)
+            return URL(fileURLWithPath: rebasedPath, isDirectory: false)
         }
 
         func rebase(_ value: String) -> String {
-            guard value == originalRoot || value.hasPrefix(originalRoot + "/") else {
-                return value
-            }
-            return stagedRoot + value.dropFirst(originalRoot.count)
+            exactOutputPaths[value] ?? value
         }
 
         let stagedSteps = steps.map { step in

@@ -12,6 +12,7 @@ public enum YagartoError: Error, Equatable, Sendable {
     case absoluteSourcePath(String)
     case pathTraversal(String)
     case sourceEscapesProject(String)
+    case sourceInsideBuildOutput(String)
     case outputSymlink(String)
     case outputArtifactExists(String)
     case duplicateSource(String)
@@ -66,6 +67,8 @@ extension YagartoError: LocalizedError {
             return "configuration.path_traversal"
         case .sourceEscapesProject:
             return "configuration.source_escape"
+        case .sourceInsideBuildOutput:
+            return "configuration.source_in_output"
         case .outputSymlink:
             return "configuration.output_symlink"
         case .outputArtifactExists:
@@ -137,6 +140,8 @@ extension YagartoError: LocalizedError {
             return "路径“\(path)”不能包含 ..；请使用项目目录内的路径。"
         case .sourceEscapesProject(let source):
             return "源文件“\(source)”解析后位于项目目录之外；请移除越界符号链接。"
+        case .sourceInsideBuildOutput(let source):
+            return "源文件“\(source)”位于受管理的构建输出目录；请将输入移到项目源码目录。"
         case .outputSymlink(let path):
             return "输出路径“\(path)”是符号链接；为避免写出项目目录，构建已停止。"
         case .outputArtifactExists(let path):

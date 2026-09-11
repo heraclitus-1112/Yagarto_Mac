@@ -278,6 +278,102 @@ final class BuildPlannerTests: XCTestCase {
         }
     }
 
+    func testSourceInsideAnyManagedBuildOutputIsRejectedBeforeCommandPlanning() throws {
+        let root = try BuildTemporaryDirectory()
+        let project = root.url.appendingPathComponent("project", isDirectory: true)
+        for configuredPath in [
+            ".yagarto/build/arm7tdmi/generated.s",
+            ".yagarto/build/cortex-m4/other-profile.s"
+        ] {
+            let source = project.appendingPathComponent(configuredPath, isDirectory: false)
+            try FileManager.default.createDirectory(
+                at: source.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try Data(".text\n".utf8).write(to: source)
+
+            XCTAssertThrowsError(try makePlanner().plan(
+                configuration: ProjectConfiguration(sources: [configuredPath]),
+                projectDirectory: project
+            )) { error in
+                guard let error = error as? YagartoError else {
+                    return XCTFail("输出树内输入必须产生结构化配置错误")
+                }
+                XCTAssertEqual(error.diagnosticCode, "configuration.source_in_output")
+                XCTAssertEqual(error.exitCode, .configuration)
+            }
+        }
+    }
+
+    func testRebaseOnlyRewritesExactKnownOutputPathsNotArbitraryOutputTreeInputs() {
+        let project = URL(fileURLWithPath: "/tmp/project", isDirectory: true)
+        let output = project.appendingPathComponent(
+            ".yagarto/build/arm7tdmi",
+            isDirectory: true
+        )
+        let staged = output.deletingLastPathComponent().appendingPathComponent(
+            ".arm7tdmi-staging-00000000-0000-0000-0000-000000000000",
+            isDirectory: true
+        )
+        let object = output.appendingPathComponent("main.o")
+        let elf = output.appendingPathComponent("demo.elf")
+        let map = output.appendingPathComponent("demo.map")
+        let binary = output.appendingPathComponent("demo.bin")
+        let listing = output.appendingPathComponent("demo.lst")
+        let unrelatedInput = output.appendingPathComponent("generated/input.s")
+        let plan = BuildPlan(
+            profile: .arm7tdmi,
+            projectDirectory: project,
+            outputDirectory: output,
+            objectFiles: [object],
+            elfFile: elf,
+            mapFile: map,
+            binaryFile: binary,
+            listingFile: listing,
+            steps: [
+                BuildStep(command: CommandSpec(
+                    executable: "/tools/as",
+                    args: ["-o", object.path, unrelatedInput.path],
+                    workingDirectory: project
+                )),
+                BuildStep(command: CommandSpec(
+                    executable: "/tools/ld",
+                    args: ["-Map", map.path, "-o", elf.path, object.path],
+                    workingDirectory: project
+                )),
+                BuildStep(command: CommandSpec(
+                    executable: "/tools/objcopy",
+                    args: [elf.path, binary.path],
+                    workingDirectory: project
+                )),
+                BuildStep(
+                    command: CommandSpec(
+                        executable: "/tools/objdump",
+                        args: [elf.path],
+                        workingDirectory: project
+                    ),
+                    standardOutputFile: listing
+                )
+            ]
+        )
+
+        let rebased = plan.rebased(to: staged)
+
+        XCTAssertEqual(rebased.steps[0].command.args[1], staged.appendingPathComponent("main.o").path)
+        XCTAssertEqual(rebased.steps[0].command.args[2], unrelatedInput.path)
+        XCTAssertEqual(rebased.steps[1].command.args[1], staged.appendingPathComponent("demo.map").path)
+        XCTAssertEqual(rebased.steps[1].command.args[3], staged.appendingPathComponent("demo.elf").path)
+        XCTAssertEqual(rebased.steps[1].command.args[4], staged.appendingPathComponent("main.o").path)
+        XCTAssertEqual(rebased.steps[2].command.args, [
+            staged.appendingPathComponent("demo.elf").path,
+            staged.appendingPathComponent("demo.bin").path
+        ])
+        XCTAssertEqual(
+            rebased.steps[3].standardOutputFile,
+            staged.appendingPathComponent("demo.lst")
+        )
+    }
+
     func testEveryExistingOutputHierarchySymlinkIsRejected() throws {
         let symlinkComponents = [
             [".yagarto"],
@@ -347,6 +443,9 @@ final class BuildPlannerTests: XCTestCase {
                 XCTAssertTrue(script.contains("_estack = ORIGIN(STACK) + LENGTH(STACK)"))
                 XCTAssertTrue(script.contains("__stack_limit__ = ORIGIN(STACK)"))
                 XCTAssertTrue(script.contains(".noinit (NOLOAD)"))
+                XCTAssertTrue(
+                    script.contains("INPUT_SECTION_FLAGS (SHF_ALLOC & SHF_WRITE) *(*)")
+                )
             }
             for fragment in fragments {
                 XCTAssertTrue(script.contains(fragment), "\(filename) 缺少 \(fragment)")

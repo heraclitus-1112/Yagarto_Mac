@@ -540,6 +540,67 @@ final class BuildExecutorTests: XCTestCase {
         XCTAssertFalse(entries.contains { $0.lastPathComponent.contains("swap-probe") })
     }
 
+    func testAtomicSwapProbeUsesOnePrivateOwnedRootWithNestedEndpoints() throws {
+        let directory = try TemporaryTestDirectory(component: "私有交换探测根")
+        let output = directory.url.appendingPathComponent(
+            ".yagarto/build/arm7tdmi",
+            isDirectory: true
+        )
+        let identifier = UUID(uuidString: "11111111-1111-4111-8111-111111111111")!
+        var inspectedRoot: URL?
+
+        try ProjectPathGuard.requireAtomicDirectorySwapSupport(
+            projectDirectory: directory.url,
+            outputDirectory: output,
+            identifier: identifier,
+            inspectProbeRoot: { root in
+                inspectedRoot = root
+                XCTAssertEqual(
+                    (try FileManager.default.attributesOfItem(atPath: root.path)[.posixPermissions]
+                        as? NSNumber)?.intValue,
+                    0o700
+                )
+                XCTAssertEqual(
+                    Set(try FileManager.default.contentsOfDirectory(atPath: root.path)),
+                    Set(["a", "b"])
+                )
+            }
+        )
+
+        let root = try XCTUnwrap(inspectedRoot)
+        XCTAssertEqual(
+            root.lastPathComponent,
+            ".arm7tdmi-swap-probe-11111111-1111-4111-8111-111111111111"
+        )
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.path))
+    }
+
+    func testAtomicSwapProbeDoesNotDeleteCompetitorWhenRootCreationLosesRace() throws {
+        let directory = try TemporaryTestDirectory(component: "交换探测竞争者")
+        let output = directory.url.appendingPathComponent(
+            ".yagarto/build/arm7tdmi",
+            isDirectory: true
+        )
+        let parent = output.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
+        let identifier = UUID(uuidString: "22222222-2222-4222-8222-222222222222")!
+        let competitor = parent.appendingPathComponent(
+            ".arm7tdmi-swap-probe-\(identifier.uuidString.lowercased())",
+            isDirectory: true
+        )
+        try FileManager.default.createDirectory(at: competitor, withIntermediateDirectories: false)
+        let marker = competitor.appendingPathComponent("competitor-marker")
+        try Data("keep".utf8).write(to: marker)
+
+        XCTAssertThrowsError(try ProjectPathGuard.requireAtomicDirectorySwapSupport(
+            projectDirectory: directory.url,
+            outputDirectory: output,
+            identifier: identifier,
+            inspectProbeRoot: { _ in XCTFail("mkdir 失败后不得检查竞争者目录") }
+        ))
+        XCTAssertEqual(try String(contentsOf: marker, encoding: .utf8), "keep")
+    }
+
     func testInjectedSuccessfulAtomicSwapPreflightDoesNotNeedToCreateBuildParent() throws {
         let directory = try TemporaryTestDirectory(component: "注入交换探测")
         let plan = makeRealWritingPlan(directory: directory.url)
@@ -715,7 +776,8 @@ final class BuildExecutorTests: XCTestCase {
         try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
         let staleNames = [
             ".arm7tdmi-staging-11111111-1111-4111-8111-111111111111",
-            ".arm7tdmi-old-22222222-2222-4222-8222-222222222222"
+            ".arm7tdmi-old-22222222-2222-4222-8222-222222222222",
+            ".arm7tdmi-swap-probe-55555555-5555-4555-8555-555555555555"
         ]
         let preservedNames = [
             ".cortex-m4-staging-33333333-3333-4333-8333-333333333333",

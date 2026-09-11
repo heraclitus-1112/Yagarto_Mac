@@ -45,6 +45,11 @@ public struct BuildPlanner {
                 relativePath: source,
                 projectDirectory: projectDirectory
             )
+            try ProjectPathGuard.validateSourceOutsideOutput(
+                canonicalSource.url,
+                outputDirectory: outputDirectory.deletingLastPathComponent(),
+                configuredPath: source
+            )
             guard sourceIdentities.insert(canonicalSource.identity).inserted else {
                 throw YagartoError.duplicateSource(source)
             }
