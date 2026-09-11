@@ -132,6 +132,58 @@ final class BootstrapScriptTests: XCTestCase {
         }
     }
 
+    func testDarwinBuildRejectsMissingGNUCompilerInsteadOfFallingBackToClang() throws {
+        let fixture = try BootstrapArchiveSnapshotFixture(
+            sourceKind: .regular,
+            includeGNUCompiler: false
+        )
+        defer { fixture.cleanup() }
+
+        let result = try runBootstrap(
+            [
+                "--prefix", fixture.installPrefix.path,
+                "--sha256", String(repeating: "0", count: 64),
+                "--archive", fixture.archive.path
+            ],
+            environment: fixture.environment
+        )
+
+        XCTAssertEqual(result.exitStatus, 1, result.stderr)
+        XCTAssertTrue(result.stderr.contains("GNU GCC"), result.stderr)
+        XCTAssertTrue(result.stderr.contains("brew install gcc"), result.stderr)
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: fixture.configureArgumentsLog.path),
+            "缺少 GNU GCC 时不应进入 configure"
+        )
+    }
+
+    func testDarwinBuildRejectsExplicitAppleClangOverride() throws {
+        let fixture = try BootstrapArchiveSnapshotFixture(
+            sourceKind: .regular,
+            includeGNUCompiler: false
+        )
+        defer { fixture.cleanup() }
+        var environment = fixture.environment
+        environment["CC"] = "/usr/bin/cc"
+        environment["CXX"] = "/usr/bin/c++"
+
+        let result = try runBootstrap(
+            [
+                "--prefix", fixture.installPrefix.path,
+                "--sha256", String(repeating: "0", count: 64),
+                "--archive", fixture.archive.path
+            ],
+            environment: environment
+        )
+
+        XCTAssertEqual(result.exitStatus, 1, result.stderr)
+        XCTAssertTrue(result.stderr.contains("不是 GNU GCC"), result.stderr)
+        XCTAssertFalse(
+            FileManager.default.fileExists(atPath: fixture.configureArgumentsLog.path),
+            "显式传入 Apple Clang 时不应进入 configure"
+        )
+    }
+
     func testLocalArchiveSnapshotCopyFailureStopsBeforeHashAndExtraction() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("bootstrap-copy-failure-\(UUID().uuidString)", isDirectory: true)
@@ -609,7 +661,7 @@ private struct BootstrapArchiveSnapshotFixture {
     let snapshotModeLog: URL
     let configureArgumentsLog: URL
 
-    init(sourceKind: SourceKind) throws {
+    init(sourceKind: SourceKind, includeGNUCompiler: Bool = true) throws {
         directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(
                 "bootstrap-snapshot-\(sourceKind.rawValue)-\(UUID().uuidString)",
@@ -726,6 +778,14 @@ private struct BootstrapArchiveSnapshotFixture {
             to: tools.appendingPathComponent("pkg-config")
         )
         try writeBootstrapExecutable("#!/bin/sh\nprintf '1\\n'\n", to: tools.appendingPathComponent("sysctl"))
+        if includeGNUCompiler {
+            for compiler in ["gcc-15", "g++-15"] {
+                try writeBootstrapExecutable(
+                    "#!/bin/sh\nprintf '%s\\n' 'gcc-15 (Homebrew GCC 15.2.0) 15.2.0'\n",
+                    to: tools.appendingPathComponent(compiler)
+                )
+            }
+        }
         let producer = """
         #!/bin/sh
         while [ "$#" -gt 0 ]; do

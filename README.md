@@ -87,7 +87,7 @@ swift run yagarto-mac flash firmware.elf --profile stm32f4-discovery --yes
 
 部分现代 Arm GNU Toolchain 所带 GDB 没有内置 simulator。GNU GDB 16 开始弃用 ARM simulator，GDB 17.2 的官方源码包已经移除 `sim/arm`，因此它不能提供 `target sim`。辅助脚本固定使用仍能原生构建 ARM simulator 的 GNU GDB 15.2；普通 GDB 17.x 仍可用于 QEMU/OpenOCD。脚本不会跳过源码校验：调用者必须从可信渠道取得该发布包的 SHA-256。
 
-脚本会检查 `gmake`、GMP、MPFR、Readline 和 Texinfo，优先使用 Homebrew GNU GCC，并配置 `--target=arm-none-eabi`、系统 zlib/Readline，保留 simulator。针对 macOS 26 只应用仓库内可审计的三处函数指针类型兼容修正；GNU sed 可避免旧构建规则与 BSD sed 的语法差异。安装后它使用 `arm-none-eabi-as`/`arm-none-eabi-ld` 生成最小 ARM7 ELF，并依次验证 `target sim`、`file`/`load`、断点命中、`stepi`，以及读取 `r0`–`r12`、GDB 的规范别名 `sp`/`lr`/`pc` 和 `cpsr`；全部成功后才提供 `arm-none-eabi-gdb-sim` 别名。此过程会进行较长时间的本地编译。
+脚本会检查 `gmake`、GMP、MPFR、Readline 和 Texinfo；在 macOS 上要求 GNU GCC 15（Homebrew 可用 `brew install gcc` 安装），不会回退到 Apple Clang。随后脚本配置 `--target=arm-none-eabi`、系统 zlib/Readline 并保留 simulator。针对 macOS 26 只应用仓库内可审计的三处函数指针类型兼容修正；GNU sed 可避免旧构建规则与 BSD sed 的语法差异。安装后它使用 `arm-none-eabi-as`/`arm-none-eabi-ld` 生成最小 ARM7 ELF，并依次验证 `target sim`、`file`/`load`、断点命中、`stepi`，以及读取 `r0`–`r12`、GDB 的规范别名 `sp`/`lr`/`pc` 和 `cpsr`；全部成功后才提供 `arm-none-eabi-gdb-sim` 别名。此过程会进行较长时间的本地编译。
 
 ```sh
 scripts/bootstrap-gdb-sim.sh \

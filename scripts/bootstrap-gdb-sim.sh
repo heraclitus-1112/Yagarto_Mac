@@ -639,18 +639,29 @@ mkdir -p "$BUILD_DIRECTORY"
 
 GDB_CC=${CC:-}
 GDB_CXX=${CXX:-}
-if [ -z "$GDB_CC" ] && command -v gcc-15 >/dev/null 2>&1; then
-    GDB_CC=$(command -v gcc-15)
-fi
-if [ -z "$GDB_CXX" ] && command -v g++-15 >/dev/null 2>&1; then
-    GDB_CXX=$(command -v g++-15)
-fi
-if [ -z "$GDB_CC" ]; then
-    GDB_CC=cc
-fi
-if [ -z "$GDB_CXX" ]; then
-    GDB_CXX=c++
-fi
+HOST_SYSTEM=$(uname -s 2>/dev/null || true)
+case "$HOST_SYSTEM" in
+    Darwin)
+        if [ -z "$GDB_CC" ] && command -v gcc-15 >/dev/null 2>&1; then
+            GDB_CC=$(command -v gcc-15)
+        fi
+        if [ -z "$GDB_CXX" ] && command -v g++-15 >/dev/null 2>&1; then
+            GDB_CXX=$(command -v g++-15)
+        fi
+        if [ -z "$GDB_CC" ] || [ -z "$GDB_CXX" ]; then
+            echo "macOS 构建 GDB simulator 需要 GNU GCC 15；请运行 brew install gcc，或显式设置 CC/CXX 为 GNU GCC 可执行文件。" >&2
+            exit 1
+        fi
+        ;;
+    *)
+        if [ -z "$GDB_CC" ]; then
+            GDB_CC=cc
+        fi
+        if [ -z "$GDB_CXX" ]; then
+            GDB_CXX=c++
+        fi
+        ;;
+esac
 command -v "$GDB_CC" >/dev/null 2>&1 || {
     echo "缺少 C 编译器：${GDB_CC}" >&2
     exit 1
@@ -659,7 +670,17 @@ command -v "$GDB_CXX" >/dev/null 2>&1 || {
     echo "缺少 C++ 编译器：${GDB_CXX}" >&2
     exit 1
 }
-case "$(uname -s 2>/dev/null || true)" in
+if [ "$HOST_SYSTEM" = "Darwin" ]; then
+    if ! "$GDB_CC" --version 2>&1 | grep -E '(^|[[:space:](])GCC([[:space:].)]|$)|GNU Compiler Collection' >/dev/null; then
+        echo "macOS 构建 GDB simulator 的 C 编译器不是 GNU GCC：${GDB_CC}" >&2
+        exit 1
+    fi
+    if ! "$GDB_CXX" --version 2>&1 | grep -E '(^|[[:space:](])GCC([[:space:].)]|$)|GNU Compiler Collection' >/dev/null; then
+        echo "macOS 构建 GDB simulator 的 C++ 编译器不是 GNU GCC：${GDB_CXX}" >&2
+        exit 1
+    fi
+fi
+case "$HOST_SYSTEM" in
     Darwin)
         GDB_SED=$(command -v gsed 2>/dev/null || true)
         ;;
