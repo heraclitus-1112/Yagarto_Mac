@@ -9,14 +9,25 @@ struct AppRuntime {
     let model: AppViewModel
     let isUITesting: Bool
     private let exampleInstaller: ExampleWorkspaceInstaller?
+#if DEBUG
     private let uiFixture: UITestFixture?
+#endif
 
-    var canOpenExample: Bool { exampleInstaller != nil || uiFixture != nil }
+    var canOpenExample: Bool {
+#if DEBUG
+        exampleInstaller != nil || uiFixture != nil
+#else
+        exampleInstaller != nil
+#endif
+    }
 
     static func make() -> AppRuntime {
-        let uiTesting = ProcessInfo.processInfo.arguments.contains { $0 == "--ui-testing" }
+#if DEBUG
+        let process = ProcessInfo.processInfo
+        let uiTesting = process.arguments.contains { $0 == "--ui-testing" }
+            && process.environment["YAGARTO_UI_TEST_SESSION"] == "YagartoMacAppUITests"
         if uiTesting {
-            let recoveryScenario = ProcessInfo.processInfo.arguments.contains {
+            let recoveryScenario = process.arguments.contains {
                 $0 == "--ui-testing-recovery"
             }
             let model = AppViewModel(
@@ -41,6 +52,7 @@ struct AppRuntime {
                 )
             }
         }
+#endif
         let bundledProject = Bundle.main.resourceURL?
             .appendingPathComponent("examples/arm7tdmi/array-addressing", isDirectory: true)
         let applicationSupport = FileManager.default.urls(
@@ -63,35 +75,53 @@ struct AppRuntime {
         } else {
             installer = nil
         }
+        let model = AppViewModel(
+            documentService: LocalDocumentService(),
+            buildService: CoreBuildService(),
+            debugService: CoreDebugAdapter()
+        )
+#if DEBUG
         return AppRuntime(
-            model: AppViewModel(
-                documentService: LocalDocumentService(),
-                buildService: CoreBuildService(),
-                debugService: CoreDebugAdapter()
-            ),
+            model: model,
             isUITesting: false,
             exampleInstaller: installer,
             uiFixture: nil
         )
+#else
+        return AppRuntime(
+            model: model,
+            isUITesting: false,
+            exampleInstaller: installer
+        )
+#endif
     }
 
     func openExample() async {
         do {
+#if DEBUG
             if let uiFixture {
                 await model.open(uiFixture.directory)
             } else if let exampleInstaller {
                 await model.open(try await exampleInstaller.install())
             }
+#else
+            if let exampleInstaller {
+                await model.open(try await exampleInstaller.install())
+            }
+#endif
         } catch {
             model.reportOperationError(error)
         }
     }
 
     func cleanup() {
+#if DEBUG
         uiFixture?.cleanup()
+#endif
     }
 }
 
+#if DEBUG
 @MainActor
 private final class UITestFixture {
     private let owner: OwnedTemporaryWorkspace
@@ -267,3 +297,4 @@ private enum UITestBackendError: Error, LocalizedError {
         "测试后端启动失败；可以修正后重新构建并启动。"
     }
 }
+#endif

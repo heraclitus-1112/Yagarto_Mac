@@ -30,6 +30,34 @@ final class EditorLogicTests: XCTestCase {
         }
     }
 
+    func testSyntaxOverlapResolutionGrowthIsNearLinearForThousandAndLargeInputs() {
+        let thousand = assemblerSource(lineCount: 1_000)
+        let twoThousand = assemblerSource(lineCount: 2_000)
+        let large = assemblerSource(lineCount: 8_000)
+
+        let smallResult = AssemblySyntaxScanner.scan(in: thousand)
+        let doubledResult = AssemblySyntaxScanner.scan(in: twoThousand)
+        let largeResult = AssemblySyntaxScanner.scan(in: large)
+
+        XCTAssertGreaterThan(smallResult.spans.count, 4_000)
+        XCTAssertLessThan(
+            doubledResult.metrics.inspectedUTF16Units,
+            smallResult.metrics.inspectedUTF16Units * 3
+        )
+        XCTAssertLessThanOrEqual(
+            largeResult.metrics.inspectedUTF16Units,
+            large.utf16.count * 16
+        )
+    }
+
+    @MainActor
+    func testBackgroundSyntaxScannerDoesNotExecuteScanOnMainThread() async {
+        let result = await AssemblySyntaxBackgroundScanner.scan(in: assemblerSource(lineCount: 1_000))
+
+        XCTAssertFalse(result.executedOnMainThread)
+        XCTAssertFalse(result.spans.isEmpty)
+    }
+
     func testBreakpointLinesShiftAndCollapseAcrossEdits() {
         let breakpoints = BreakpointLines([2, 4, 8])
 
@@ -43,6 +71,22 @@ final class EditorLogicTests: XCTestCase {
         )
         XCTAssertEqual(breakpoints.toggling(4).lines, [2, 8])
         XCTAssertEqual(breakpoints.toggling(6).lines, [2, 4, 6, 8])
+    }
+
+    func testLineEditTransformUsesNSStringLineSemanticsForLFCRAndCRLFWithUnicode() {
+        for newline in ["\n", "\r", "\r\n"] {
+            let oldText = ["α标签", "🙂 MOV r0, #1", "终点"].joined(separator: newline) + newline
+            let newText = ["α标签", "新增 行", "🙂 MOV r0, #1", "终点"].joined(separator: newline) + newline
+
+            let transform = LineEditTransform.between(oldText: oldText, newText: newText)
+
+            XCTAssertEqual(
+                transform,
+                LineEditTransform(startLine: 2, oldLineCount: 0, newLineCount: 1),
+                "newline scalars: \(newline.unicodeScalars.map(\.value))"
+            )
+            XCTAssertEqual(BreakpointLines([2, 3]).applying(transform).lines, [3, 4])
+        }
     }
 
     func testCanonicalFileMatchingAndGutterLineMapping() throws {
@@ -66,6 +110,12 @@ final class EditorLogicTests: XCTestCase {
 
     private func substring(_ source: String, _ range: NSRange) -> String {
         (source as NSString).substring(with: range)
+    }
+
+    private func assemblerSource(lineCount: Int) -> String {
+        (0..<lineCount).map { index in
+            "label\(index): MOV r\(index % 16), #0x\(String(index, radix: 16)) // comment \(index)"
+        }.joined(separator: "\n")
     }
 }
 

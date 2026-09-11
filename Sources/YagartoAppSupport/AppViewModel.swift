@@ -6,6 +6,16 @@ import Observation
 @Observable
 @MainActor
 public final class AppViewModel {
+    private struct DocumentVersion: Equatable {
+        let identifier: UUID
+        let revision: UInt64
+    }
+
+    private struct BreakpointKey: Hashable {
+        let canonicalPath: String
+        let line: Int
+    }
+
     public private(set) var document: WorkspaceDocument?
     public private(set) var latestBuild: AppBuildResult?
     public private(set) var buildDiagnostics: [BuildDiagnostic] = []
@@ -23,9 +33,15 @@ public final class AppViewModel {
     private let buildService: any BuildServicing
     private let debugService: any DebugServicing
     private let stopTimeout: Duration
-    private var breakpointIdentifiers: [Int: String] = [:]
+    private var breakpointIdentifiers: [BreakpointKey: String] = [:]
+    private var breakpointRequestGenerations: [BreakpointKey: UInt64] = [:]
+    private var reconcilingBreakpoints: Set<BreakpointKey> = []
+    private var debugSessionGeneration: UInt64 = 0
     private var eventTask: Task<Void, Never>?
     private var stopTask: Task<Void, Never>?
+    private var documentIdentifier: UUID?
+    private var documentRevision: UInt64 = 0
+    private var openGeneration: UInt64 = 0
 
     public init(
         documentService: any DocumentServicing,
@@ -67,8 +83,14 @@ public final class AppViewModel {
 
     public func open(_ url: URL) async {
         guard isEnabled(.open) else { return }
+        openGeneration &+= 1
+        let generation = openGeneration
         do {
-            document = try await documentService.open(url)
+            let openedDocument = try await documentService.open(url)
+            guard generation == openGeneration else { return }
+            document = openedDocument
+            documentIdentifier = UUID()
+            documentRevision = 0
             latestBuild = nil
             buildDiagnostics = []
             debugDiagnostics = []
@@ -76,9 +98,14 @@ public final class AppViewModel {
             registerRows = []
             breakpoints = BreakpointLines()
             breakpointIdentifiers = [:]
+            breakpointRequestGenerations = [:]
+            reconcilingBreakpoints = []
+            debugSessionGeneration &+= 1
             errorMessage = nil
             machine = DebuggerStateMachine()
+            selectedRange = nil
         } catch {
+            guard generation == openGeneration else { return }
             present(error)
         }
     }
@@ -88,47 +115,59 @@ public final class AppViewModel {
         let transform = LineEditTransform.between(oldText: document.text, newText: text)
         breakpoints = breakpoints.applying(transform)
         self.document = document.editing(text)
+        documentRevision &+= 1
         latestBuild = nil
     }
 
     public func changeProfile(to profile: ProfileID) {
         guard isEnabled(.changeProfile), let document else { return }
         self.document = document.changingProfile(to: profile)
+        documentRevision &+= 1
         latestBuild = nil
         machine = DebuggerStateMachine()
         breakpointIdentifiers = [:]
+        debugSessionGeneration &+= 1
         clearRuntimePresentation()
     }
 
     public func save() async {
-        guard let document, document.isDirty else { return }
+        guard let document, document.isDirty, let version = currentDocumentVersion else { return }
+        let snapshot = document
         do {
-            self.document = try await documentService.save(document)
+            _ = try await documentService.save(snapshot)
+            guard matchesDocument(version), let current = self.document else { return }
+            self.document = current.acknowledgingSave(of: snapshot)
             errorMessage = nil
         } catch {
+            guard matchesDocument(version) else { return }
             present(error)
         }
     }
 
     public func build() async {
-        guard isEnabled(.build), let currentDocument = document else { return }
+        guard isEnabled(.build), let currentDocument = document,
+              let version = currentDocumentVersion else { return }
         do {
             try machine.apply(.buildStarted)
             breakpointIdentifiers = [:]
             clearRuntimePresentation()
             errorMessage = nil
             buildDiagnostics = []
-            var buildDocument = currentDocument
+            let buildDocument = currentDocument
             if buildDocument.isDirty {
-                buildDocument = try await documentService.save(buildDocument)
-                document = buildDocument
+                let snapshot = buildDocument
+                _ = try await documentService.save(snapshot)
+                guard matchesDocument(version), let current = document else { return }
+                document = current.acknowledgingSave(of: snapshot)
             }
             let result = try await buildService.build(projectDirectory: buildDocument.projectDirectory)
+            guard matchesDocument(version) else { return }
             latestBuild = result
             buildDiagnostics = result.diagnostics
             try machine.apply(.buildSucceeded)
             clearRuntimePresentation()
         } catch {
+            guard matchesDocument(version) else { return }
             if state == .building { try? machine.apply(.buildFailed) }
             latestBuild = nil
             clearRuntimePresentation()
@@ -146,30 +185,64 @@ public final class AppViewModel {
         do {
             try machine.apply(.launchStarted)
             breakpointIdentifiers = [:]
+            debugSessionGeneration &+= 1
+            let sessionGeneration = debugSessionGeneration
             clearRuntimePresentation()
             try await debugService.prepare(latestBuild)
             let requests = breakpoints.lines.sorted().map {
                 DebugSourceBreakpoint(file: document.sourceURL, line: $0)
             }
             let result = try await debugService.launch(mode: mode, breakpoints: requests)
-            breakpointIdentifiers = result.breakpointIdentifiers
+            guard sessionGeneration == debugSessionGeneration,
+                  documentIdentifier != nil,
+                  self.document?.sourceURL == document.sourceURL else { return }
+            let sourcePath = canonicalPath(document.sourceURL)
+            for (line, identifier) in result.breakpointIdentifiers {
+                let key = BreakpointKey(canonicalPath: sourcePath, line: line)
+                if breakpointIsDesired(key) {
+                    breakpointIdentifiers[key] = identifier
+                } else {
+                    do {
+                        try await debugService.removeBreakpoint(identifier: identifier)
+                    } catch {
+                        breakpointIdentifiers[key] = identifier
+                        setBreakpointDesired(true, for: key)
+                        appendBreakpointDiagnostic(
+                            line: line,
+                            message: "启动期间取消的断点移除失败，已恢复本地状态：\(error.localizedDescription)"
+                        )
+                    }
+                }
+            }
             for failure in result.failures {
-                breakpoints = breakpoints.toggling(failure.breakpoint.line)
-                debugDiagnostics.append(DebugDiagnostic(
-                    pane: .session,
-                    isCritical: false,
-                    message: "第 \(failure.breakpoint.line) 行断点同步失败，已恢复本地状态：\(failure.message)"
-                ))
+                let key = BreakpointKey(
+                    canonicalPath: canonicalPath(failure.breakpoint.file),
+                    line: failure.breakpoint.line
+                )
+                if breakpointIsDesired(key) {
+                    setBreakpointDesired(false, for: key)
+                    appendBreakpointDiagnostic(
+                        line: failure.breakpoint.line,
+                        message: "断点同步失败，已恢复本地状态：\(failure.message)"
+                    )
+                }
             }
             if state == .launching {
                 try machine.apply(mode == .run ? .inferiorRunning : .inferiorStopped)
             } else if mode == .run, state == .stopped {
                 try machine.apply(.inferiorRunning)
             }
+            if state == .stopped {
+                for line in breakpoints.lines.sorted() {
+                    let key = BreakpointKey(canonicalPath: sourcePath, line: line)
+                    await reconcileBreakpoint(key, sourceURL: document.sourceURL, session: sessionGeneration)
+                }
+            }
             errorMessage = nil
         } catch {
             if state == .launching { try? machine.apply(.launchFailed) }
             breakpointIdentifiers = [:]
+            debugSessionGeneration &+= 1
             clearRuntimePresentation()
             present(error)
         }
@@ -205,26 +278,11 @@ public final class AppViewModel {
 
     public func toggleBreakpoint(line: Int) async {
         guard line > 0, let document else { return }
-        let previous = breakpoints
-        let adding = !previous.lines.contains(line)
-        breakpoints = previous.toggling(line)
+        let key = BreakpointKey(canonicalPath: canonicalPath(document.sourceURL), line: line)
+        breakpoints = breakpoints.toggling(line)
+        breakpointRequestGenerations[key, default: 0] &+= 1
         guard state == .stopped else { return }
-        do {
-            if adding {
-                let breakpoint = try await debugService.setBreakpoint(file: document.sourceURL, line: line)
-                breakpointIdentifiers[line] = breakpoint.id
-            } else if let identifier = breakpointIdentifiers[line] {
-                try await debugService.removeBreakpoint(identifier: identifier)
-                breakpointIdentifiers[line] = nil
-            }
-        } catch {
-            breakpoints = previous
-            debugDiagnostics.append(DebugDiagnostic(
-                pane: .session,
-                isCritical: false,
-                message: "断点更新失败，已恢复原状态：\(error.localizedDescription)"
-            ))
-        }
+        await reconcileBreakpoint(key, sourceURL: document.sourceURL, session: debugSessionGeneration)
     }
 
     public func selectDiagnostic(_ diagnostic: BuildDiagnostic) {
@@ -242,6 +300,7 @@ public final class AppViewModel {
     }
 
     public func close() async {
+        invalidateDocumentOperations()
         if isEnabled(.stop) || state == .terminating { beginStopIfNeeded() }
         if let stopTask { await stopTask.value }
         eventTask?.cancel()
@@ -300,6 +359,7 @@ public final class AppViewModel {
             try? machine.apply(lifecycle)
             if newState == .ready {
                 breakpointIdentifiers = [:]
+                debugSessionGeneration &+= 1
                 clearRuntimePresentation()
             }
         }
@@ -336,6 +396,7 @@ public final class AppViewModel {
     private func completeStop(error: String?) {
         if state == .terminating { try? machine.apply(.terminationCompleted) }
         breakpointIdentifiers = [:]
+        debugSessionGeneration &+= 1
         clearRuntimePresentation()
         stopTask = nil
         if let error { errorMessage = "停止调试器失败：\(error)" }
@@ -345,5 +406,135 @@ public final class AppViewModel {
         snapshot = nil
         registerRows = []
         memory = []
+    }
+
+    private var currentDocumentVersion: DocumentVersion? {
+        guard let documentIdentifier else { return nil }
+        return DocumentVersion(identifier: documentIdentifier, revision: documentRevision)
+    }
+
+    private func matchesDocument(_ version: DocumentVersion) -> Bool {
+        documentIdentifier == version.identifier && documentRevision >= version.revision
+    }
+
+    private func invalidateDocumentOperations() {
+        openGeneration &+= 1
+        if document != nil { documentIdentifier = UUID() }
+    }
+
+    private func reconcileBreakpoint(
+        _ key: BreakpointKey,
+        sourceURL: URL,
+        session: UInt64
+    ) async {
+        guard !reconcilingBreakpoints.contains(key) else { return }
+        reconcilingBreakpoints.insert(key)
+        defer { reconcilingBreakpoints.remove(key) }
+
+        while state == .stopped,
+              debugSessionGeneration == session,
+              canonicalPath(document?.sourceURL) == key.canonicalPath {
+            let desired = breakpointIsDesired(key)
+            let remoteIdentifier = breakpointIdentifiers[key]
+            if desired, remoteIdentifier == nil {
+                do {
+                    let remote = try await debugService.setBreakpoint(file: sourceURL, line: key.line)
+                    guard debugSessionGeneration == session,
+                          canonicalPath(document?.sourceURL) == key.canonicalPath else {
+                        return
+                    }
+                    if breakpointIsDesired(key) {
+                        breakpointIdentifiers[key] = remote.id
+                    } else if state == .stopped {
+                        do {
+                            try await debugService.removeBreakpoint(identifier: remote.id)
+                        } catch {
+                            guard debugSessionGeneration == session,
+                                  canonicalPath(document?.sourceURL) == key.canonicalPath else { return }
+                            breakpointIdentifiers[key] = remote.id
+                            setBreakpointDesired(true, for: key)
+                            appendBreakpointDiagnostic(
+                                line: key.line,
+                                message: "取消后的远端断点移除失败，已恢复本地状态：\(error.localizedDescription)"
+                            )
+                        }
+                    } else {
+                        breakpointIdentifiers[key] = remote.id
+                        setBreakpointDesired(true, for: key)
+                        appendBreakpointDiagnostic(
+                            line: key.line,
+                            message: "会话状态已变化，保留已创建的远端断点。"
+                        )
+                    }
+                } catch {
+                    guard debugSessionGeneration == session,
+                          canonicalPath(document?.sourceURL) == key.canonicalPath else { return }
+                    if breakpointIdentifiers[key] == nil, breakpointIsDesired(key) {
+                        setBreakpointDesired(false, for: key)
+                        appendBreakpointDiagnostic(
+                            line: key.line,
+                            message: "断点设置失败，已恢复本地状态：\(error.localizedDescription)"
+                        )
+                    }
+                }
+            } else if !desired, let remoteIdentifier {
+                do {
+                    try await debugService.removeBreakpoint(identifier: remoteIdentifier)
+                    guard debugSessionGeneration == session,
+                          canonicalPath(document?.sourceURL) == key.canonicalPath else { return }
+                    if breakpointIdentifiers[key] == remoteIdentifier {
+                        breakpointIdentifiers[key] = nil
+                    }
+                    if state != .stopped, breakpointIsDesired(key) {
+                        setBreakpointDesired(false, for: key)
+                        appendBreakpointDiagnostic(
+                            line: key.line,
+                            message: "会话状态已变化，已恢复为远端移除后的状态。"
+                        )
+                    }
+                } catch {
+                    guard debugSessionGeneration == session,
+                          canonicalPath(document?.sourceURL) == key.canonicalPath else { return }
+                    guard breakpointIdentifiers[key] == remoteIdentifier else { continue }
+                    if !breakpointIsDesired(key) {
+                        setBreakpointDesired(true, for: key)
+                        appendBreakpointDiagnostic(
+                            line: key.line,
+                            message: "断点移除失败，已恢复本地状态：\(error.localizedDescription)"
+                        )
+                    }
+                }
+            } else {
+                return
+            }
+        }
+    }
+
+    private func breakpointIsDesired(_ key: BreakpointKey) -> Bool {
+        canonicalPath(document?.sourceURL) == key.canonicalPath && breakpoints.lines.contains(key.line)
+    }
+
+    private func setBreakpointDesired(_ desired: Bool, for key: BreakpointKey) {
+        guard canonicalPath(document?.sourceURL) == key.canonicalPath else { return }
+        if breakpoints.lines.contains(key.line) != desired {
+            breakpoints = breakpoints.toggling(key.line)
+            breakpointRequestGenerations[key, default: 0] &+= 1
+        }
+    }
+
+    private func appendBreakpointDiagnostic(line: Int, message: String) {
+        debugDiagnostics.append(DebugDiagnostic(
+            pane: .session,
+            isCritical: false,
+            message: "第 \(line) 行\(message)"
+        ))
+    }
+
+    private func canonicalPath(_ url: URL) -> String {
+        url.standardizedFileURL.resolvingSymlinksInPath().path
+    }
+
+    private func canonicalPath(_ url: URL?) -> String? {
+        url.map(canonicalPath)
     }
 }

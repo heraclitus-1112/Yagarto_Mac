@@ -152,6 +152,60 @@ final class CoreServiceIntegrationTests: XCTestCase {
         try await adapter.stop()
         try await waitUntilProcessIsGone(fixture.processIdentifier())
     }
+
+    func testCoreDebugAdapterOldStopCannotClearOrCancelNewSession() async throws {
+        let fixture = try AdapterSessionGenerationFixture()
+        let configuration = ProjectConfiguration(
+            profile: .arm7tdmi,
+            entry: "start",
+            sources: ["main.s"],
+            outputName: "adapter-generation"
+        )
+        try ConfigStore(projectDirectory: fixture.directory).save(configuration)
+        try Data("MOV r0, #1\n".utf8).write(to: fixture.directory.appendingPathComponent("main.s"))
+        let build = AppBuildResult(
+            configuration: configuration,
+            projectDirectory: fixture.directory,
+            elf: fixture.directory.appendingPathComponent("adapter-generation.elf"),
+            artifacts: [],
+            diagnostics: [],
+            output: ""
+        )
+        let adapter = CoreDebugAdapter(
+            overrides: [.gdb: fixture.script.path],
+            gdbSimulatorPath: fixture.script.path
+        )
+        try await adapter.prepare(build)
+
+        let firstEvents = await adapter.events()
+        _ = try await adapter.launch(mode: .debug, breakpoints: [])
+        _ = try await firstSnapshot(from: firstEvents)
+        let firstPIDs = try await fixture.waitForProcessCount(1)
+        let firstPID = try XCTUnwrap(firstPIDs.first)
+
+        let oldStop = Task { try await adapter.stop() }
+        try await fixture.waitForCommand("-gdb-exit", from: firstPID)
+
+        let secondEvents = await adapter.events()
+        _ = try await adapter.launch(mode: .debug, breakpoints: [])
+        _ = try await firstSnapshot(from: secondEvents)
+        let processIdentifiers = try await fixture.waitForProcessCount(2)
+        let secondPID = try XCTUnwrap(processIdentifiers.first { $0 != firstPID })
+        try await oldStop.value
+
+        XCTAssertEqual(kill(secondPID, 0), 0, "旧 stop 不得终止新会话")
+        try await adapter.stop()
+        try await waitUntilProcessIsGone(secondPID)
+        try await waitUntilProcessIsGone(firstPID)
+
+        let thirdEvents = await adapter.events()
+        _ = try await adapter.launch(mode: .debug, breakpoints: [])
+        _ = try await firstSnapshot(from: thirdEvents)
+        let thirdPIDs = try await fixture.waitForProcessCount(3)
+        let thirdPID = try XCTUnwrap(thirdPIDs.first { $0 != firstPID && $0 != secondPID })
+        try await adapter.stop()
+        try await waitUntilProcessIsGone(thirdPID)
+    }
 }
 
 private func firstSnapshot(
@@ -279,6 +333,105 @@ for raw in sys.stdin:
         out(token + "^running")
         out('*running,thread-id="all"')
     elif command == "-gdb-exit":
+        out(token + "^exit")
+        sys.exit(0)
+    else:
+        out(token + "^done")
+"""#
+}
+
+private final class AdapterSessionGenerationFixture: @unchecked Sendable {
+    let directory: URL
+    let script: URL
+    private let pidFile: URL
+    private let commandFile: URL
+
+    init() throws {
+        directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Adapter Session Generation \(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        script = directory.appendingPathComponent("fake delayed exit gdb.py")
+        pidFile = directory.appendingPathComponent("pids.txt")
+        commandFile = directory.appendingPathComponent("commands.txt")
+        try Data(Self.source.utf8).write(to: script)
+        guard chmod(script.path, 0o700) == 0 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
+    }
+
+    deinit {
+        for processIdentifier in processIdentifiers() {
+            _ = kill(processIdentifier, SIGKILL)
+        }
+        try? FileManager.default.removeItem(at: directory)
+    }
+
+    func waitForProcessCount(_ count: Int) async throws -> [pid_t] {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(3))
+        while ContinuousClock.now < deadline {
+            let values = processIdentifiers()
+            if values.count >= count { return values }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        throw AdapterMITestError.timeout
+    }
+
+    func waitForCommand(_ command: String, from processIdentifier: pid_t) async throws {
+        let expected = "\(processIdentifier):\(command)"
+        let deadline = ContinuousClock.now.advanced(by: .seconds(3))
+        while ContinuousClock.now < deadline {
+            let text = (try? String(contentsOf: commandFile, encoding: .utf8)) ?? ""
+            if text.split(separator: "\n").contains(Substring(expected)) { return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        throw AdapterMITestError.timeout
+    }
+
+    private func processIdentifiers() -> [pid_t] {
+        guard let text = try? String(contentsOf: pidFile, encoding: .utf8) else { return [] }
+        return text.split(separator: "\n").compactMap { pid_t($0) }
+    }
+
+    private static let source = #"""
+#!/usr/bin/python3
+import os, sys, time
+
+root = os.path.dirname(os.path.realpath(__file__))
+pid = os.getpid()
+pid_file = os.path.join(root, "pids.txt")
+command_file = os.path.join(root, "commands.txt")
+source_file = os.path.join(root, "main.s").replace("\\", "\\\\").replace('"', '\\"')
+with open(pid_file, "a", encoding="utf-8") as handle:
+    handle.write(str(pid) + "\n")
+
+def out(value):
+    sys.stdout.write(value + "\n")
+    sys.stdout.flush()
+
+out("(gdb)")
+out('*stopped,reason="end-stepping-range",frame={addr="0x100",func="start",file="main.s",fullname="%s",line="1"}' % source_file)
+for raw in sys.stdin:
+    raw = raw.rstrip("\r\n")
+    index = 0
+    while index < len(raw) and raw[index].isdigit():
+        index += 1
+    token, command = raw[:index], raw[index:]
+    with open(command_file, "a", encoding="utf-8") as handle:
+        handle.write("%d:%s\n" % (pid, command))
+    if command == "-stack-info-frame":
+        out(token + '^done,frame={addr="0x100",func="start",file="main.s",fullname="%s",line="1"}' % source_file)
+    elif command == "-data-list-register-names":
+        out(token + '^done,register-names=["r0"]')
+    elif command == "-data-list-register-values x":
+        out(token + '^done,register-values=[{number="0",value="0x1"}]')
+    elif command == "-stack-list-frames":
+        out(token + '^done,stack=[]')
+    elif command.startswith("-data-read-memory-bytes"):
+        out(token + '^done,memory=[]')
+    elif command.startswith("-data-disassemble"):
+        out(token + '^done,asm_insns=[]')
+    elif command == "-gdb-exit":
+        time.sleep(0.35)
         out(token + "^exit")
         sys.exit(0)
     else:

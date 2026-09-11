@@ -140,7 +140,12 @@ final class AppKitEditorTests: XCTestCase {
         let selection = textView.selectedRange()
         let canUndo = try XCTUnwrap(textView.undoManager).canUndo
 
-        AssemblySyntaxStyler.apply(to: textView)
+        let snapshot = textView.string
+        AssemblySyntaxStyler.apply(
+            spans: AssemblySyntaxScanner.spans(in: snapshot),
+            for: snapshot,
+            to: textView
+        )
 
         XCTAssertEqual(textView.string, before)
         XCTAssertEqual(textView.selectedRange(), selection)
@@ -164,8 +169,13 @@ final class AppKitEditorTests: XCTestCase {
         let selection = textView.selectedRange()
         let canUndo = textView.undoManager?.canUndo
 
-        AssemblySyntaxStyler.apply(to: textView)
+        let applied = AssemblySyntaxStyler.apply(
+            spans: AssemblySyntaxScanner.spans(in: textView.string),
+            for: textView.string,
+            to: textView
+        )
 
+        XCTAssertFalse(applied)
         XCTAssertEqual(textView.attributedString(), before)
         XCTAssertEqual(textView.selectedRange(), selection)
         XCTAssertEqual(textView.undoManager?.canUndo, canUndo)
@@ -220,6 +230,55 @@ final class AppKitEditorTests: XCTestCase {
             effectiveRange: nil
         ) as? NSColor
         XCTAssertEqual(afterComposition, NSColor.systemPurple)
+    }
+
+    func testHostedEditorDiscardsStaleBackgroundSyntaxRevision() async throws {
+        let oldText = ".word 1\n"
+        let newText = "MOV r0, #1\n"
+        let scanner = ControlledSyntaxScanOperation()
+        let editor = AssemblyEditorView(
+            text: oldText,
+            breakpoints: [],
+            currentLine: nil,
+            selectionRequest: nil,
+            isEditable: true,
+            onTextChange: { _ in },
+            onToggleBreakpoint: { _ in },
+            scanOperation: { source in await scanner.scan(source) }
+        )
+        let hosting = NSHostingView(rootView: editor.frame(width: 600, height: 300))
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 600, height: 300),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.isReleasedWhenClosed = false
+        window.contentView = hosting
+        defer { window.contentView = nil }
+        hosting.layoutSubtreeIfNeeded()
+        let textView = try XCTUnwrap(findTextView(in: hosting))
+        await scanner.waitUntilStarted(oldText)
+
+        textView.string = newText
+        textView.delegate?.textDidChange?(Notification(name: NSText.didChangeNotification, object: textView))
+        await scanner.waitUntilStarted(newText)
+        await scanner.finish(newText, spans: AssemblySyntaxScanner.spans(in: newText))
+        await waitUntilMainActor {
+            textView.textStorage?.attribute(.foregroundColor, at: 0, effectiveRange: nil) as? NSColor
+                == NSColor.systemBlue
+        }
+
+        await scanner.finish(oldText, spans: AssemblySyntaxScanner.spans(in: oldText))
+        await Task.yield()
+
+        let finalColor = textView.textStorage?.attribute(
+            .foregroundColor,
+            at: 0,
+            effectiveRange: nil
+        ) as? NSColor
+        XCTAssertEqual(finalColor, NSColor.systemBlue)
+        XCTAssertEqual(textView.string, newText)
     }
 
     func testLineEditTransformFeedsOneBasedBreakpointStrategy() {
@@ -426,6 +485,37 @@ final class AppKitEditorTests: XCTestCase {
             "滚动到真实窗口观察到的 clip offset 后仍必须画出源码字形"
         )
     }
+}
+
+private actor ControlledSyntaxScanOperation {
+    private var continuations: [String: CheckedContinuation<[AssemblySyntaxSpan], Never>] = [:]
+    private var waiters: [String: [CheckedContinuation<Void, Never>]] = [:]
+
+    func scan(_ source: String) async -> [AssemblySyntaxSpan] {
+        waiters.removeValue(forKey: source)?.forEach { $0.resume() }
+        return await withCheckedContinuation { continuations[source] = $0 }
+    }
+
+    func waitUntilStarted(_ source: String) async {
+        if continuations[source] != nil { return }
+        await withCheckedContinuation { waiters[source, default: []].append($0) }
+    }
+
+    func finish(_ source: String, spans: [AssemblySyntaxSpan]) {
+        continuations.removeValue(forKey: source)?.resume(returning: spans)
+    }
+}
+
+@MainActor
+private func waitUntilMainActor(
+    timeout: Duration = .seconds(1),
+    condition: @escaping @MainActor () -> Bool
+) async {
+    let deadline = ContinuousClock.now.advanced(by: timeout)
+    while !condition(), ContinuousClock.now < deadline {
+        await Task.yield()
+    }
+    XCTAssertTrue(condition())
 }
 
 @MainActor

@@ -96,6 +96,20 @@ public struct WorkspaceDocument: Equatable, Sendable {
             savedConfiguration: configuration
         )
     }
+
+    func acknowledgingSave(of snapshot: WorkspaceDocument) -> WorkspaceDocument {
+        guard projectDirectory == snapshot.projectDirectory,
+              sourceURL == snapshot.sourceURL else { return self }
+        return WorkspaceDocument(
+            projectDirectory: projectDirectory,
+            sourceURL: sourceURL,
+            configuration: configuration,
+            text: text,
+            isDirty: text != snapshot.text || configuration != snapshot.configuration,
+            savedText: snapshot.text,
+            savedConfiguration: snapshot.configuration
+        )
+    }
 }
 
 public protocol DocumentServicing: Sendable {

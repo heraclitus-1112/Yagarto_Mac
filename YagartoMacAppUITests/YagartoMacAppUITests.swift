@@ -20,6 +20,7 @@ final class YagartoMacAppUITests: XCTestCase {
     private func launchApplication(arguments: [String] = []) {
         app = XCUIApplication()
         app.launchArguments = ["--ui-testing"] + arguments
+        app.launchEnvironment["YAGARTO_UI_TEST_SESSION"] = "YagartoMacAppUITests"
         app.launch()
     }
 

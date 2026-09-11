@@ -4,9 +4,15 @@ import AppKit
 
 @MainActor
 public enum AssemblySyntaxStyler {
-    public static func apply(to textView: NSTextView) {
-        guard !textView.hasMarkedText() else { return }
-        guard let storage = textView.textStorage else { return }
+    @discardableResult
+    static func apply(
+        spans: [AssemblySyntaxSpan],
+        for snapshot: String,
+        to textView: NSTextView
+    ) -> Bool {
+        guard !textView.hasMarkedText(),
+              let storage = textView.textStorage,
+              storage.string == snapshot else { return false }
         let selectedRanges = textView.selectedRanges
         let fullRange = NSRange(location: 0, length: storage.length)
         let undoManager = textView.undoManager
@@ -19,10 +25,11 @@ public enum AssemblySyntaxStyler {
         storage.beginEditing()
         storage.removeAttribute(.foregroundColor, range: fullRange)
         storage.addAttribute(.foregroundColor, value: NSColor.labelColor, range: fullRange)
-        for span in AssemblySyntaxScanner.spans(in: storage.string) {
+        for span in spans {
             storage.addAttribute(.foregroundColor, value: color(for: span.kind), range: span.range)
         }
         storage.endEditing()
+        return true
     }
 
     private static func color(for kind: AssemblySyntaxKind) -> NSColor {

@@ -3,13 +3,20 @@
 import Foundation
 
 public actor CoreDebugAdapter: DebugServicing {
+    private struct SessionRecord {
+        let identifier: UInt64
+        let controller: DebuggerController
+        let forwardingTask: Task<Void, Never>
+    }
+
     private let overrides: [ToolIdentifier: String]
     private let environment: [String: String]
     private let explicitGDBSimulatorPath: String?
     private var debugPlan: DebugLaunchPlan?
     private var runPlan: DebugLaunchPlan?
-    private var controller: DebuggerController?
-    private var forwardingTask: Task<Void, Never>?
+    private var nextSessionIdentifier: UInt64 = 0
+    private var activeSession: SessionRecord?
+    private var cleanupTasks: [UInt64: Task<Void, Error>] = [:]
     private var subscribers: [UUID: AsyncStream<DebuggerEvent>.Continuation] = [:]
 
     public private(set) var preparedBackend: DebugBackend?
@@ -90,28 +97,40 @@ public actor CoreDebugAdapter: DebugServicing {
         // Always enter through the stopped debug plan so source breakpoints exist
         // before a user-requested run is allowed to continue.
         guard let plan = debugPlan else { throw DebuggerControllerError.missingLaunchPlan }
-        forwardingTask?.cancel()
+        if let previousSession = activeSession {
+            try await stopSession(previousSession)
+        }
         let newController = DebuggerController(plan: plan)
-        controller = newController
         let stream = await newController.events()
-        forwardingTask = Task { [weak self] in
+        nextSessionIdentifier &+= 1
+        let identifier = nextSessionIdentifier
+        let forwardingTask = Task { [weak self] in
             for await event in stream {
                 guard !Task.isCancelled else { return }
-                await self?.publish(event)
+                await self?.publish(event, from: identifier)
             }
         }
+        let record = SessionRecord(
+            identifier: identifier,
+            controller: newController,
+            forwardingTask: forwardingTask
+        )
+        activeSession = record
         do {
             try await newController.launch()
+            try requireActive(record)
             try await waitUntilStopped(newController)
+            try requireActive(record)
             let synchronization = await synchronize(
                 breakpoints,
                 controller: newController,
                 projectDirectory: URL(fileURLWithPath: plan.projectDirectory, isDirectory: true)
             )
+            try requireActive(record)
             if mode == .run { try await newController.continue() }
             return synchronization
         } catch {
-            await stopAfterFailedLaunch(newController)
+            try? await stopSession(record)
             throw error
         }
     }
@@ -122,16 +141,8 @@ public actor CoreDebugAdapter: DebugServicing {
     public func resume() async throws { try await requiredController().continue() }
 
     public func stop() async throws {
-        guard let controller else { return }
-        let state = await controller.currentState
-        if state == .launching || state == .stopped || state == .running {
-            try await controller.stop()
-        }
-        self.controller = nil
-        let task = forwardingTask
-        forwardingTask = nil
-        task?.cancel()
-        await task?.value
+        guard let activeSession else { return }
+        try await stopSession(activeSession)
     }
 
     public func readMemory(_ request: DebugMemoryRequest) async throws -> [MIMemoryBlock] {
@@ -148,11 +159,12 @@ public actor CoreDebugAdapter: DebugServicing {
     }
 
     private func requiredController() throws -> DebuggerController {
-        guard let controller else { throw DebuggerControllerError.missingLaunchPlan }
-        return controller
+        guard let activeSession else { throw DebuggerControllerError.missingLaunchPlan }
+        return activeSession.controller
     }
 
-    private func publish(_ event: DebuggerEvent) {
+    private func publish(_ event: DebuggerEvent, from sessionIdentifier: UInt64) {
+        guard activeSession?.identifier == sessionIdentifier else { return }
         for continuation in subscribers.values { continuation.yield(event) }
     }
 
@@ -220,15 +232,41 @@ public actor CoreDebugAdapter: DebugServicing {
         return "\(source.path):\(breakpoint.line)"
     }
 
-    private func stopAfterFailedLaunch(_ failedController: DebuggerController) async {
-        let state = await failedController.currentState
-        if state == .launching || state == .stopped || state == .running {
-            try? await failedController.stop()
+    private func requireActive(_ record: SessionRecord) throws {
+        guard activeSession?.identifier == record.identifier else {
+            throw CancellationError()
         }
-        if controller === failedController { controller = nil }
-        let task = forwardingTask
-        forwardingTask = nil
-        task?.cancel()
-        await task?.value
+    }
+
+    private func stopSession(_ record: SessionRecord) async throws {
+        let cleanupTask: Task<Void, Error>
+        if let existing = cleanupTasks[record.identifier] {
+            cleanupTask = existing
+        } else {
+            let controller = record.controller
+            cleanupTask = Task {
+                let state = await controller.currentState
+                if state == .launching || state == .stopped || state == .running {
+                    try await controller.stop()
+                }
+            }
+            cleanupTasks[record.identifier] = cleanupTask
+        }
+        do {
+            try await cleanupTask.value
+            await finishCleanup(record)
+        } catch {
+            await finishCleanup(record)
+            throw error
+        }
+    }
+
+    private func finishCleanup(_ record: SessionRecord) async {
+        cleanupTasks[record.identifier] = nil
+        if activeSession?.identifier == record.identifier {
+            activeSession = nil
+        }
+        record.forwardingTask.cancel()
+        await record.forwardingTask.value
     }
 }

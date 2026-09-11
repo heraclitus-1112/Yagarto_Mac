@@ -9,6 +9,7 @@ YAGARTO Mac App 是 macOS 15 及以上系统的非官方 YAGARTO 兼容实现，
 ```sh
 scripts/build-app.sh Debug
 scripts/build-app.sh Release
+scripts/audit-release-no-fakes.sh dist/Release/YagartoMacApp.app
 ```
 
 默认产物分别位于：
@@ -98,7 +99,7 @@ xcodebuild \
 scripts/test-app.sh
 ```
 
-XCUITest 会向真实 `XCUIApplication` 传入精确参数 `--ui-testing`，使用本地确定性 fixture，不触碰硬件或网络。正常生产启动不会启用测试后端。脚本只在能识别的 GUI/辅助权限环境限制下报告 `ENVIRONMENT SKIP`；若 Xcode 自身必需插件无法加载，会报告 `ENVIRONMENT BLOCKED`，不会把未运行的 UI 测试写成通过。CI 明确接受环境门控时可以使用：
+XCUITest 会向真实 `XCUIApplication` 同时传入 `--ui-testing` 参数与专用 `YAGARTO_UI_TEST_SESSION` 环境标记，使用仅在 Debug 编译中存在的本地确定性 fixture，不触碰硬件或网络。缺少任一门控都会使用生产服务；Release 构建完全排除 fake，即使传入同名参数也不会启用。正常生产启动不会启用测试后端。脚本只在能识别的 GUI/辅助权限环境限制下报告 `ENVIRONMENT SKIP`；若 Xcode 自身必需插件无法加载，会报告 `ENVIRONMENT BLOCKED`，不会把未运行的 UI 测试写成通过。CI 明确接受环境门控时可以使用：
 
 ```sh
 scripts/test-app.sh --allow-environment-skip

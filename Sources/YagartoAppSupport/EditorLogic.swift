@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+import Darwin
 import Foundation
 
 public struct SourceLineMap: Equatable, Sendable {
@@ -75,6 +76,40 @@ public struct AssemblySyntaxSpan: Equatable, Sendable {
     }
 }
 
+struct AssemblySyntaxScanMetrics: Equatable, Sendable {
+    let candidateCount: Int
+    let inspectedUTF16Units: Int
+}
+
+struct AssemblySyntaxScanResult: Equatable, Sendable {
+    let spans: [AssemblySyntaxSpan]
+    let metrics: AssemblySyntaxScanMetrics
+}
+
+struct AssemblySyntaxBackgroundResult: Equatable, Sendable {
+    let spans: [AssemblySyntaxSpan]
+    let metrics: AssemblySyntaxScanMetrics
+    let executedOnMainThread: Bool
+}
+
+enum AssemblySyntaxBackgroundScanner {
+    static func scan(in source: String) async -> AssemblySyntaxBackgroundResult {
+        let task = Task.detached(priority: .userInitiated) {
+            let result = AssemblySyntaxScanner.scan(in: source)
+            return AssemblySyntaxBackgroundResult(
+                spans: result.spans,
+                metrics: result.metrics,
+                executedOnMainThread: pthread_main_np() != 0
+            )
+        }
+        return await withTaskCancellationHandler {
+            await task.value
+        } onCancel: {
+            task.cancel()
+        }
+    }
+}
+
 public enum AssemblySyntaxScanner {
     private static let patterns: [(AssemblySyntaxKind, String, NSRegularExpression.Options)] = [
         (.comment, #"//[^\r\n]*|;[^\r\n]*|@[^\r\n]*"#, []),
@@ -87,29 +122,60 @@ public enum AssemblySyntaxScanner {
     ]
 
     public static func spans(in source: String) -> [AssemblySyntaxSpan] {
+        scan(in: source).spans
+    }
+
+    static func scan(in source: String) -> AssemblySyntaxScanResult {
         let fullRange = NSRange(location: 0, length: (source as NSString).length)
+        var occupied = [UInt8](repeating: 0, count: fullRange.length)
         var accepted: [AssemblySyntaxSpan] = []
+        var candidateCount = 0
+        var inspectedUTF16Units = 0
         for (kind, pattern, options) in patterns {
+            if Task.isCancelled { break }
             guard let expression = try? NSRegularExpression(pattern: pattern, options: options) else {
                 continue
             }
             for match in expression.matches(in: source, range: fullRange) {
+                if Task.isCancelled { break }
+                candidateCount += 1
                 var range = match.range
                 if kind == .label {
                     let matched = (source as NSString).substring(with: range)
                     let leading = matched.prefix { $0 == " " || $0 == "\t" }.utf16.count
                     range = NSRange(location: range.location + leading, length: range.length - leading)
                 }
-                guard !accepted.contains(where: { NSIntersectionRange($0.range, range).length > 0 }) else {
-                    continue
+                let upperBound = NSMaxRange(range)
+                guard range.location >= 0,
+                      range.length > 0,
+                      upperBound <= occupied.count else { continue }
+                var overlaps = false
+                for index in range.location..<upperBound {
+                    inspectedUTF16Units += 1
+                    if occupied[index] != 0 {
+                        overlaps = true
+                        break
+                    }
+                }
+                guard !overlaps else { continue }
+                for index in range.location..<upperBound {
+                    inspectedUTF16Units += 1
+                    occupied[index] = 1
                 }
                 accepted.append(AssemblySyntaxSpan(range: range, kind: kind))
             }
         }
-        return accepted.sorted {
+        let spans = accepted.sorted {
             if $0.range.location == $1.range.location { return $0.range.length > $1.range.length }
             return $0.range.location < $1.range.location
         }
+        return AssemblySyntaxScanResult(
+            spans: spans,
+            metrics: AssemblySyntaxScanMetrics(
+                candidateCount: candidateCount,
+                inspectedUTF16Units: inspectedUTF16Units
+            )
+        )
     }
 }
 
@@ -175,8 +241,8 @@ public struct LineEditTransform: Equatable, Sendable {
     }
 
     public static func between(oldText: String, newText: String) -> LineEditTransform {
-        let oldLines = oldText.components(separatedBy: .newlines)
-        let newLines = newText.components(separatedBy: .newlines)
+        let oldLines = logicalLines(in: oldText)
+        let newLines = logicalLines(in: newText)
         var prefix = 0
         while prefix < oldLines.count,
               prefix < newLines.count,
@@ -194,6 +260,33 @@ public struct LineEditTransform: Equatable, Sendable {
             oldLineCount: oldLines.count - prefix - suffix,
             newLineCount: newLines.count - prefix - suffix
         )
+    }
+
+    private static func logicalLines(in text: String) -> [String] {
+        let source = text as NSString
+        guard source.length > 0 else { return [""] }
+        var lines: [String] = []
+        var cursor = 0
+        var endedWithTerminator = false
+        while cursor < source.length {
+            var lineStart = 0
+            var lineEnd = 0
+            var contentsEnd = 0
+            source.getLineStart(
+                &lineStart,
+                end: &lineEnd,
+                contentsEnd: &contentsEnd,
+                for: NSRange(location: cursor, length: 0)
+            )
+            lines.append(source.substring(with: NSRange(
+                location: lineStart,
+                length: contentsEnd - lineStart
+            )))
+            endedWithTerminator = lineEnd > contentsEnd
+            cursor = lineEnd
+        }
+        if endedWithTerminator { lines.append("") }
+        return lines
     }
 }
 

@@ -3,6 +3,8 @@
 import AppKit
 import SwiftUI
 
+typealias AssemblySyntaxScanOperation = @Sendable (String) async -> [AssemblySyntaxSpan]
+
 public struct AssemblyEditorView: NSViewRepresentable {
     private let text: String
     private let breakpoints: Set<Int>
@@ -11,6 +13,7 @@ public struct AssemblyEditorView: NSViewRepresentable {
     private let isEditable: Bool
     private let onTextChange: @MainActor (String) -> Void
     private let onToggleBreakpoint: @MainActor (Int) -> Void
+    private let scanOperation: AssemblySyntaxScanOperation
 
     public init(
         text: String,
@@ -21,6 +24,30 @@ public struct AssemblyEditorView: NSViewRepresentable {
         onTextChange: @escaping @MainActor (String) -> Void,
         onToggleBreakpoint: @escaping @MainActor (Int) -> Void
     ) {
+        self.init(
+            text: text,
+            breakpoints: breakpoints,
+            currentLine: currentLine,
+            selectionRequest: selectionRequest,
+            isEditable: isEditable,
+            onTextChange: onTextChange,
+            onToggleBreakpoint: onToggleBreakpoint,
+            scanOperation: { source in
+                await AssemblySyntaxBackgroundScanner.scan(in: source).spans
+            }
+        )
+    }
+
+    init(
+        text: String,
+        breakpoints: Set<Int>,
+        currentLine: Int?,
+        selectionRequest: NSRange?,
+        isEditable: Bool,
+        onTextChange: @escaping @MainActor (String) -> Void,
+        onToggleBreakpoint: @escaping @MainActor (Int) -> Void,
+        scanOperation: @escaping AssemblySyntaxScanOperation
+    ) {
         self.text = text
         self.breakpoints = breakpoints
         self.currentLine = currentLine
@@ -28,6 +55,7 @@ public struct AssemblyEditorView: NSViewRepresentable {
         self.isEditable = isEditable
         self.onTextChange = onTextChange
         self.onToggleBreakpoint = onToggleBreakpoint
+        self.scanOperation = scanOperation
     }
 
     public func makeCoordinator() -> Coordinator {
@@ -113,6 +141,7 @@ public struct AssemblyEditorView: NSViewRepresentable {
         fileprivate weak var ruler: AssemblyLineRulerView?
         fileprivate var previousText: String
         private var highlightTask: Task<Void, Never>?
+        private var highlightRevision: UInt64 = 0
 
         fileprivate init(parent: AssemblyEditorView) {
             self.parent = parent
@@ -138,32 +167,61 @@ public struct AssemblyEditorView: NSViewRepresentable {
             ruler?.updateAccessibility()
             ruler?.needsDisplay = true
             if textView.hasMarkedText() {
-                scheduleHighlight()
+                scheduleHighlight(afterDelay: true)
                 return
             }
-            AssemblySyntaxStyler.apply(to: textView)
             applyExecutionLine(to: textView)
+            scheduleHighlight(afterDelay: false)
             if let currentLine = parent.currentLine,
                let range = SourceLineMap(textView.string).range(forLine: currentLine) {
                 textView.scrollRangeToVisible(range)
             }
         }
 
-        private func scheduleHighlight() {
+        private func scheduleHighlight(afterDelay: Bool = true) {
             highlightTask?.cancel()
+            highlightRevision &+= 1
+            let revision = highlightRevision
+            guard let textView else { return }
+            let snapshot = textView.string
+            let scan = parent.scanOperation
             highlightTask = Task { @MainActor [weak self] in
                 guard let self else { return }
-                repeat {
+                if afterDelay {
                     do {
                         try await Task.sleep(for: .milliseconds(80))
                     } catch {
                         return
                     }
+                }
+                while true {
                     guard !Task.isCancelled, let textView = self.textView else { return }
                     if !textView.hasMarkedText() { break }
-                } while true
-                guard let textView = self.textView else { return }
-                AssemblySyntaxStyler.apply(to: textView)
+                    do {
+                        try await Task.sleep(for: .milliseconds(80))
+                    } catch {
+                        return
+                    }
+                }
+                guard !Task.isCancelled,
+                      revision == self.highlightRevision,
+                      let textView = self.textView else { return }
+                guard textView.string == snapshot else {
+                    self.scheduleHighlight(afterDelay: false)
+                    return
+                }
+                let spans = await scan(snapshot)
+                guard !Task.isCancelled,
+                      revision == self.highlightRevision,
+                      let textView = self.textView,
+                      textView.string == snapshot else { return }
+                guard !textView.hasMarkedText() else {
+                    self.scheduleHighlight(afterDelay: true)
+                    return
+                }
+                guard AssemblySyntaxStyler.apply(spans: spans, for: snapshot, to: textView) else {
+                    return
+                }
                 self.applyExecutionLine(to: textView)
             }
         }
