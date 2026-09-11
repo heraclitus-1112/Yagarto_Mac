@@ -265,6 +265,30 @@ public struct ToolResolver {
         if let explicitOverride = overrides[.gdb] {
             candidates.append(explicitOverride)
         }
+
+        let simulatorName = "arm-none-eabi-gdb-sim"
+        let pathDirectories = (environment["PATH"] ?? "")
+            .split(separator: ":", omittingEmptySubsequences: true)
+            .map(String.init)
+        candidates.append(contentsOf: pathDirectories.map { directory in
+            URL(fileURLWithPath: directory, isDirectory: true)
+                .appendingPathComponent(simulatorName, isDirectory: false)
+                .path
+        })
+        if let homeDirectory = environment["HOME"], !homeDirectory.isEmpty {
+            candidates.append(
+                URL(fileURLWithPath: homeDirectory, isDirectory: true)
+                    .appendingPathComponent(".local", isDirectory: true)
+                    .appendingPathComponent("share", isDirectory: true)
+                    .appendingPathComponent("yagarto-mac", isDirectory: true)
+                    .appendingPathComponent("toolchains", isDirectory: true)
+                    .appendingPathComponent("gdb-15.2-sim", isDirectory: true)
+                    .appendingPathComponent("bin", isDirectory: true)
+                    .appendingPathComponent(simulatorName, isDirectory: false)
+                    .path
+            )
+        }
+        candidates.append("/opt/homebrew/bin/\(simulatorName)")
         if let ordinaryGDB = resolvedPath(for: .gdb, overrides: [:]) {
             candidates.append(ordinaryGDB)
         }
@@ -333,7 +357,12 @@ public struct ToolResolver {
     private func isTargetSimCapable(_ executable: String) -> Bool {
         capabilityProbe(CommandSpec(
             executable: executable,
-            args: ["-q", "-nx", "-batch", "-ex", "target sim"],
+            args: [
+                "-q", "-nx", "-batch",
+                "-ex", "set endian little",
+                "-ex", "set architecture arm",
+                "-ex", "target sim"
+            ],
             workingDirectory: URL(
                 fileURLWithPath: FileManager.default.currentDirectoryPath,
                 isDirectory: true

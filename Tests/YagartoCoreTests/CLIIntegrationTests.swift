@@ -1599,7 +1599,9 @@ private func runCapturedProcess(
     process.executableURL = executable
     process.arguments = arguments
     process.currentDirectoryURL = directory
-    process.environment = ProcessInfo.processInfo.environment.merging(
+    var isolatedEnvironment = ProcessInfo.processInfo.environment
+    isolatedEnvironment["HOME"] = directory.path
+    process.environment = isolatedEnvironment.merging(
         environment,
         uniquingKeysWith: { _, override in override }
     )

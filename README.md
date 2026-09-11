@@ -85,19 +85,19 @@ swift run yagarto-mac flash firmware.elf --profile stm32f4-discovery --yes
 
 ## 构建支持 `target sim` 的 GDB
 
-部分现代 Arm GNU Toolchain 所带 GDB 没有内置 simulator。辅助脚本固定使用 GNU GDB 17.2 源码，并且不会跳过源码校验：调用者必须从可信渠道取得该发布包的 SHA-256。
+部分现代 Arm GNU Toolchain 所带 GDB 没有内置 simulator。GNU GDB 16 开始弃用 ARM simulator，GDB 17.2 的官方源码包已经移除 `sim/arm`，因此它不能提供 `target sim`。辅助脚本固定使用仍能原生构建 ARM simulator 的 GNU GDB 15.2；普通 GDB 17.x 仍可用于 QEMU/OpenOCD。脚本不会跳过源码校验：调用者必须从可信渠道取得该发布包的 SHA-256。
 
-脚本会检查 `gmake`、GMP、MPFR 和 Texinfo，配置 `--target=arm-none-eabi`，保留 simulator。安装后它使用 `arm-none-eabi-as`/`arm-none-eabi-ld` 生成最小 ARM7 ELF，并依次验证 `target sim`、`file`/`load`、断点命中、`stepi`，以及读取 `r0`–`r12`、GDB 的规范别名 `sp`/`lr`/`pc` 和 `cpsr`；全部成功后才提供 `arm-none-eabi-gdb-sim` 别名。此过程会进行较长时间的本地编译。
+脚本会检查 `gmake`、GMP、MPFR、Readline 和 Texinfo，优先使用 Homebrew GNU GCC，并配置 `--target=arm-none-eabi`、系统 zlib/Readline，保留 simulator。针对 macOS 26 只应用仓库内可审计的三处函数指针类型兼容修正；GNU sed 可避免旧构建规则与 BSD sed 的语法差异。安装后它使用 `arm-none-eabi-as`/`arm-none-eabi-ld` 生成最小 ARM7 ELF，并依次验证 `target sim`、`file`/`load`、断点命中、`stepi`，以及读取 `r0`–`r12`、GDB 的规范别名 `sp`/`lr`/`pc` 和 `cpsr`；全部成功后才提供 `arm-none-eabi-gdb-sim` 别名。此过程会进行较长时间的本地编译。
 
 ```sh
 scripts/bootstrap-gdb-sim.sh \
-  --prefix "$PWD/.tools/gdb-sim" \
-  --sha256 '<gdb-17.2.tar.xz 的 64 位 SHA-256>'
+  --prefix "$HOME/.local/share/yagarto-mac/toolchains/gdb-15.2-sim" \
+  --sha256 '<gdb-15.2.tar.xz 的 64 位 SHA-256>'
 
-export YAGARTO_MAC_GDB_SIM="$PWD/.tools/gdb-sim/bin/arm-none-eabi-gdb-sim"
+export YAGARTO_MAC_GDB_SIM="$HOME/.local/share/yagarto-mac/toolchains/gdb-15.2-sim/bin/arm-none-eabi-gdb-sim"
 ```
 
-已自行下载固定归档时可增加 `--archive /absolute/path/gdb-17.2.tar.xz`；SHA-256 仍然必填。脚本会先把本地归档复制到权限为 0700 的唯一临时工作目录，之后只校验并解压这一份私有快照，因此调用者路径在校验后被替换也不会改变本次构建输入。
+已自行下载固定归档时可增加 `--archive /absolute/path/gdb-15.2.tar.xz`；SHA-256 仍然必填。脚本会先把本地归档复制到权限为 0700 的唯一临时工作目录，之后只校验并解压这一份私有快照，因此调用者路径在校验后被替换也不会改变本次构建输入。安装到上述默认用户目录后，CLI 和图形应用会自动发现它；环境变量仍可覆盖默认位置。
 
 也可对现有 GDB 单独重跑相同的完整自测（不会下载或编译 GDB）：
 

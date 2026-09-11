@@ -4,9 +4,14 @@
 set -eu
 umask 077
 
-GDB_VERSION=17.2
+# GDB 16 deprecated ARM sim and GDB 17 removed sim/arm from the release
+# archive. 15.2 is the newest release that still builds the ARM simulator
+# without carrying an out-of-tree copy of the removed backend.
+GDB_VERSION=15.2
 GDB_ARCHIVE="gdb-${GDB_VERSION}.tar.xz"
 GDB_URL="https://ftp.gnu.org/gnu/gdb/${GDB_ARCHIVE}"
+SCRIPT_DIRECTORY=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+COMPATIBILITY_PATCH="${SCRIPT_DIRECTORY}/patches/gdb-15.2-macos26.patch"
 
 usage() {
     cat <<EOF
@@ -520,22 +525,28 @@ command -v tar >/dev/null 2>&1 || {
 
 GDB_CPPFLAGS=
 GDB_LDFLAGS=
+GMP_PREFIX=
+MPFR_PREFIX=
 if command -v pkg-config >/dev/null 2>&1 \
     && run_supervised pkg-config --exists gmp \
     && run_supervised pkg-config --exists mpfr; then
     pkg_cflags_output="${WORK_DIRECTORY}/pkg-cflags.txt"
     pkg_ldflags_output="${WORK_DIRECTORY}/pkg-ldflags.txt"
+    gmp_prefix_output="${WORK_DIRECTORY}/gmp-prefix.txt"
+    mpfr_prefix_output="${WORK_DIRECTORY}/mpfr-prefix.txt"
     run_supervised pkg-config --cflags gmp mpfr >"$pkg_cflags_output"
     run_supervised pkg-config --libs-only-L gmp mpfr >"$pkg_ldflags_output"
+    run_supervised pkg-config --variable=prefix gmp >"$gmp_prefix_output"
+    run_supervised pkg-config --variable=prefix mpfr >"$mpfr_prefix_output"
     IFS= read -r GDB_CPPFLAGS <"$pkg_cflags_output" || true
     IFS= read -r GDB_LDFLAGS <"$pkg_ldflags_output" || true
+    IFS= read -r GMP_PREFIX <"$gmp_prefix_output" || true
+    IFS= read -r MPFR_PREFIX <"$mpfr_prefix_output" || true
 elif command -v brew >/dev/null 2>&1; then
     gmp_prefix_output="${WORK_DIRECTORY}/gmp-prefix.txt"
     mpfr_prefix_output="${WORK_DIRECTORY}/mpfr-prefix.txt"
     run_supervised brew --prefix gmp >"$gmp_prefix_output" 2>/dev/null || true
     run_supervised brew --prefix mpfr >"$mpfr_prefix_output" 2>/dev/null || true
-    GMP_PREFIX=
-    MPFR_PREFIX=
     IFS= read -r GMP_PREFIX <"$gmp_prefix_output" || true
     IFS= read -r MPFR_PREFIX <"$mpfr_prefix_output" || true
     if [ -z "$GMP_PREFIX" ] || [ -z "$MPFR_PREFIX" ]; then
@@ -548,6 +559,61 @@ else
     echo "未检测到 gmp/mpfr；请通过 pkg-config 或 Homebrew 安装它们。" >&2
     exit 1
 fi
+if [ -z "$GMP_PREFIX" ] || [ -z "$MPFR_PREFIX" ]; then
+    echo "无法确定 gmp 或 mpfr 的安装前缀。" >&2
+    exit 1
+fi
+
+READLINE_CFLAGS=
+READLINE_LDFLAGS=
+READLINE_VERSION=
+if command -v brew >/dev/null 2>&1; then
+    readline_prefix_output="${WORK_DIRECTORY}/readline-prefix.txt"
+    run_supervised brew --prefix readline >"$readline_prefix_output" 2>/dev/null || true
+    READLINE_PREFIX=
+    IFS= read -r READLINE_PREFIX <"$readline_prefix_output" || true
+    if [ -n "$READLINE_PREFIX" ]; then
+        READLINE_CFLAGS="-I${READLINE_PREFIX}/include"
+        READLINE_LDFLAGS="-L${READLINE_PREFIX}/lib"
+        readline_header="${READLINE_PREFIX}/include/readline/readline.h"
+        if [ -f "$readline_header" ]; then
+            readline_version_output="${WORK_DIRECTORY}/readline-version.txt"
+            run_supervised awk \
+                '$1 == "#define" && $2 == "RL_VERSION_MAJOR" { print $3; exit }' \
+                "$readline_header" >"$readline_version_output"
+            IFS= read -r READLINE_VERSION <"$readline_version_output" || true
+        fi
+    fi
+fi
+if [ -z "$READLINE_CFLAGS" ] && command -v pkg-config >/dev/null 2>&1 \
+    && run_supervised pkg-config --exists readline; then
+    readline_cflags_output="${WORK_DIRECTORY}/readline-cflags.txt"
+    readline_ldflags_output="${WORK_DIRECTORY}/readline-ldflags.txt"
+    run_supervised pkg-config --cflags readline >"$readline_cflags_output"
+    run_supervised pkg-config --libs-only-L readline >"$readline_ldflags_output"
+    readline_version_output="${WORK_DIRECTORY}/readline-version.txt"
+    run_supervised pkg-config --modversion readline >"$readline_version_output"
+    IFS= read -r READLINE_CFLAGS <"$readline_cflags_output" || true
+    IFS= read -r READLINE_LDFLAGS <"$readline_ldflags_output" || true
+    IFS= read -r READLINE_VERSION <"$readline_version_output" || true
+fi
+if [ -z "$READLINE_CFLAGS" ]; then
+    echo "缺少可用的 Readline；请运行 brew install readline。" >&2
+    exit 1
+fi
+READLINE_MAJOR=${READLINE_VERSION%%.*}
+case "$READLINE_MAJOR" in
+    ''|*[!0-9]*)
+        echo "无法确认 Readline 版本；GDB 15.2 需要 Readline 7 或更高版本。" >&2
+        exit 1
+        ;;
+esac
+if [ "$READLINE_MAJOR" -lt 7 ]; then
+    echo "Readline 版本过旧；GDB 15.2 需要 Readline 7 或更高版本。" >&2
+    exit 1
+fi
+GDB_CPPFLAGS="${GDB_CPPFLAGS} ${READLINE_CFLAGS}"
+GDB_LDFLAGS="${GDB_LDFLAGS} ${READLINE_LDFLAGS}"
 
 SOURCE_DIRECTORY="${WORK_DIRECTORY}/gdb-${GDB_VERSION}"
 BUILD_DIRECTORY="${WORK_DIRECTORY}/build"
@@ -556,16 +622,81 @@ if [ ! -x "${SOURCE_DIRECTORY}/configure" ]; then
     echo "归档内容无效：缺少 gdb-${GDB_VERSION}/configure。" >&2
     exit 1
 fi
+if [ ! -f "$COMPATIBILITY_PATCH" ]; then
+    echo "缺少 GDB macOS 兼容补丁：${COMPATIBILITY_PATCH}" >&2
+    exit 1
+fi
+command -v patch >/dev/null 2>&1 || {
+    echo "缺少 patch，无法应用 GDB macOS 兼容补丁。" >&2
+    exit 1
+}
+apply_compatibility_patch() (
+    cd "$SOURCE_DIRECTORY"
+    exec patch --batch --forward -p1 -i "$COMPATIBILITY_PATCH"
+)
+run_supervised apply_compatibility_patch
 mkdir -p "$BUILD_DIRECTORY"
+
+GDB_CC=${CC:-}
+GDB_CXX=${CXX:-}
+if [ -z "$GDB_CC" ] && command -v gcc-15 >/dev/null 2>&1; then
+    GDB_CC=$(command -v gcc-15)
+fi
+if [ -z "$GDB_CXX" ] && command -v g++-15 >/dev/null 2>&1; then
+    GDB_CXX=$(command -v g++-15)
+fi
+if [ -z "$GDB_CC" ]; then
+    GDB_CC=cc
+fi
+if [ -z "$GDB_CXX" ]; then
+    GDB_CXX=c++
+fi
+command -v "$GDB_CC" >/dev/null 2>&1 || {
+    echo "缺少 C 编译器：${GDB_CC}" >&2
+    exit 1
+}
+command -v "$GDB_CXX" >/dev/null 2>&1 || {
+    echo "缺少 C++ 编译器：${GDB_CXX}" >&2
+    exit 1
+}
+case "$(uname -s 2>/dev/null || true)" in
+    Darwin)
+        GDB_SED=$(command -v gsed 2>/dev/null || true)
+        ;;
+    *)
+        GDB_SED=$(command -v sed 2>/dev/null || true)
+        ;;
+esac
+if [ -z "$GDB_SED" ]; then
+    echo "缺少兼容的 sed；macOS 请安装 GNU sed（brew install gnu-sed）。" >&2
+    exit 1
+fi
+COMPAT_TOOL_DIRECTORY="${WORK_DIRECTORY}/compat-tools"
+mkdir -p "$COMPAT_TOOL_DIRECTORY"
+run_supervised ln -s "$GDB_SED" "${COMPAT_TOOL_DIRECTORY}/sed"
+BUILD_PATH="${COMPAT_TOOL_DIRECTORY}:${PATH}"
+PATH="$BUILD_PATH"
+export PATH
+gdb_cv_readline_ok=yes
+export gdb_cv_readline_ok
+CPPFLAGS="$GDB_CPPFLAGS"
+LDFLAGS="$GDB_LDFLAGS"
+export CPPFLAGS LDFLAGS
 
 echo "配置 GNU GDB ${GDB_VERSION}（target: arm-none-eabi，simulator 保持启用）"
 configure_gdb() (
     cd "$BUILD_DIRECTORY"
-    exec env CPPFLAGS="$GDB_CPPFLAGS" LDFLAGS="$GDB_LDFLAGS" \
+    exec env PATH="$BUILD_PATH" CC="$GDB_CC" CXX="$GDB_CXX" \
+        SED="$GDB_SED" CPPFLAGS="$GDB_CPPFLAGS" LDFLAGS="$GDB_LDFLAGS" \
         "${SOURCE_DIRECTORY}/configure" \
         --target=arm-none-eabi \
         --prefix="$INSTALL_PREFIX" \
-        --disable-werror
+        --with-gmp="$GMP_PREFIX" \
+        --with-mpfr="$MPFR_PREFIX" \
+        --with-system-zlib \
+        --with-system-readline \
+        --disable-werror \
+        gdb_cv_readline_ok=yes
 )
 run_supervised configure_gdb
 

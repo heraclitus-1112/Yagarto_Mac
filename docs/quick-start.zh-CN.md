@@ -6,7 +6,7 @@ YAGARTO Mac 是面向本仓库课程工作流的非官方兼容实现，不是�
 
 Apple Silicon Mac 的处理器执行 AArch64 指令，常见寄存器名是 `x0`/`w0`；本课程示例是 32 位 Arm 目标代码，使用 `r0`–`r15`、ARM/Thumb 状态和目标处理器状态寄存器。Mac 能在本机编译这些文件，不代表 macOS 会直接运行生成的 ELF。
 
-Arm GNU Toolchain 提供汇编器、链接器、objdump 和 GDB，但“能编译”不等于“已模拟”。ARM7 精确运行需要带 `target sim` 的 GDB；Cortex-M4 通用运行需要 QEMU；STM32F4-Discovery 外设效果需要真实板与 OpenOCD。
+Arm GNU Toolchain 提供汇编器、链接器、objdump 和 GDB，但“能编译”不等于“已模拟”。ARM7 精确运行需要带 `target sim` 的 GDB 15.2（GDB 17.2 已移除 ARM simulator）；Cortex-M4 通用运行需要 QEMU；STM32F4-Discovery 外设效果需要真实板与 OpenOCD。
 
 ## 2. 构建本地 CLI
 

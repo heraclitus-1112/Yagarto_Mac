@@ -133,9 +133,36 @@ final class ToolResolverTests: XCTestCase {
         XCTAssertEqual(try resolver.resolveGDBSimulator(), "/custom/gdb sim")
         XCTAssertEqual(recorder.commands.first, CommandSpec(
             executable: "/custom/gdb sim",
-            args: ["-q", "-nx", "-batch", "-ex", "target sim"],
+            args: [
+                "-q", "-nx", "-batch",
+                "-ex", "set endian little",
+                "-ex", "set architecture arm",
+                "-ex", "target sim"
+            ],
             workingDirectory: URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
         ))
+    }
+
+    func testSimulatorAliasOnPathIsDiscoveredWithoutEnvironmentOverride() throws {
+        let simulator = "/tools/arm-none-eabi-gdb-sim"
+        let resolver = ToolResolver(
+            environment: ["PATH": "/tools"],
+            fileExists: { $0 == simulator },
+            capabilityProbe: { $0.executable == simulator }
+        )
+
+        XCTAssertEqual(try resolver.resolveGDBSimulator(), simulator)
+    }
+
+    func testSimulatorInDefaultUserToolchainDirectoryIsDiscoveredByFinderLaunchedApp() throws {
+        let simulator = "/Users/student/.local/share/yagarto-mac/toolchains/gdb-15.2-sim/bin/arm-none-eabi-gdb-sim"
+        let resolver = ToolResolver(
+            environment: ["PATH": "/usr/bin", "HOME": "/Users/student"],
+            fileExists: { $0 == simulator },
+            capabilityProbe: { $0.executable == simulator }
+        )
+
+        XCTAssertEqual(try resolver.resolveGDBSimulator(), simulator)
     }
 
     func testDoctorReportsNormalAndSimulatorGDBSeparatelyWithProfileSelections() {

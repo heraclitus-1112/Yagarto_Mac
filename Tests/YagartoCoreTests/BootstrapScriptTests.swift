@@ -12,7 +12,7 @@ final class BootstrapScriptTests: XCTestCase {
         XCTAssertEqual(result.exitStatus, 0, result.stderr)
         XCTAssertTrue(result.stdout.contains("--prefix"))
         XCTAssertTrue(result.stdout.contains("--sha256"))
-        XCTAssertTrue(result.stdout.contains("gdb-17.2.tar.xz"))
+        XCTAssertTrue(result.stdout.contains("gdb-15.2.tar.xz"))
         XCTAssertTrue(result.stdout.contains("ftp.gnu.org/gnu/gdb"))
     }
 
@@ -46,7 +46,7 @@ final class BootstrapScriptTests: XCTestCase {
             let result = try runBootstrap([
                 "--prefix", prefix,
                 "--sha256", String(repeating: "0", count: 64),
-                "--archive", "/definitely/missing/gdb-17.2.tar.xz"
+                "--archive", "/definitely/missing/gdb-15.2.tar.xz"
             ])
 
             XCTAssertEqual(result.exitStatus, 2, "未拒绝 prefix：\(prefix)")
@@ -59,7 +59,7 @@ final class BootstrapScriptTests: XCTestCase {
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
-        let archive = directory.appendingPathComponent("gdb-17.2.tar.xz")
+        let archive = directory.appendingPathComponent("gdb-15.2.tar.xz")
         try Data("not a gdb archive".utf8).write(to: archive)
 
         let result = try runBootstrap([
@@ -113,6 +113,22 @@ final class BootstrapScriptTests: XCTestCase {
                 "replacement after hash\n",
                 "测试必须确实在 hash 后替换调用者归档"
             )
+            let configureArguments = try String(
+                contentsOf: fixture.configureArgumentsLog,
+                encoding: .utf8
+            )
+            XCTAssertTrue(
+                configureArguments.contains("--with-gmp=/fixture/gmp"),
+                "GMP prefix 必须显式传给顶层 configure：\(configureArguments)"
+            )
+            XCTAssertTrue(
+                configureArguments.contains("--with-mpfr=/fixture/mpfr"),
+                "MPFR prefix 必须显式传给顶层 configure：\(configureArguments)"
+            )
+            XCTAssertTrue(
+                configureArguments.contains("gdb_cv_readline_ok=yes"),
+                "Readline 能力缓存必须作为参数传入递归 configure：\(configureArguments)"
+            )
         }
     }
 
@@ -120,7 +136,7 @@ final class BootstrapScriptTests: XCTestCase {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("bootstrap-copy-failure-\(UUID().uuidString)", isDirectory: true)
         let tools = directory.appendingPathComponent("tools", isDirectory: true)
-        let archive = directory.appendingPathComponent("gdb-17.2.tar.xz")
+        let archive = directory.appendingPathComponent("gdb-15.2.tar.xz")
         let copyMarker = directory.appendingPathComponent("copy-called")
         let downstreamMarker = directory.appendingPathComponent("downstream-called")
         try FileManager.default.createDirectory(at: tools, withIntermediateDirectories: true)
@@ -162,7 +178,26 @@ final class BootstrapScriptTests: XCTestCase {
         for dependency in ["gmake", "gmp", "mpfr", "makeinfo"] {
             XCTAssertTrue(script.contains(dependency), "脚本缺少依赖检查：\(dependency)")
         }
+        XCTAssertTrue(script.contains("gcc-15"))
+        XCTAssertTrue(script.contains("g++-15"))
+        XCTAssertTrue(script.contains("CC=\"$GDB_CC\" CXX=\"$GDB_CXX\""))
+        XCTAssertTrue(script.contains("gdb-15.2-macos26.patch"))
+        XCTAssertTrue(script.contains("run_supervised apply_compatibility_patch"))
+        XCTAssertTrue(script.contains("SED=\"$GDB_SED\""))
+        XCTAssertTrue(script.contains("$(uname -s 2>/dev/null || true)"))
+        XCTAssertTrue(script.contains("command -v gsed"))
+        XCTAssertTrue(script.contains("BUILD_PATH=\"${COMPAT_TOOL_DIRECTORY}:${PATH}\""))
+        XCTAssertTrue(script.contains("PATH=\"$BUILD_PATH\""))
+        XCTAssertTrue(script.contains("export PATH"))
+        XCTAssertTrue(script.contains("export gdb_cv_readline_ok"))
+        XCTAssertTrue(script.contains("CPPFLAGS=\"$GDB_CPPFLAGS\""))
+        XCTAssertTrue(script.contains("export CPPFLAGS LDFLAGS"))
         XCTAssertTrue(script.contains("--target=arm-none-eabi"))
+        XCTAssertTrue(script.contains("--with-system-zlib"))
+        XCTAssertTrue(script.contains("--with-system-readline"))
+        XCTAssertTrue(script.contains("gdb_cv_readline_ok=yes"))
+        XCTAssertTrue(script.contains("RL_VERSION_MAJOR"))
+        XCTAssertTrue(script.contains("Readline 7"))
         XCTAssertFalse(script.contains("--disable-sim"))
         XCTAssertTrue(script.contains("-ex \"target sim\""))
         XCTAssertTrue(script.contains("arm-none-eabi-gdb-sim"))
@@ -187,6 +222,20 @@ final class BootstrapScriptTests: XCTestCase {
         }
         XCTAssertFalse(script.contains("ACTUAL_SHA256=$(shasum"))
         XCTAssertFalse(script.contains("ACTUAL_SHA256=$(sha256sum"))
+    }
+
+    func testMacOSCompatibilityPatchOnlyCorrectsFunctionPointerTypes() throws {
+        let patchURL = repositoryRoot
+            .appendingPathComponent("scripts/patches/gdb-15.2-macos26.patch")
+        let patch = try String(contentsOf: patchURL, encoding: .utf8)
+
+        XCTAssertTrue(patch.contains("RETSIGTYPE (*prev_sigint) (int);"))
+        XCTAssertTrue(patch.contains("RETSIGTYPE (*prev_sigint) ();"))
+        XCTAssertTrue(patch.contains("RETSIGTYPE (*orig) (int);"))
+        XCTAssertTrue(patch.contains("RETSIGTYPE (*orig) ();"))
+        XCTAssertTrue(patch.contains("unsigned (*func) (ARMul_State *)"))
+        XCTAssertTrue(patch.contains("unsigned (*func) ()"))
+        XCTAssertFalse(patch.contains("sim_resume"))
     }
 
     func testVerifyInstalledGDBRunsCompleteARM7SimulatorContractWithoutBuilding() throws {
@@ -513,7 +562,7 @@ private struct BootstrapChecksumSignalFixture {
         directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("bootstrap-hash-\(name)-\(UUID().uuidString)", isDirectory: true)
         tools = directory.appendingPathComponent("tools", isDirectory: true)
-        archive = directory.appendingPathComponent("gdb-17.2.tar.xz")
+        archive = directory.appendingPathComponent("gdb-15.2.tar.xz")
         installPrefix = directory.appendingPathComponent("install", isDirectory: true)
         pidFile = directory.appendingPathComponent("hash-descendants.txt")
         try FileManager.default.createDirectory(at: tools, withIntermediateDirectories: true)
@@ -558,6 +607,7 @@ private struct BootstrapArchiveSnapshotFixture {
     let extractedPathLog: URL
     let extractedContentsLog: URL
     let snapshotModeLog: URL
+    let configureArgumentsLog: URL
 
     init(sourceKind: SourceKind) throws {
         directory = FileManager.default.temporaryDirectory
@@ -566,12 +616,13 @@ private struct BootstrapArchiveSnapshotFixture {
                 isDirectory: true
             )
         tools = directory.appendingPathComponent("tools", isDirectory: true)
-        archive = directory.appendingPathComponent("gdb-17.2.tar.xz")
+        archive = directory.appendingPathComponent("gdb-15.2.tar.xz")
         installPrefix = directory.appendingPathComponent("install", isDirectory: true)
         hashedPathLog = directory.appendingPathComponent("hashed-path.log")
         extractedPathLog = directory.appendingPathComponent("extracted-path.log")
         extractedContentsLog = directory.appendingPathComponent("extracted-contents.log")
         snapshotModeLog = directory.appendingPathComponent("snapshot-mode.log")
+        configureArgumentsLog = directory.appendingPathComponent("configure-arguments.log")
         try FileManager.default.createDirectory(at: tools, withIntermediateDirectories: true)
 
         let backingArchive = directory.appendingPathComponent("archive-backing.tar.xz")
@@ -589,7 +640,10 @@ private struct BootstrapArchiveSnapshotFixture {
         try Data("replacement after hash\n".utf8).write(to: replacementArchive)
 
         let configureTemplate = directory.appendingPathComponent("configure-template")
-        try writeBootstrapExecutable("#!/bin/sh\nexit 0\n", to: configureTemplate)
+        try writeBootstrapExecutable(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$YAGARTO_CONFIGURE_ARGUMENTS_LOG\"\n",
+            to: configureTemplate
+        )
         let gdbTemplate = directory.appendingPathComponent("gdb-template")
         try writeBootstrapExecutable(
             """
@@ -631,8 +685,8 @@ private struct BootstrapArchiveSnapshotFixture {
             done
             printf '%s\n' "$archive" > "$YAGARTO_EXTRACTED_PATH_LOG"
             /bin/cat "$archive" > "$YAGARTO_EXTRACTED_CONTENTS_LOG"
-            /bin/mkdir -p "$destination/gdb-17.2"
-            /bin/cp "$YAGARTO_CONFIGURE_TEMPLATE" "$destination/gdb-17.2/configure"
+            /bin/mkdir -p "$destination/gdb-15.2"
+            /bin/cp "$YAGARTO_CONFIGURE_TEMPLATE" "$destination/gdb-15.2/configure"
             """,
             to: tools.appendingPathComponent("tar")
         )
@@ -651,8 +705,24 @@ private struct BootstrapArchiveSnapshotFixture {
             to: tools.appendingPathComponent("gmake")
         )
         try writeBootstrapExecutable("#!/bin/sh\nexit 0\n", to: tools.appendingPathComponent("makeinfo"))
+        try writeBootstrapExecutable("#!/bin/sh\nexit 0\n", to: tools.appendingPathComponent("patch"))
+        try writeBootstrapExecutable("#!/bin/sh\nexec /usr/bin/sed \"$@\"\n", to: tools.appendingPathComponent("gsed"))
         try writeBootstrapExecutable(
-            "#!/bin/sh\nexit 0\n",
+            """
+            #!/bin/sh
+            case "$1" in
+                --exists) exit 0 ;;
+                --cflags) printf '%s\n' '-I/fixture/gmp/include -I/fixture/mpfr/include' ;;
+                --libs-only-L) printf '%s\n' '-L/fixture/gmp/lib -L/fixture/mpfr/lib' ;;
+                --modversion) printf '%s\n' '8.3' ;;
+                --variable=prefix)
+                    case "$2" in
+                        gmp) printf '%s\n' /fixture/gmp ;;
+                        mpfr) printf '%s\n' /fixture/mpfr ;;
+                    esac
+                    ;;
+            esac
+            """,
             to: tools.appendingPathComponent("pkg-config")
         )
         try writeBootstrapExecutable("#!/bin/sh\nprintf '1\\n'\n", to: tools.appendingPathComponent("sysctl"))
@@ -678,6 +748,7 @@ private struct BootstrapArchiveSnapshotFixture {
             "YAGARTO_EXTRACTED_PATH_LOG": extractedPathLog.path,
             "YAGARTO_EXTRACTED_CONTENTS_LOG": extractedContentsLog.path,
             "YAGARTO_SNAPSHOT_MODE_LOG": snapshotModeLog.path,
+            "YAGARTO_CONFIGURE_ARGUMENTS_LOG": configureArgumentsLog.path,
             "YAGARTO_CONFIGURE_TEMPLATE": configureTemplate.path,
             "YAGARTO_GDB_TEMPLATE": gdbTemplate.path,
             "YAGARTO_INSTALL_PREFIX": installPrefix.path
@@ -706,7 +777,7 @@ private struct BootstrapLaunchGapFixture {
                 isDirectory: true
             )
         tools = directory.appendingPathComponent("tools", isDirectory: true)
-        archive = directory.appendingPathComponent("gdb-17.2.tar.xz")
+        archive = directory.appendingPathComponent("gdb-15.2.tar.xz")
         installPrefix = directory.appendingPathComponent("install", isDirectory: true)
         pidFile = directory.appendingPathComponent("copy-descendants.txt")
         self.signalName = signalName

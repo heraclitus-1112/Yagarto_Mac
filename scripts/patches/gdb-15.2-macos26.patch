@@ -1,0 +1,34 @@
+--- a/sim/common/nrun.c
++++ b/sim/common/nrun.c
+@@ -64,7 +64,7 @@ main (int argc, char **argv)
+   enum sim_stop reason;
+   int sigrc = 0;
+   int single_step = 0;
+-  RETSIGTYPE (*prev_sigint) ();
++  RETSIGTYPE (*prev_sigint) (int);
+ 
+  myname = lbasename (argv[0]);
+ 
+--- a/sim/arm/armdefs.h
++++ b/sim/arm/armdefs.h
+@@ -263,8 +263,8 @@
+ *                Definitons of things for event handling                    *
+ \***************************************************************************/
+ 
+ extern void ARMul_ScheduleEvent (ARMul_State * state, unsigned long delay,
+-				 unsigned (*func) ());
++				 unsigned (*func) (ARMul_State *));
+ extern void ARMul_EnvokeEvent (ARMul_State * state);
+ extern unsigned long ARMul_Time (ARMul_State * state);
+ 
+--- a/sim/common/dv-sockser.c
++++ b/sim/common/dv-sockser.c
+@@ -175,7 +175,7 @@ dv_sockser_init (SIM_DESC sd)
+      ??? Need a central signal management module.  */
+ #ifdef SIGPIPE
+   {
+-    RETSIGTYPE (*orig) ();
++    RETSIGTYPE (*orig) (int);
+     orig = signal (SIGPIPE, SIG_IGN);
+     /* If a handler is already set up, don't mess with it.  */
+     if (orig != SIG_DFL && orig != SIG_IGN)
