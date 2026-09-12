@@ -6,6 +6,7 @@
 .planning/
 DerivedData/
 dist/
+YagartoMacApp.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
 work/
 outputs/
 task_plan.md
