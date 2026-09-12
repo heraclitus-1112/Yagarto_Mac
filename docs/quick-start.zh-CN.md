@@ -10,6 +10,8 @@ Arm GNU Toolchain 提供汇编器、链接器、objdump 和 GDB，但“能编�
 
 ## 2. 构建本地 CLI
 
+如果是在一台尚未配置开发环境的 Mac 上首次使用，请先完成[从 GitHub 下载并完整安装](install-from-github.zh-CN.md)，其中包含 Xcode、Homebrew、全部 ARM 工具、GDB simulator、QEMU、OpenOCD、Release App 和最终 `doctor` 验收。本节假定这些步骤已经完成。
+
 仓库要求 Swift 6.3 与 Arm GNU Toolchain。先在仓库根目录执行：
 
 ```sh

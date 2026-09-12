@@ -8,6 +8,7 @@ YAGARTO Mac 是一个面向 macOS 的非官方 YAGARTO 兼容工具集，提供�
 
 ## 文档与示例
 
+- [从 GitHub 下载并完整安装](docs/install-from-github.zh-CN.md)：从全新 Apple Silicon Mac 开始，安装全部依赖、构建 App、验收三个后端并完成第一个工程。
 - [中文快速入门](docs/quick-start.zh-CN.md)：安装、doctor、项目命令、产物与退出码。
 - [Emacs 30.2 集成指南](docs/emacs.zh-CN.md)：安全安装、快捷键、GDB/MI、内存与进程清理。
 - [原生 SwiftUI 应用](docs/zh-CN/swiftui-app.md)：构建 `.app`、编辑器、快捷键、调试后端边界与 XCUITest。
@@ -27,7 +28,7 @@ scripts/build-app.sh Debug
 open dist/Debug/YagartoMacApp.app
 ```
 
-产物未签名、未公证；完整说明和 UI 测试命令见[原生 SwiftUI 应用文档](docs/zh-CN/swiftui-app.md)。
+产物未签名、未公证；首次安装与打开步骤见[从 GitHub 下载并完整安装](docs/install-from-github.zh-CN.md)，界面与 UI 测试说明见[原生 SwiftUI 应用文档](docs/zh-CN/swiftui-app.md)。
 
 Emacs 集成不会静默修改 init 文件。先审阅 `scripts/install-emacs.sh --print`，再由用户明确执行 `--install` 并在 TTY 输入 `yes`；完整行为见 Emacs 指南。
 

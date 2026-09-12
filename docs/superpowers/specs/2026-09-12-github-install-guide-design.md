@@ -2,16 +2,16 @@
 
 ## 目标与读者
 
-为第一次接触本项目的用户提供一条可以逐项复制执行的完整流程，从一台干净的 Apple Silicon Mac 开始，最终能够打开 YAGARTO Mac、新建工程、编译并使用 ARM7TDMI 与 Cortex-M4 仿真后端；连接 STM32F4-Discovery 后还能够使用 OpenOCD。
+为第一次接触本项目的用户提供一条可以逐项复制执行的完整流程，从一台干净、能够运行 Swift 6.3 与当前 Xcode 的 Apple Silicon Mac 开始，最终能够打开 YAGARTO Mac、新建工程、编译并使用 ARM7TDMI 与 Cortex-M4 仿真后端；连接 STM32F4-Discovery 后还能够使用 OpenOCD。
 
-默认环境固定为 Apple Silicon、macOS 15 或更高版本。Intel Mac 和旧版 macOS 不在本指南的承诺范围内。
+App 的部署目标是 macOS 15，但当前源码构建环境固定为 Apple Silicon、macOS 26.2 或更高版本以及包含 Swift 6.3 的 Xcode 26.5/26.6。文档必须区分运行最低版本与源码构建宿主要求。Intel Mac 不在本指南的承诺范围内。
 
 ## 文档结构
 
 新增 `docs/install-from-github.zh-CN.md`，并从 README 与中文快速入门链接到该文档。安装流程按严格顺序编排：
 
 1. 检查 Mac 架构与系统版本。
-2. 安装 Xcode Command Line Tools，并验证 Swift。
+2. 安装当前完整 Xcode（包含 Command Line Tools），选择开发者目录并验证 Swift 6.3。
 3. 安装 Homebrew。
 4. 通过 Homebrew 一次安装 Git、Arm GNU Toolchain、普通 ARM GDB、QEMU、OpenOCD，以及构建 GDB 15.2 simulator 所需的 GNU Make、GCC 15、GMP、MPFR、Readline、Texinfo 和 GNU sed。
 5. 从 GitHub 克隆仓库。
@@ -26,7 +26,7 @@
 
 所有软件依赖均进入主流程，不使用“可选安装”措辞。真实 STM32F4-Discovery 板卡本身不可能通过软件安装，因此只把“连接板卡并烧录”标记为需要实体硬件；OpenOCD 仍然默认安装并由 `doctor` 验证。
 
-普通 `arm-none-eabi-gdb` 与带 simulator 的 `arm-none-eabi-gdb-sim` 同时保留：前者服务 QEMU/OpenOCD，后者服务精确 ARM7 指令级模拟。文档明确两者职责，避免用户用 GDB 17.x 的普通版本执行 `target sim`。
+普通 `arm-none-eabi-gdb` 与带 simulator 的 `arm-none-eabi-gdb-sim` 同时保留：前者服务 QEMU/OpenOCD，后者服务 ARM7 指令级模拟。文档明确两者职责，避免用户用 GDB 17.x 的普通版本执行 `target sim`；指令级 simulator 不代表芯片时序或外设的精确模型。
 
 安装命令优先使用可审计的官方工具与 Homebrew formula。GDB 源码必须来自 GNU 官方发布源，并在构建前进行 SHA-256 校验；不使用未经校验的第三方二进制。
 
