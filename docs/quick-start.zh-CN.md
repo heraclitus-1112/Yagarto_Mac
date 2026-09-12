@@ -26,13 +26,37 @@ yagarto-mac doctor
 
 `doctor` 中 assembler/linker/objcopy/objdump 是构建必需项；GDB simulator、QEMU、OpenOCD 和板级配置按 profile 选用，可以缺少而不影响其他 profile 的静态构建。
 
-## 3. 建项目并执行日常命令
+## 3. 全自动创建或导入工程
 
-在一个新的项目目录中：
+新工程不需要手写 JSON 或先建子目录：
+
+```sh
+yagarto-mac new demo --profile arm7tdmi --parent "$PWD"
+cd demo
+yagarto-mac build
+```
+
+该命令会创建 `demo/demo.s` 与 `demo/yagarto.json`。ARM7 模板使用 `start`，Cortex-M4 和 STM32F4 模板使用 `main`；它们都包含可直接构建调试的停止循环，但不会自动构建。
+
+已有多个互相独立的汇编文件时，可以一次整理：
+
+```sh
+yagarto-mac import ./ARM7 --profile arm7tdmi
+```
+
+目录只扫描当前一层。例如 `foo.s` 会移动为 `foo/foo.s` 并生成对应配置；源码内容不会被改写。同名目录会依次使用 `foo-2`、`foo-3`。入口优先识别 ARM7 的 `start` 或 M4/STM32 的 `main`，否则只有唯一的已定义全局符号才会被采用。入口不明确、危险链接、非 UTF-8、动态预处理/条件汇编入口或已经属于其他工程的文件会保持原位，并在汇总中说明原因；这类复杂文件仍可用兼容的 `init` 流程显式配置入口。
+
+`import --format json` 固定输出 `schemaVersion`、`status`、`profile`、`created`、`skipped` 和 `warnings`。存在跳过项或原文件未能删除时仍保留完整报告并返回 2。
+
+旧的 `init` 仍然可用，但它只在当前目录创建默认 `yagarto.json`，不会创建源码或文件夹：
 
 ```sh
 yagarto-mac init --profile arm7tdmi
-# 编辑 yagarto.json 中的 entry、sources、outputName
+```
+
+进入工程后使用日常命令：
+
+```sh
 yagarto-mac profile set cortex-m4
 yagarto-mac build --format text
 yagarto-mac disassemble --format text

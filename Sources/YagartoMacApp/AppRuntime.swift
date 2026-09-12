@@ -21,6 +21,30 @@ struct AppRuntime {
 #endif
     }
 
+    var projectCreationDefaultParent: URL? {
+#if DEBUG
+        uiFixture?.projectParent
+#else
+        nil
+#endif
+    }
+
+    var projectCreationDefaultProfile: ProfileID? {
+#if DEBUG
+        uiFixture == nil ? nil : .arm7tdmi
+#else
+        nil
+#endif
+    }
+
+    var projectImportInputsOverride: [URL]? {
+#if DEBUG
+        uiFixture.map { [$0.importSource] }
+#else
+        nil
+#endif
+    }
+
     static func make() -> AppRuntime {
 #if DEBUG
         let process = ProcessInfo.processInfo
@@ -125,11 +149,16 @@ struct AppRuntime {
 @MainActor
 private final class UITestFixture {
     private let owner: OwnedTemporaryWorkspace
-    var directory: URL { owner.directory }
+    let directory: URL
+    var projectParent: URL { owner.directory }
+    let importSource: URL
 
     init() throws {
         owner = try OwnedTemporaryWorkspace.create(prefix: "YagartoMacApp-UI")
+        directory = owner.directory.appendingPathComponent("example", isDirectory: true)
+        importSource = owner.directory.appendingPathComponent("待导入.s")
         do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
             let configuration = ProjectConfiguration(
                 profile: .arm7tdmi,
                 entry: "start",
@@ -139,6 +168,8 @@ private final class UITestFixture {
             try ConfigStore(projectDirectory: directory).save(configuration)
             try Data("MOV r0, #1\nMOV r1, #2\n".utf8)
                 .write(to: directory.appendingPathComponent("main.s"), options: .atomic)
+            try Data(".global start\nstart:\n    b start\n".utf8)
+                .write(to: importSource, options: .atomic)
         } catch {
             _ = try? owner.cleanup()
             throw error

@@ -23,7 +23,10 @@ struct YagartoMacApp: App {
                 model: model,
                 openExample: runtime.canOpenExample ? {
                     Task { await runtime.openExample() }
-                } : nil
+                } : nil,
+                defaultProjectParent: runtime.projectCreationDefaultParent,
+                defaultProjectProfile: runtime.projectCreationDefaultProfile,
+                importInputsOverride: runtime.projectImportInputsOverride
             )
             .task {
                 lifecycle.model = model
@@ -37,7 +40,7 @@ struct YagartoMacApp: App {
                 Button("关于 YAGARTO Mac") {
                     NSApp.orderFrontStandardAboutPanel(options: [
                         .applicationName: "YAGARTO Mac",
-                        .applicationVersion: "0.4.0",
+                        .applicationVersion: "0.5.0",
                         .credits: NSAttributedString(
                             string: "非官方 YAGARTO 兼容实现\nGNU GPL-3.0-or-later"
                         )
@@ -63,6 +66,14 @@ final class AppLifecycleDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard let model else { return .terminateNow }
+        if model.isProjectOperationInProgress {
+            let alert = NSAlert()
+            alert.messageText = "正在整理工程"
+            alert.informativeText = "请等待新建或导入操作完成后再退出应用。"
+            alert.addButton(withTitle: "好")
+            alert.runModal()
+            return .terminateCancel
+        }
         if model.document?.isDirty == true {
             let alert = NSAlert()
             alert.messageText = "源码尚未保存"

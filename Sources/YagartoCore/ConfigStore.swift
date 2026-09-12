@@ -39,6 +39,16 @@ public struct ConfigStore: Sendable {
 
     public func save(_ configuration: ProjectConfiguration) throws {
         try Self.validate(configuration)
+        let directoryLock: ProjectDirectoryMutationLock
+        do {
+            directoryLock = try ProjectDirectoryMutationLock.acquire(projectDirectory)
+        } catch {
+            throw YagartoError.configurationIOFailed(
+                configurationURL.path,
+                error.localizedDescription
+            )
+        }
+        defer { directoryLock.release() }
         do {
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]

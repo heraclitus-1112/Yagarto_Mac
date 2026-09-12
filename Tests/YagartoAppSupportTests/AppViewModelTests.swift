@@ -921,6 +921,73 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertEqual(model.state, .idle)
     }
 
+    func testCreateProjectOpensCreatedDocumentWithoutBuilding() async throws {
+        let fixture = try ViewModelFixture()
+        let created = CreatedProject(
+            projectDirectory: fixture.document.projectDirectory,
+            sourceURL: fixture.document.sourceURL,
+            configuration: fixture.document.configuration
+        )
+        let projectService = FakeProjectCreationService(created: created)
+        let recorder = CallRecorder()
+        let model = AppViewModel(
+            documentService: FakeDocumentService(document: fixture.document, recorder: recorder),
+            buildService: FakeBuildService(result: fixture.buildResult, recorder: recorder),
+            debugService: FakeDebugService(),
+            projectCreationService: projectService
+        )
+
+        let result = await model.createProject(ProjectCreationRequest(
+            parentDirectory: fixture.directory.deletingLastPathComponent(),
+            name: "new-project",
+            profile: .arm7tdmi
+        ))
+
+        XCTAssertEqual(result, created)
+        XCTAssertEqual(model.document, fixture.document)
+        XCTAssertEqual(model.state, .idle)
+        XCTAssertNil(model.latestBuild)
+        XCTAssertFalse(model.isProjectOperationInProgress)
+        let recorded = await recorder.values()
+        let projectCalls = await projectService.calls()
+        XCTAssertEqual(recorded, ["open"])
+        XCTAssertEqual(projectCalls, ["create"])
+    }
+
+    func testImportProjectsReturnsSummaryWithoutReplacingCurrentDocument() async throws {
+        let fixture = try ViewModelFixture()
+        let report = ProjectImportReport(
+            profile: .arm7tdmi,
+            created: [],
+            skipped: [ProjectImportIssue(
+                sourceURL: fixture.directory.appendingPathComponent("bad.s"),
+                code: "project.entry_not_found",
+                message: "没有找到入口"
+            )],
+            warnings: []
+        )
+        let projectService = FakeProjectCreationService(report: report)
+        let model = AppViewModel(
+            documentService: FakeDocumentService(document: fixture.document),
+            buildService: FakeBuildService(result: fixture.buildResult),
+            debugService: FakeDebugService(),
+            projectCreationService: projectService
+        )
+        await model.open(fixture.document.sourceURL)
+
+        let result = await model.importProjects(ProjectImportRequest(
+            inputs: [fixture.directory],
+            profile: .arm7tdmi
+        ))
+
+        XCTAssertEqual(result, report)
+        XCTAssertEqual(model.document, fixture.document)
+        XCTAssertEqual(model.state, .idle)
+        XCTAssertFalse(model.isProjectOperationInProgress)
+        let projectCalls = await projectService.calls()
+        XCTAssertEqual(projectCalls, ["import"])
+    }
+
     private func stoppedModel(
         fixture: ViewModelFixture,
         debug: ControlledBreakpointDebugService
@@ -967,6 +1034,34 @@ private actor FakeDocumentService: DocumentServicing {
             text: document.text
         )
     }
+}
+
+private actor FakeProjectCreationService: ProjectCreationServicing {
+    private let created: CreatedProject?
+    private let report: ProjectImportReport?
+    private var recordedCalls: [String] = []
+
+    init(created: CreatedProject? = nil, report: ProjectImportReport? = nil) {
+        self.created = created
+        self.report = report
+    }
+
+    func create(_ request: ProjectCreationRequest) async throws -> CreatedProject {
+        recordedCalls.append("create")
+        return try XCTUnwrap(created)
+    }
+
+    func importProjects(_ request: ProjectImportRequest) async -> ProjectImportReport {
+        recordedCalls.append("import")
+        return report ?? ProjectImportReport(
+            profile: request.profile,
+            created: [],
+            skipped: [],
+            warnings: []
+        )
+    }
+
+    func calls() -> [String] { recordedCalls }
 }
 
 private actor ControlledDocumentService: DocumentServicing {

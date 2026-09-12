@@ -26,12 +26,14 @@ public final class AppViewModel {
     public private(set) var breakpoints = BreakpointLines()
     public private(set) var memory: [MIMemoryBlock] = []
     public private(set) var errorMessage: String?
+    public private(set) var isProjectOperationInProgress = false
     public var selectedRange: NSRange?
 
     private var machine = DebuggerStateMachine()
     private let documentService: any DocumentServicing
     private let buildService: any BuildServicing
     private let debugService: any DebugServicing
+    private let projectCreationService: any ProjectCreationServicing
     private let stopTimeout: Duration
     private var breakpointIdentifiers: [BreakpointKey: String] = [:]
     private var breakpointRequestGenerations: [BreakpointKey: UInt64] = [:]
@@ -49,11 +51,13 @@ public final class AppViewModel {
         documentService: any DocumentServicing,
         buildService: any BuildServicing,
         debugService: any DebugServicing,
-        stopTimeout: Duration = .seconds(2)
+        stopTimeout: Duration = .seconds(2),
+        projectCreationService: any ProjectCreationServicing = CoreProjectCreationService()
     ) {
         self.documentService = documentService
         self.buildService = buildService
         self.debugService = debugService
+        self.projectCreationService = projectCreationService
         self.stopTimeout = stopTimeout
         observeDebuggerEvents()
     }
@@ -79,7 +83,8 @@ public final class AppViewModel {
             command,
             state: state,
             hasDocument: document != nil,
-            isDirty: document?.isDirty ?? false
+            isDirty: document?.isDirty ?? false,
+            isProjectOperationInProgress: isProjectOperationInProgress
         )
     }
 
@@ -91,26 +96,41 @@ public final class AppViewModel {
         do {
             let openedDocument = try await documentService.open(url)
             guard generation == openGeneration else { return }
-            document = openedDocument
-            documentIdentifier = UUID()
-            documentRevision = 0
-            latestBuild = nil
-            buildDiagnostics = []
-            debugDiagnostics = []
-            snapshot = nil
-            registerRows = []
-            breakpoints = BreakpointLines()
-            breakpointIdentifiers = [:]
-            breakpointRequestGenerations = [:]
-            reconcilingBreakpoints = []
-            debugSessionGeneration &+= 1
-            errorMessage = nil
-            machine = DebuggerStateMachine()
-            selectedRange = nil
+            install(openedDocument)
         } catch {
             guard generation == openGeneration else { return }
             present(error)
         }
+    }
+
+    public func createProject(_ request: ProjectCreationRequest) async -> CreatedProject? {
+        guard isEnabled(.newProject) else { return nil }
+        retireStart()
+        openGeneration &+= 1
+        let generation = openGeneration
+        isProjectOperationInProgress = true
+        defer { isProjectOperationInProgress = false }
+        do {
+            let created = try await projectCreationService.create(request)
+            guard generation == openGeneration else { return nil }
+            let openedDocument = try await documentService.open(created.projectDirectory)
+            guard generation == openGeneration else { return nil }
+            install(openedDocument)
+            return created
+        } catch {
+            guard generation == openGeneration else { return nil }
+            present(error)
+            return nil
+        }
+    }
+
+    public func importProjects(_ request: ProjectImportRequest) async -> ProjectImportReport? {
+        guard isEnabled(.importProjects) else { return nil }
+        isProjectOperationInProgress = true
+        defer { isProjectOperationInProgress = false }
+        let report = await projectCreationService.importProjects(request)
+        errorMessage = nil
+        return report
     }
 
     public func edit(_ text: String) {
@@ -272,6 +292,7 @@ public final class AppViewModel {
     }
 
     public func close() async {
+        guard !isProjectOperationInProgress else { return }
         retireStart()
         invalidateDocumentOperations()
         if isEnabled(.stop) || state == .terminating { beginStopIfNeeded() }
@@ -353,6 +374,25 @@ public final class AppViewModel {
 
     private func present(_ error: Error) {
         errorMessage = error.localizedDescription
+    }
+
+    private func install(_ openedDocument: WorkspaceDocument) {
+        document = openedDocument
+        documentIdentifier = UUID()
+        documentRevision = 0
+        latestBuild = nil
+        buildDiagnostics = []
+        debugDiagnostics = []
+        snapshot = nil
+        registerRows = []
+        breakpoints = BreakpointLines()
+        breakpointIdentifiers = [:]
+        breakpointRequestGenerations = [:]
+        reconcilingBreakpoints = []
+        debugSessionGeneration &+= 1
+        errorMessage = nil
+        machine = DebuggerStateMachine()
+        selectedRange = nil
     }
 
     private func beginStopIfNeeded() {

@@ -9,9 +9,15 @@ import YagartoCore
 struct WorkbenchView: View {
     @Bindable var model: AppViewModel
     let openExample: (() -> Void)?
+    let defaultProjectParent: URL?
+    let defaultProjectProfile: ProfileID?
+    let importInputsOverride: [URL]?
 
     @State private var memoryAddress = "$sp"
     @State private var memoryLength = "64"
+    @State private var presentedProjectSheet: ProjectSheet?
+    @AppStorage("lastProjectParentPath") private var lastProjectParentPath = ""
+    @AppStorage("lastProjectProfile") private var lastProjectProfile = ProfileID.arm7tdmi.rawValue
 
     var body: some View {
         VStack(spacing: 0) {
@@ -26,6 +32,20 @@ struct WorkbenchView: View {
         .frame(minWidth: 980, minHeight: 640)
         .background(WindowCloseGuard(model: model).frame(width: 0, height: 0))
         .toolbar { toolbar }
+        .sheet(item: $presentedProjectSheet) { sheet in
+            projectSheet(sheet)
+        }
+        .focusedSceneValue(\.newYagartoProjectAction, model.isEnabled(.newProject) ? {
+            requestNewProject()
+        } : nil)
+        .focusedSceneValue(\.importYagartoProjectsAction, model.isEnabled(.importProjects) ? {
+            requestProjectImport()
+        } : nil)
+        .onChange(of: model.document?.configuration.profile) { _, profile in
+            if defaultProjectProfile == nil, let profile {
+                lastProjectProfile = profile.rawValue
+            }
+        }
     }
 
     private var statusStrip: some View {
@@ -50,11 +70,18 @@ struct WorkbenchView: View {
             Image(systemName: "doc.text.magnifyingglass")
                 .font(.system(size: 30))
                 .foregroundStyle(.secondary)
-            Text("打开 ARM 汇编工程")
+            Text("新建或打开 ARM 汇编工程")
                 .font(.title3.weight(.semibold))
-            Text("选择包含 yagarto.json 的目录，或选择该目录内的 .s / .S 文件。")
+            Text("自动创建工程，或打开包含 yagarto.json 的目录。")
                 .foregroundStyle(.secondary)
             HStack {
+                Button("新建工程…") { requestNewProject() }
+                    .keyboardShortcut("n", modifiers: .command)
+                    .disabled(!model.isEnabled(.newProject))
+                    .accessibilityIdentifier("empty-new-project")
+                Button("导入现有源码…") { requestProjectImport() }
+                    .disabled(!model.isEnabled(.importProjects))
+                    .accessibilityIdentifier("empty-import-projects")
                 Button("打开工程…") { OpenProjectAction.choose(for: model) }
                     .keyboardShortcut("o", modifiers: .command)
                     .accessibilityIdentifier("empty-open-project")
@@ -67,6 +94,76 @@ struct WorkbenchView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("empty-state")
+    }
+
+    @ViewBuilder
+    private func projectSheet(_ sheet: ProjectSheet) -> some View {
+        switch sheet.content {
+        case .newProject:
+            NewProjectSheet(
+                model: model,
+                parentDirectory: rememberedParentDirectory,
+                profile: rememberedProfile
+            ) { created in
+                if let created {
+                    lastProjectParentPath = created.projectDirectory.deletingLastPathComponent().path
+                    lastProjectProfile = created.configuration.profile.rawValue
+                    presentedProjectSheet = nil
+                }
+            } onCancel: {
+                presentedProjectSheet = nil
+            }
+        case .importProjects(let inputs):
+            ImportProjectsSheet(model: model, inputs: inputs, profile: rememberedProfile) { report in
+                lastProjectProfile = report.profile.rawValue
+                presentedProjectSheet = nil
+                Task { @MainActor in
+                    await Task.yield()
+                    presentedProjectSheet = ProjectSheet(content: .importSummary(report))
+                }
+            } onCancel: {
+                presentedProjectSheet = nil
+            }
+        case .importSummary(let report):
+            ImportSummarySheet(report: report) {
+                presentedProjectSheet = nil
+            }
+        }
+    }
+
+    private var rememberedParentDirectory: URL {
+        if let defaultProjectParent { return defaultProjectParent }
+        if !lastProjectParentPath.isEmpty {
+            var isDirectory: ObjCBool = false
+            if FileManager.default.fileExists(atPath: lastProjectParentPath, isDirectory: &isDirectory),
+               isDirectory.boolValue {
+                return URL(fileURLWithPath: lastProjectParentPath, isDirectory: true)
+            }
+        }
+        return FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+            ?? FileManager.default.homeDirectoryForCurrentUser
+    }
+
+    private var rememberedProfile: ProfileID {
+        defaultProjectProfile ?? ProjectProfilePreference.selected(
+            lastRawValue: lastProjectProfile,
+            current: model.document?.configuration.profile
+        )
+    }
+
+    private func requestNewProject() {
+        guard model.isEnabled(.newProject) else { return }
+        Task { @MainActor in
+            guard await ProjectReplacementApproval.confirm(for: model) else { return }
+            presentedProjectSheet = ProjectSheet(content: .newProject)
+        }
+    }
+
+    private func requestProjectImport() {
+        guard model.isEnabled(.importProjects) else { return }
+        let inputs = importInputsOverride ?? ImportProjectAction.choose()
+        guard let inputs, !inputs.isEmpty else { return }
+        presentedProjectSheet = ProjectSheet(content: .importProjects(inputs))
     }
 
     private func workbench(_ document: WorkspaceDocument) -> some View {
@@ -316,6 +413,7 @@ struct WorkbenchView: View {
     }
 
     private var stateLabel: String {
+        if model.isProjectOperationInProgress { return "正在整理工程" }
         switch model.state {
         case .idle: return "未构建"
         case .building: return "构建中"
@@ -331,24 +429,73 @@ struct WorkbenchView: View {
 @MainActor
 enum OpenProjectAction {
     static func choose(for model: AppViewModel) {
+        Task { @MainActor in
+            guard await ProjectReplacementApproval.confirm(for: model) else { return }
+            let panel = NSOpenPanel()
+            panel.title = "打开 YAGARTO 工程或汇编源码"
+            panel.message = "选择包含 yagarto.json 的工程目录，或 .s / .S 源码文件。"
+            panel.canChooseDirectories = true
+            panel.canChooseFiles = true
+            panel.allowsMultipleSelection = false
+            panel.allowedContentTypes = []
+            guard panel.runModal() == .OK, let url = panel.url else { return }
+            await model.open(url)
+        }
+    }
+}
+
+@MainActor
+enum ImportProjectAction {
+    static func choose() -> [URL]? {
         let panel = NSOpenPanel()
-        panel.title = "打开 YAGARTO 工程或汇编源码"
-        panel.message = "选择包含 yagarto.json 的工程目录，或 .s / .S 源码文件。"
+        panel.title = "导入独立 ARM 汇编源码"
+        panel.message = "可选择多个 .s/.S 文件，或选择一个只扫描当前层的目录。"
         panel.canChooseDirectories = true
         panel.canChooseFiles = true
-        panel.allowsMultipleSelection = false
+        panel.allowsMultipleSelection = true
         panel.allowedContentTypes = []
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        Task { await model.open(url) }
+        guard panel.runModal() == .OK else { return nil }
+        return panel.urls
+    }
+}
+
+@MainActor
+enum ProjectReplacementApproval {
+    static func confirm(for model: AppViewModel) async -> Bool {
+        guard model.document?.isDirty == true else { return true }
+        let alert = NSAlert()
+        alert.messageText = "源码尚未保存"
+        alert.informativeText = "切换工程前保存修改吗？"
+        alert.addButton(withTitle: "保存")
+        alert.addButton(withTitle: "不保存")
+        alert.addButton(withTitle: "取消")
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            await model.save()
+            return model.document?.isDirty != true
+        case .alertSecondButtonReturn:
+            return true
+        default:
+            return false
+        }
     }
 }
 
 @MainActor
 struct WorkbenchCommands: Commands {
     let model: AppViewModel
+    @FocusedValue(\.newYagartoProjectAction) private var newProjectAction
+    @FocusedValue(\.importYagartoProjectsAction) private var importProjectsAction
 
     var body: some Commands {
         CommandGroup(replacing: .newItem) {
+            Button("新建工程…") { newProjectAction?() }
+                .keyboardShortcut("n", modifiers: .command)
+                .disabled(newProjectAction == nil || !model.isEnabled(.newProject))
+            Button("导入现有源码…") { importProjectsAction?() }
+                .keyboardShortcut("i", modifiers: [.command, .shift])
+                .disabled(importProjectsAction == nil || !model.isEnabled(.importProjects))
+            Divider()
             Button("打开…") { OpenProjectAction.choose(for: model) }
                 .keyboardShortcut("o", modifiers: .command)
                 .disabled(!model.isEnabled(.open))
@@ -376,7 +523,7 @@ struct WorkbenchCommands: Commands {
                 .keyboardShortcut("i", modifiers: .command)
                 .disabled(!model.isEnabled(.stepInstruction))
             Button("单步越过") { Task { await model.stepOver() } }
-                .keyboardShortcut("n", modifiers: .command)
+                .keyboardShortcut("n", modifiers: [.command, .shift])
                 .disabled(!model.isEnabled(.stepOver))
             Button("继续") { Task { await model.resume() } }
                 .keyboardShortcut("g", modifiers: .command)
@@ -386,4 +533,272 @@ struct WorkbenchCommands: Commands {
                 .disabled(!model.isEnabled(.stop))
         }
     }
+}
+
+private struct NewYagartoProjectActionKey: FocusedValueKey {
+    typealias Value = () -> Void
+}
+
+private struct ImportYagartoProjectsActionKey: FocusedValueKey {
+    typealias Value = () -> Void
+}
+
+private extension FocusedValues {
+    var newYagartoProjectAction: (() -> Void)? {
+        get { self[NewYagartoProjectActionKey.self] }
+        set { self[NewYagartoProjectActionKey.self] = newValue }
+    }
+
+    var importYagartoProjectsAction: (() -> Void)? {
+        get { self[ImportYagartoProjectsActionKey.self] }
+        set { self[ImportYagartoProjectsActionKey.self] = newValue }
+    }
+}
+
+private struct ProjectSheet: Identifiable {
+    enum Content {
+        case newProject
+        case importProjects([URL])
+        case importSummary(ProjectImportReport)
+    }
+
+    let id = UUID()
+    let content: Content
+}
+
+@MainActor
+private struct NewProjectSheet: View {
+    @Bindable var model: AppViewModel
+    let onCreated: (CreatedProject?) -> Void
+    let onCancel: () -> Void
+
+    @State private var name = ""
+    @State private var parentDirectory: URL
+    @State private var profile: ProfileID
+    @State private var isWorking = false
+
+    init(
+        model: AppViewModel,
+        parentDirectory: URL,
+        profile: ProfileID,
+        onCreated: @escaping (CreatedProject?) -> Void,
+        onCancel: @escaping () -> Void
+    ) {
+        self.model = model
+        self.onCreated = onCreated
+        self.onCancel = onCancel
+        _parentDirectory = State(initialValue: parentDirectory)
+        _profile = State(initialValue: profile)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text("新建 ARM 汇编工程")
+                .font(.title2.weight(.semibold))
+            Form {
+                TextField("工程名称", text: $name)
+                    .accessibilityIdentifier("new-project-name")
+                LabeledContent("保存位置") {
+                    HStack {
+                        Text(parentDirectory.path)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                            .textSelection(.enabled)
+                        Button("选择…", action: chooseParentDirectory)
+                    }
+                }
+                .accessibilityElement(children: .contain)
+                LabeledContent("目标") {
+                    profilePicker(selection: $profile)
+                        .accessibilityIdentifier("new-project-profile-picker")
+                }
+                .accessibilityElement(children: .contain)
+            }
+            .disabled(isWorking)
+            Text("将自动创建“工程名/工程名.s”和 yagarto.json；创建后只打开，不自动构建。")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            if let error = model.errorMessage, !error.isEmpty {
+                Label(error, systemImage: "exclamationmark.triangle")
+                    .font(.callout)
+                    .foregroundStyle(.red)
+            }
+            HStack {
+                Spacer()
+                Button("取消", action: onCancel)
+                    .keyboardShortcut(.cancelAction)
+                    .disabled(isWorking)
+                Button(isWorking ? "正在创建…" : "创建工程") {
+                    isWorking = true
+                    Task { @MainActor in
+                        let created = await model.createProject(ProjectCreationRequest(
+                            parentDirectory: parentDirectory,
+                            name: name,
+                            profile: profile
+                        ))
+                        isWorking = false
+                        onCreated(created)
+                    }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isWorking)
+                .accessibilityIdentifier("new-project-create")
+            }
+        }
+        .padding(24)
+        .frame(width: 620)
+        .interactiveDismissDisabled(isWorking)
+    }
+
+    private func chooseParentDirectory() {
+        let panel = NSOpenPanel()
+        panel.title = "选择新工程的父目录"
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = parentDirectory
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        parentDirectory = url
+    }
+}
+
+@MainActor
+private struct ImportProjectsSheet: View {
+    @Bindable var model: AppViewModel
+    let inputs: [URL]
+    let onFinished: (ProjectImportReport) -> Void
+    let onCancel: () -> Void
+
+    @State private var profile: ProfileID
+    @State private var isWorking = false
+
+    init(
+        model: AppViewModel,
+        inputs: [URL],
+        profile: ProfileID,
+        onFinished: @escaping (ProjectImportReport) -> Void,
+        onCancel: @escaping () -> Void
+    ) {
+        self.model = model
+        self.inputs = inputs
+        self.onFinished = onFinished
+        self.onCancel = onCancel
+        _profile = State(initialValue: profile)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text("导入独立汇编程序")
+                .font(.title2.weight(.semibold))
+            Text("已选择 \(inputs.count) 个文件或目录。目录仅扫描当前层，每个源码会成为一个独立工程。")
+                .foregroundStyle(.secondary)
+            LabeledContent("统一目标") {
+                profilePicker(selection: $profile)
+                    .accessibilityIdentifier("import-profile-picker")
+            }
+            .accessibilityElement(children: .contain)
+            .disabled(isWorking)
+            Text("源码内容保持不变；成功发布工程后，原文件会被移入对应子目录。")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            HStack {
+                Spacer()
+                Button("取消", action: onCancel)
+                    .keyboardShortcut(.cancelAction)
+                    .disabled(isWorking)
+                Button(isWorking ? "正在导入…" : "开始导入") {
+                    isWorking = true
+                    Task { @MainActor in
+                        if let report = await model.importProjects(ProjectImportRequest(
+                            inputs: inputs,
+                            profile: profile
+                        )) {
+                            onFinished(report)
+                        }
+                        isWorking = false
+                    }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(isWorking)
+                .accessibilityIdentifier("import-confirm")
+            }
+        }
+        .padding(24)
+        .frame(width: 580)
+        .interactiveDismissDisabled(isWorking)
+    }
+}
+
+@MainActor
+private struct ImportSummarySheet: View {
+    let report: ProjectImportReport
+    let onDone: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("导入完成")
+                .font(.title2.weight(.semibold))
+            Text("已创建 \(report.created.count) 个工程")
+                .font(.headline)
+            Text("跳过 \(report.skipped.count) 个，警告 \(report.warnings.count) 个")
+                .foregroundStyle(report.status == .complete ? Color.secondary : Color.orange)
+            List {
+                if !report.created.isEmpty {
+                    Section("已创建") {
+                        ForEach(report.created, id: \.projectDirectory) { project in
+                            Text(project.projectDirectory.path)
+                                .textSelection(.enabled)
+                        }
+                    }
+                }
+                if !report.skipped.isEmpty {
+                    Section("已跳过") {
+                        ForEach(Array(report.skipped.enumerated()), id: \.offset) { _, issue in
+                            VStack(alignment: .leading) {
+                                Text(issue.sourceURL.path)
+                                Text(issue.message).font(.caption).foregroundStyle(.secondary)
+                            }
+                            .textSelection(.enabled)
+                        }
+                    }
+                }
+                if !report.warnings.isEmpty {
+                    Section("警告") {
+                        ForEach(Array(report.warnings.enumerated()), id: \.offset) { _, issue in
+                            VStack(alignment: .leading) {
+                                Text(issue.sourceURL.path)
+                                Text(issue.message).font(.caption).foregroundStyle(.secondary)
+                            }
+                            .textSelection(.enabled)
+                        }
+                    }
+                }
+            }
+            .frame(minHeight: 210)
+            HStack {
+                Spacer()
+                Button("完成", action: onDone)
+                    .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(24)
+        .frame(width: 680)
+        .frame(minHeight: 360)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("import-summary")
+    }
+}
+
+@MainActor
+private func profilePicker(selection: Binding<ProfileID>) -> some View {
+    Picker("目标 profile", selection: selection) {
+        Text("ARM7TDMI").tag(ProfileID.arm7tdmi)
+        Text("Cortex-M4").tag(ProfileID.cortexM4)
+        Text("STM32F4 Discovery").tag(ProfileID.stm32f4Discovery)
+    }
+    .labelsHidden()
+    .accessibilityLabel("目标 profile")
+    .pickerStyle(.menu)
+    .frame(width: 190)
 }

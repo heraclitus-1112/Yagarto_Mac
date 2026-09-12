@@ -45,6 +45,27 @@ public protocol BuildServicing: Sendable {
     func build(projectDirectory: URL) async throws -> AppBuildResult
 }
 
+public protocol ProjectCreationServicing: Sendable {
+    func create(_ request: ProjectCreationRequest) async throws -> CreatedProject
+    func importProjects(_ request: ProjectImportRequest) async -> ProjectImportReport
+}
+
+public struct CoreProjectCreationService: ProjectCreationServicing, Sendable {
+    private let creator: ProjectCreator
+
+    public init(creator: ProjectCreator = ProjectCreator()) {
+        self.creator = creator
+    }
+
+    public func create(_ request: ProjectCreationRequest) async throws -> CreatedProject {
+        try await Task.detached { try creator.create(request) }.value
+    }
+
+    public func importProjects(_ request: ProjectImportRequest) async -> ProjectImportReport {
+        await Task.detached { creator.importProjects(request) }.value
+    }
+}
+
 public struct DebugSourceBreakpoint: Equatable, Sendable {
     public let file: URL
     public let line: Int

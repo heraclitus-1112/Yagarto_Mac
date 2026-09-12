@@ -56,6 +56,8 @@ final class AppModelsTests: XCTestCase {
 
     func testCommandAvailabilityFollowsEveryDebuggerState() {
         XCTAssertTrue(AppCommandAvailability.isEnabled(.open, state: .idle, hasDocument: false, isDirty: false))
+        XCTAssertTrue(AppCommandAvailability.isEnabled(.newProject, state: .idle, hasDocument: false, isDirty: false))
+        XCTAssertTrue(AppCommandAvailability.isEnabled(.importProjects, state: .ready, hasDocument: true, isDirty: false))
         XCTAssertTrue(AppCommandAvailability.isEnabled(.build, state: .idle, hasDocument: true, isDirty: false))
         XCTAssertTrue(AppCommandAvailability.isEnabled(.save, state: .ready, hasDocument: true, isDirty: true))
         XCTAssertTrue(AppCommandAvailability.isEnabled(.run, state: .ready, hasDocument: true, isDirty: false))
@@ -68,10 +70,19 @@ final class AppModelsTests: XCTestCase {
         XCTAssertTrue(AppCommandAvailability.isEnabled(.stop, state: .terminating, hasDocument: true, isDirty: false))
 
         for state in [DebuggerState.building, .launching, .running, .terminating] {
+            XCTAssertFalse(AppCommandAvailability.isEnabled(.newProject, state: state, hasDocument: true, isDirty: false))
+            XCTAssertFalse(AppCommandAvailability.isEnabled(.importProjects, state: state, hasDocument: true, isDirty: false))
             XCTAssertFalse(AppCommandAvailability.isEnabled(.build, state: state, hasDocument: true, isDirty: false))
             XCTAssertFalse(AppCommandAvailability.isEnabled(.changeProfile, state: state, hasDocument: true, isDirty: false))
             XCTAssertFalse(AppCommandAvailability.isEnabled(.edit, state: state, hasDocument: true, isDirty: false))
         }
+        XCTAssertFalse(AppCommandAvailability.isEnabled(
+            .newProject,
+            state: .idle,
+            hasDocument: false,
+            isDirty: false,
+            isProjectOperationInProgress: true
+        ))
         XCTAssertFalse(AppCommandAvailability.isEnabled(.build, state: .idle, hasDocument: false, isDirty: false))
     }
 
@@ -122,5 +133,25 @@ final class AppModelsTests: XCTestCase {
         XCTAssertEqual(ClosePolicy.action(isDirty: false, state: .running), .stopThenClose)
         XCTAssertEqual(ClosePolicy.action(isDirty: false, state: .stopped), .stopThenClose)
         XCTAssertEqual(ClosePolicy.action(isDirty: false, state: .ready), .allow)
+        XCTAssertEqual(
+            ClosePolicy.action(
+                isDirty: false,
+                state: .idle,
+                isProjectOperationInProgress: true
+            ),
+            .denyProjectOperation
+        )
+    }
+
+    func testRememberedCreationProfileWinsUntilAProjectOpenUpdatesIt() {
+        XCTAssertEqual(
+            ProjectProfilePreference.selected(lastRawValue: "cortex-m4", current: .arm7tdmi),
+            .cortexM4
+        )
+        XCTAssertEqual(
+            ProjectProfilePreference.selected(lastRawValue: "invalid", current: .stm32f4Discovery),
+            .stm32f4Discovery
+        )
+        XCTAssertEqual(ProjectProfilePreference.selected(lastRawValue: "invalid", current: nil), .arm7tdmi)
     }
 }

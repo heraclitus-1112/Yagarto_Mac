@@ -134,6 +134,8 @@ public enum BuildDiagnosticParser {
 
 public enum AppCommand: String, CaseIterable, Sendable {
     case open
+    case newProject
+    case importProjects
     case save
     case build
     case run
@@ -152,10 +154,12 @@ public enum AppCommandAvailability {
         _ command: AppCommand,
         state: DebuggerState,
         hasDocument: Bool,
-        isDirty: Bool
+        isDirty: Bool,
+        isProjectOperationInProgress: Bool = false
     ) -> Bool {
+        if isProjectOperationInProgress { return false }
         switch command {
-        case .open:
+        case .open, .newProject, .importProjects:
             return state == .idle || state == .ready
         case .save:
             return hasDocument && isDirty && (state == .idle || state == .ready)
@@ -177,10 +181,16 @@ public enum CloseAction: Equatable, Sendable {
     case allow
     case confirmUnsaved
     case stopThenClose
+    case denyProjectOperation
 }
 
 public enum ClosePolicy {
-    public static func action(isDirty: Bool, state: DebuggerState) -> CloseAction {
+    public static func action(
+        isDirty: Bool,
+        state: DebuggerState,
+        isProjectOperationInProgress: Bool = false
+    ) -> CloseAction {
+        if isProjectOperationInProgress { return .denyProjectOperation }
         if isDirty { return .confirmUnsaved }
         switch state {
         case .launching, .stopped, .running, .terminating:
@@ -188,6 +198,12 @@ public enum ClosePolicy {
         case .idle, .building, .ready:
             return .allow
         }
+    }
+}
+
+public enum ProjectProfilePreference {
+    public static func selected(lastRawValue: String, current: ProfileID?) -> ProfileID {
+        ProfileID(rawValue: lastRawValue) ?? current ?? .arm7tdmi
     }
 }
 

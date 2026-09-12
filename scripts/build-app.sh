@@ -77,7 +77,7 @@ fi
 
 plutil -lint "$app_path/Contents/Info.plist" >/dev/null
 test "$(plutil -extract CFBundleIdentifier raw -o - "$app_path/Contents/Info.plist")" = "org.yagarto.mac.app"
-test "$(plutil -extract CFBundleShortVersionString raw -o - "$app_path/Contents/Info.plist")" = "0.4.0"
+test "$(plutil -extract CFBundleShortVersionString raw -o - "$app_path/Contents/Info.plist")" = "0.5.0"
 test -x "$app_path/Contents/MacOS/YagartoMacApp"
 test -f "$root_resource_bundle/arm7tdmi.ld"
 test -f "$app_path/Contents/Resources/examples/arm7tdmi/array-addressing/yagarto.json"

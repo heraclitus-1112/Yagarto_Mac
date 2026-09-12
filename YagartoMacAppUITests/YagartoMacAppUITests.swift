@@ -97,6 +97,55 @@ final class YagartoMacAppUITests: XCTestCase {
         waitForLabel("就绪", element: state)
     }
 
+    func testCreateProjectOpensRunnableTemplateWithoutAutomaticBuild() throws {
+        launchApplication()
+        XCTAssertTrue(app.otherElements["empty-state"].waitForExistence(timeout: 5))
+        app.buttons["empty-new-project"].click()
+
+        let name = app.textFields["new-project-name"]
+        XCTAssertTrue(name.waitForExistence(timeout: 5))
+        name.click()
+        name.typeText("自动工程")
+        app.buttons["new-project-create"].click()
+
+        let editor = app.textViews["source-editor"]
+        XCTAssertTrue(editor.waitForExistence(timeout: 5))
+        let source = editor.value as? String ?? ""
+        XCTAssertTrue(source.contains(".global start"))
+        waitForLabel("未构建", element: app.descendants(matching: .any)["debugger-state"])
+    }
+
+    func testImportSourcesShowsSummaryWithoutOpeningCreatedProject() throws {
+        launchApplication()
+        XCTAssertTrue(app.otherElements["empty-state"].waitForExistence(timeout: 5))
+        app.buttons["empty-import-projects"].click()
+        XCTAssertTrue(app.popUpButtons["import-profile-picker"].waitForExistence(timeout: 5))
+        app.buttons["import-confirm"].click()
+
+        let summary = app.otherElements["import-summary"]
+        XCTAssertTrue(summary.waitForExistence(timeout: 5))
+        XCTAssertTrue(summary.staticTexts["已创建 1 个工程"].exists)
+        XCTAssertTrue(app.otherElements["empty-state"].exists)
+    }
+
+    func testNewProjectHonoursUnsavedDocumentCancellation() throws {
+        launchApplication()
+        XCTAssertTrue(app.otherElements["empty-state"].waitForExistence(timeout: 5))
+        app.buttons["open-example"].click()
+        let editor = app.textViews["source-editor"]
+        XCTAssertTrue(editor.waitForExistence(timeout: 5))
+        editor.click()
+        editor.typeText("\n@ unsaved")
+
+        app.typeKey("n", modifierFlags: .command)
+        let cancel = app.buttons["取消"]
+        XCTAssertTrue(cancel.waitForExistence(timeout: 5))
+        cancel.click()
+
+        XCTAssertTrue(editor.exists)
+        XCTAssertFalse(app.textFields["new-project-name"].exists)
+    }
+
     private func waitForLabel(_ label: String, element: XCUIElement) {
         let predicate = NSPredicate(format: "label == %@ OR value == %@", label, label)
         let expectation = XCTNSPredicateExpectation(predicate: predicate, object: element)

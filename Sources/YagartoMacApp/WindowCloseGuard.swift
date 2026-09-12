@@ -63,7 +63,8 @@ struct WindowCloseGuard: NSViewRepresentable {
             }
             switch ClosePolicy.action(
                 isDirty: model.document?.isDirty ?? false,
-                state: model.state
+                state: model.state,
+                isProjectOperationInProgress: model.isProjectOperationInProgress
             ) {
             case .allow:
                 return previousDelegate?.windowShouldClose?(sender) ?? true
@@ -72,6 +73,13 @@ struct WindowCloseGuard: NSViewRepresentable {
                 return false
             case .confirmUnsaved:
                 return confirmUnsavedBeforeClosing(sender)
+            case .denyProjectOperation:
+                let alert = NSAlert()
+                alert.messageText = "正在整理工程"
+                alert.informativeText = "请等待新建或导入操作完成后再关闭窗口。"
+                alert.addButton(withTitle: "好")
+                alert.runModal()
+                return false
             }
         }
 

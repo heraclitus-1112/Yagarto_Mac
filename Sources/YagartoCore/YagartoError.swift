@@ -23,6 +23,9 @@ public enum YagartoError: Error, Equatable, Sendable {
     case unsafeBuildLock(String, String)
     case atomicDirectorySwapUnsupported(String, String)
     case invalidEntry(String)
+    case invalidProjectName(String)
+    case invalidProjectParent(String)
+    case projectCreationFailed(String, String)
     case toolNotFound(String)
     case debugBackendUnavailable(ProfileID)
     case unsafePipeValue(String)
@@ -90,6 +93,12 @@ extension YagartoError: LocalizedError {
             return "build.atomic_publish_unsupported"
         case .invalidEntry:
             return "configuration.invalid_entry"
+        case .invalidProjectName:
+            return "project.invalid_name"
+        case .invalidProjectParent:
+            return "project.invalid_parent"
+        case .projectCreationFailed:
+            return "project.creation_failed"
         case .toolNotFound:
             return "tool.not_found"
         case .debugBackendUnavailable:
@@ -165,6 +174,12 @@ extension YagartoError: LocalizedError {
             return "构建目录“\(path)”所在文件系统不支持安全的原子目录交换；未启动构建工具。"
         case .invalidEntry(let entry):
             return "入口符号“\(entry)”无效；请使用汇编符号名，不能包含命令或控制字符。"
+        case .invalidProjectName:
+            return "工程名无效；请使用可见的单个文件夹名称，不能包含路径分隔符、冒号或控制字符。"
+        case .invalidProjectParent:
+            return "工程父目录不存在或不是文件夹；请选择可写目录后重试。"
+        case .projectCreationFailed:
+            return "无法创建工程；原有文件未被覆盖。请检查目录权限和可用空间。"
         case .toolNotFound(let tool):
             return "未找到工具 \(tool)。请安装 Arm GNU Toolchain，或提供该工具的显式路径。"
         case .debugBackendUnavailable(let profile):
@@ -227,6 +242,12 @@ extension YagartoError: LocalizedError {
             return "路径：\(path)；\(detail)"
         case .internalFailure(let detail):
             return detail
+        case .invalidProjectName(let name):
+            return "工程名：\(name.debugDescription)"
+        case .invalidProjectParent(let path):
+            return "路径：\(path)"
+        case .projectCreationFailed(let path, let detail):
+            return "路径：\(path)；\(detail)"
         default:
             return nil
         }

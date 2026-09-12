@@ -47,4 +47,46 @@ final class AccessibilityIdentifierContractTests: XCTestCase {
             )
         }
     }
+
+    func testProjectCreationControlsHaveStableAccessibilityContracts() throws {
+        let repository = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let workbench = try String(
+            contentsOf: repository.appendingPathComponent("Sources/YagartoMacApp/WorkbenchView.swift"),
+            encoding: .utf8
+        )
+        let uiTests = try String(
+            contentsOf: repository.appendingPathComponent("YagartoMacAppUITests/YagartoMacAppUITests.swift"),
+            encoding: .utf8
+        )
+        let identifiers = [
+            "empty-new-project", "empty-import-projects", "new-project-name",
+            "new-project-create", "import-profile-picker", "import-confirm",
+            "import-summary"
+        ]
+        for identifier in identifiers {
+            XCTAssertTrue(workbench.contains("\"\(identifier)\""), "App 缺少 \(identifier)")
+            XCTAssertTrue(uiTests.contains("\"\(identifier)\""), "XCUITest 缺少 \(identifier)")
+        }
+    }
+
+    func testNewProjectAndStepOverDoNotShareCommandN() throws {
+        let repository = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let workbench = try String(
+            contentsOf: repository.appendingPathComponent("Sources/YagartoMacApp/WorkbenchView.swift"),
+            encoding: .utf8
+        )
+        let plainCommandN = ".keyboardShortcut(\"n\", modifiers: .command)"
+
+        XCTAssertEqual(workbench.components(separatedBy: plainCommandN).count - 1, 2)
+        XCTAssertTrue(workbench.contains(
+            "Button(\"单步越过\") { Task { await model.stepOver() } }\n" +
+            "                .keyboardShortcut(\"n\", modifiers: [.command, .shift])"
+        ))
+    }
 }

@@ -20,7 +20,7 @@ Apple Silicon Mac 使用 AArch64，不能直接运行课程的 ARM32 ELF；Arm G
 
 Phase 4 已提供 macOS 15+ 的 `YagartoMacApp`：上部为 AppKit 源码编辑器与 profile 寄存器，下部为控制台、栈、内存和反汇编。应用通过 `YagartoAppSupport` 直接复用 Core 的构建与 GDB/MI 控制器；寄存器变化、断点和当前执行行都提供非颜色标识与辅助功能文本。
 
-空状态可直接打开随应用打包的原创 ARM7 数组寻址示例；应用会先将它复制到用户的 Application Support 工作区，重复打开不会覆盖用户修改。
+空状态现在可以全自动新建工程或批量导入独立 `.s/.S`，也可直接打开随应用打包的原创 ARM7 数组寻址示例。新建只需工程名、父目录和 profile；程序会生成最小可运行源码与配置并直接打开，但不会自动构建。批量导入把每个源码移动到同名子工程，结束后只显示汇总。
 
 ```sh
 scripts/build-app.sh Debug
@@ -47,6 +47,14 @@ Emacs 集成不会静默修改 init 文件。先审阅 `scripts/install-emacs.sh
 ```sh
 swift run yagarto-mac doctor
 swift run yagarto-mac doctor --format json
+
+# 推荐：自动创建目录、源码骨架和配置
+swift run yagarto-mac new demo --profile arm7tdmi --parent "$PWD"
+
+# 把一个目录当前层的独立 .s/.S 各自整理为工程
+swift run yagarto-mac import ./ARM7 --profile arm7tdmi
+
+# 兼容旧流程：只在当前目录创建 yagarto.json
 swift run yagarto-mac init --profile arm7tdmi
 swift run yagarto-mac profile set cortex-m4
 swift run yagarto-mac build

@@ -128,6 +128,28 @@ final class ConfigStoreTests: XCTestCase {
             }
         }
     }
+
+    func testConfigurationCanSaveThroughSymlinkedProjectRootUsingCanonicalLock() throws {
+        let directory = try TemporaryDirectory()
+        let realProject = directory.url.appendingPathComponent("real", isDirectory: true)
+        let projectAlias = directory.url.appendingPathComponent("alias", isDirectory: true)
+        try FileManager.default.createDirectory(at: realProject, withIntermediateDirectories: false)
+        try FileManager.default.createSymbolicLink(at: projectAlias, withDestinationURL: realProject)
+        let configuration = ProjectConfiguration(
+            profile: .cortexM4,
+            entry: "main",
+            sources: ["main.s"],
+            outputName: "alias-project"
+        )
+
+        let store = ConfigStore(projectDirectory: projectAlias)
+        try store.save(configuration)
+
+        XCTAssertEqual(try store.load(), configuration)
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: realProject.appendingPathComponent("yagarto.json").path
+        ))
+    }
 }
 
 private struct TemporaryDirectory {

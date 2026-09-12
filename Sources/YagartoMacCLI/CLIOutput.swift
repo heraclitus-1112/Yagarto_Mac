@@ -215,6 +215,10 @@ private struct CLIUsageDiagnostic {
         switch command {
         case "init":
             return common.union(["--profile"])
+        case "new":
+            return common.union(["--profile", "--parent"])
+        case "import":
+            return common.union(["--profile"])
         case "doctor", "build", "disassemble":
             return common
         case "run", "debug":

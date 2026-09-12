@@ -30,7 +30,7 @@ final class CLIIntegrationTests: XCTestCase {
 
         XCTAssertEqual(result.status, 0)
         for command in [
-            "doctor", "init", "profile", "build", "disassemble",
+            "doctor", "init", "new", "import", "profile", "build", "disassemble",
             "run", "debug", "flash"
         ] {
             XCTAssertTrue(result.stdout.contains(command), "help 缺少 \(command)")
@@ -1335,6 +1335,93 @@ final class CLIIntegrationTests: XCTestCase {
             "信号测试的 assembler fixture 未退出"
         )
     }
+
+    func testNewCommandCreatesNamedProjectWithJSONOutputWithoutChangingInitBehavior() throws {
+        let directory = try CLITemporaryDirectory()
+
+        let result = try runCLI([
+            "new", "课程 工程",
+            "--profile", "cortex-m4",
+            "--parent", directory.url.path,
+            "--format", "json"
+        ], in: directory.url)
+
+        XCTAssertEqual(result.status, 0, result.stderr)
+        XCTAssertEqual(result.stderr, "")
+        let payload = try JSONDecoder().decode(
+            CLICreatedProjectOutput.self,
+            from: Data(result.stdout.utf8)
+        )
+        XCTAssertEqual(payload.schemaVersion, 1)
+        XCTAssertEqual(payload.action, "created")
+        XCTAssertEqual(payload.profile, .cortexM4)
+        XCTAssertEqual(payload.projectPath, directory.url.appendingPathComponent("课程 工程").path)
+        XCTAssertEqual(payload.sourcePath, directory.url.appendingPathComponent("课程 工程/课程 工程.s").path)
+        XCTAssertEqual(
+            try ConfigStore(projectDirectory: URL(fileURLWithPath: payload.projectPath)).load().entry,
+            "main"
+        )
+
+        let legacy = try CLITemporaryDirectory()
+        let initResult = try runCLI(["init", "--profile", "arm7tdmi"], in: legacy.url)
+        XCTAssertEqual(initResult.status, 0, initResult.stderr)
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: legacy.url.appendingPathComponent("yagarto.json").path
+        ))
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: legacy.url.appendingPathComponent("demo.s").path
+        ))
+    }
+
+    func testImportCommandReturnsStructuredPartialReportAndExitTwo() throws {
+        let directory = try CLITemporaryDirectory()
+        let valid = directory.url.appendingPathComponent("valid.s")
+        let ambiguous = directory.url.appendingPathComponent("ambiguous.s")
+        try Data(".global start\nstart: b start\n".utf8).write(to: valid)
+        try Data(".global one, two\none: b one\ntwo: b two\n".utf8).write(to: ambiguous)
+
+        let result = try runCLI([
+            "import", valid.path, ambiguous.path,
+            "--profile", "arm7tdmi",
+            "--format", "json"
+        ], in: directory.url)
+
+        XCTAssertEqual(result.status, YagartoExitCode.usage.rawValue)
+        XCTAssertEqual(result.stderr, "")
+        let payload = try JSONDecoder().decode(
+            CLIProjectImportOutput.self,
+            from: Data(result.stdout.utf8)
+        )
+        XCTAssertEqual(payload.schemaVersion, 1)
+        XCTAssertEqual(payload.status, .partial)
+        XCTAssertEqual(payload.profile, .arm7tdmi)
+        XCTAssertEqual(payload.created.map(\.sourcePath).map(URL.init(fileURLWithPath:)).map(\.lastPathComponent), ["valid.s"])
+        XCTAssertEqual(payload.skipped.map(\.code), ["project.entry_ambiguous"])
+        XCTAssertTrue(payload.warnings.isEmpty)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: valid.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: ambiguous.path))
+    }
+
+    func testImportCommandTextReportsCompleteDirectoryImportNonRecursively() throws {
+        let directory = try CLITemporaryDirectory()
+        try Data(".global start\nstart: b start\n".utf8)
+            .write(to: directory.url.appendingPathComponent("lesson.s"))
+        let nested = directory.url.appendingPathComponent("nested", isDirectory: true)
+        try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: false)
+        try Data(".global start\nstart: b start\n".utf8)
+            .write(to: nested.appendingPathComponent("nested.s"))
+
+        let result = try runCLI([
+            "import", directory.url.path,
+            "--profile", "arm7tdmi",
+            "--format", "text"
+        ], in: directory.url)
+
+        XCTAssertEqual(result.status, 0, result.stderr)
+        XCTAssertTrue(result.stdout.contains("已创建 1 个工程"))
+        XCTAssertTrue(result.stdout.contains("lesson/lesson.s"))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: nested.appendingPathComponent("nested.s").path))
+    }
 }
 
 private struct CLIResult {
@@ -1549,6 +1636,26 @@ private struct CLIErrorEnvelope: Decodable {
     let success: Bool
     let exitCode: Int32
     let error: ErrorBody
+}
+
+private struct CLICreatedProjectOutput: Decodable {
+    let schemaVersion: Int
+    let action: String
+    let profile: ProfileID
+    let projectPath: String
+    let sourcePath: String
+}
+
+private struct CLIProjectImportOutput: Decodable {
+    struct Created: Decodable { let sourcePath: String }
+    struct Issue: Decodable { let code: String }
+
+    let schemaVersion: Int
+    let status: ProjectImportStatus
+    let profile: ProfileID
+    let created: [Created]
+    let skipped: [Issue]
+    let warnings: [Issue]
 }
 
 private func decodeErrorEnvelope(_ string: String) throws -> CLIErrorEnvelope {

@@ -17,6 +17,8 @@ enum YagartoMacMain {
         } catch let error as YagartoError {
             CLIOutput.writeError(error)
             Darwin.exit(error.exitCode.rawValue)
+        } catch let exit as CLIControlledExit {
+            Darwin.exit(exit.code)
         } catch {
             let parserCode = YagartoCLI.exitCode(for: error).rawValue
             if parserCode == 0 {
