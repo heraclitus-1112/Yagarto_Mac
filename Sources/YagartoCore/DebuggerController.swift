@@ -458,16 +458,27 @@ public actor DebuggerController {
     }
 
     private func interruptSimulator(_ activeSession: GDBMISession) async throws {
-        try await activeSession.interruptProcessGroup()
+        let interruptGeneration = generation
+        do {
+            try await activeSession.interruptProcessGroup()
+        } catch {
+            if !isCurrent(interruptGeneration, session: activeSession)
+                || machine.state == .terminating
+                || machine.state == .ready {
+                return
+            }
+            throw error
+        }
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: .seconds(1))
         while clock.now < deadline {
+            guard isCurrent(interruptGeneration, session: activeSession) else { return }
             switch machine.state {
-            case .stopped:
+            case .stopped, .terminating, .ready:
                 return
             case .running:
                 try await Task.sleep(for: .milliseconds(10))
-            case .ready, .idle, .building, .launching, .terminating:
+            case .idle, .building, .launching:
                 throw DebuggerControllerError.commandTimedOut("等待 ARM7 仿真器暂停")
             }
         }

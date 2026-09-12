@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+import Foundation
+
 public struct DebugRegister: Equatable, Sendable {
     public let name: String
     public let number: Int?
@@ -122,4 +124,27 @@ public enum DebuggerControllerError: Error, Equatable, Sendable {
     case invalidBreakpointID
     case missingBreakpointID
     case commandTimedOut(String)
+}
+
+extension DebuggerControllerError: LocalizedError {
+    public var errorDescription: String? {
+        switch self {
+        case .missingLaunchPlan:
+            return "尚未准备调试启动计划。"
+        case .profileMismatch(let expected, let actual):
+            return "调试目标不匹配：需要 \(expected.rawValue)，实际为 \(actual.rawValue)。"
+        case .operationUnavailable(let operation, let state):
+            return "当前调试状态（\(state.rawValue)）不能执行 \(operation)。"
+        case .invalidMemoryRequest:
+            return "内存读取参数无效。"
+        case .invalidBreakpointLocation:
+            return "断点位置无效。"
+        case .invalidBreakpointID:
+            return "断点编号无效。"
+        case .missingBreakpointID:
+            return "GDB 未返回断点编号。"
+        case .commandTimedOut(let command):
+            return "调试操作超时：\(command)。"
+        }
+    }
 }

@@ -6,6 +6,13 @@ import XCTest
 @testable import YagartoCore
 
 final class DebuggerControllerTests: XCTestCase {
+    func testControllerTimeoutHasActionableLocalizedDescription() {
+        XCTAssertEqual(
+            DebuggerControllerError.commandTimedOut("等待 ARM7 仿真器暂停").localizedDescription,
+            "调试操作超时：等待 ARM7 仿真器暂停。"
+        )
+    }
+
     func testStoppedEventRefreshesCompleteARM7Snapshot() async throws {
         let fixture = try ControllerGDBFixture()
         let controller = DebuggerController(plan: fixture.plan(profile: .arm7tdmi), consoleLimit: 3)
@@ -65,6 +72,25 @@ final class DebuggerControllerTests: XCTestCase {
 
         XCTAssertFalse(try fixture.commands().contains("-exec-interrupt --all"))
         try await controller.stop()
+    }
+
+    func testSimulatorPauseSupersededByConcurrentStopDoesNotReportFailure() async throws {
+        let fixture = try ControllerGDBFixture(signalInterrupt: true, signalStopAfter: 2)
+        let controller = DebuggerController(plan: fixture.plan(profile: .arm7tdmi))
+        try await controller.launch()
+        _ = try await waitForSnapshot(controller)
+        try await controller.run()
+        try await waitForState(.running, controller: controller)
+
+        let pause = Task { try await controller.pause() }
+        try await fixture.waitForSignalCount(1)
+        let stop = Task { try await controller.stop() }
+        try await pause.value
+        try await stop.value
+        try await fixture.waitForSignalCount(2)
+
+        let state = await controller.currentState
+        XCTAssertEqual(state, .ready)
     }
 
     func testRunningARM7SimulatorStopInterruptsBeforeGDBExitWithoutTimeout() async throws {
@@ -537,9 +563,11 @@ private final class ControllerGDBFixture {
     let emitRunningWhileStackHung: Bool
     let autoExitWithStubbornChild: Bool
     let signalInterrupt: Bool
+    let signalStopAfter: Int
     let label: String
     let pidLog: URL
     let childPIDFile: URL
+    let signalLog: URL
 
     init(
         failMemory: Bool = false,
@@ -549,6 +577,7 @@ private final class ControllerGDBFixture {
         emitRunningWhileStackHung: Bool = false,
         autoExitWithStubbornChild: Bool = false,
         signalInterrupt: Bool = false,
+        signalStopAfter: Int = 1,
         label: String = "课程"
     ) throws {
         self.failMemory = failMemory
@@ -558,6 +587,7 @@ private final class ControllerGDBFixture {
         self.emitRunningWhileStackHung = emitRunningWhileStackHung
         self.autoExitWithStubbornChild = autoExitWithStubbornChild
         self.signalInterrupt = signalInterrupt
+        self.signalStopAfter = signalStopAfter
         self.label = label
         directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -566,6 +596,7 @@ private final class ControllerGDBFixture {
         capture = directory.appendingPathComponent("commands.txt")
         pidLog = directory.appendingPathComponent("pids.txt")
         childPIDFile = directory.appendingPathComponent("child.pid")
+        signalLog = directory.appendingPathComponent("signals.txt")
         try Self.source.write(to: script, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
     }
@@ -599,9 +630,11 @@ private final class ControllerGDBFixture {
                 "--emit-running-while-stack-hung", emitRunningWhileStackHung ? "yes" : "no",
                 "--auto-exit-with-stubborn-child", autoExitWithStubbornChild ? "yes" : "no",
                 "--signal-interrupt", signalInterrupt ? "yes" : "no",
+                "--signal-stop-after", String(signalStopAfter),
                 "--label", label,
                 "--pid-log", pidLog.path,
-                "--child-pid-file", childPIDFile.path
+                "--child-pid-file", childPIDFile.path,
+                "--signal-log", signalLog.path
             ],
             initCommands: [],
             warnings: [],
@@ -620,6 +653,18 @@ private final class ControllerGDBFixture {
         try String(contentsOf: pidLog, encoding: .utf8)
             .split(separator: "\n")
             .compactMap { pid_t($0) }
+    }
+
+    func waitForSignalCount(_ count: Int) async throws {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while ContinuousClock.now < deadline {
+            let observed = ((try? String(contentsOf: signalLog, encoding: .utf8)) ?? "")
+                .split(separator: "\n")
+                .count
+            if observed >= count { return }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        throw ControllerTestError.timeout
     }
 
     func processIDsIfPresent() -> [pid_t] {
@@ -650,9 +695,11 @@ hang_stack = sys.argv[sys.argv.index("--hang-stack") + 1] == "yes"
 emit_running_while_stack_hung = sys.argv[sys.argv.index("--emit-running-while-stack-hung") + 1] == "yes"
 auto_exit_with_stubborn_child = sys.argv[sys.argv.index("--auto-exit-with-stubborn-child") + 1] == "yes"
 signal_interrupt = sys.argv[sys.argv.index("--signal-interrupt") + 1] == "yes"
+signal_stop_after = int(sys.argv[sys.argv.index("--signal-stop-after") + 1])
 label = sys.argv[sys.argv.index("--label") + 1]
 pid_log = sys.argv[sys.argv.index("--pid-log") + 1]
 child_pid_file = sys.argv[sys.argv.index("--child-pid-file") + 1]
+signal_log = sys.argv[sys.argv.index("--signal-log") + 1]
 
 with open(pid_log, "a", encoding="utf-8") as handle:
     handle.write(str(os.getpid()) + "\n")
@@ -672,9 +719,13 @@ def out(value):
     sys.stdout.flush()
 
 running = False
+signal_count = 0
 def handle_sigint(_signum, _frame):
-    global running
-    if signal_interrupt and running:
+    global running, signal_count
+    signal_count += 1
+    with open(signal_log, "a", encoding="utf-8") as handle:
+        handle.write("signal\n")
+    if signal_interrupt and running and signal_count >= signal_stop_after:
         running = False
         out('*stopped,reason="signal-received",frame={addr="0x1000",func="main"}')
 
