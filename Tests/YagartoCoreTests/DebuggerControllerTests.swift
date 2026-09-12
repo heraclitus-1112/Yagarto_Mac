@@ -35,7 +35,10 @@ final class DebuggerControllerTests: XCTestCase {
 
     func testResultDoneNeverGuessesRunningStateBeforeAsyncRunning() async throws {
         let fixture = try ControllerGDBFixture()
-        let controller = DebuggerController(plan: fixture.plan(profile: .arm7tdmi))
+        let controller = DebuggerController(plan: fixture.plan(
+            profile: .arm7tdmi,
+            backend: .qemuMPS2AN386
+        ))
         try await controller.launch()
         _ = try await waitForSnapshot(controller)
 
@@ -45,7 +48,41 @@ final class DebuggerControllerTests: XCTestCase {
         try await waitForState(.running, controller: controller)
         try await controller.pause()
         try await waitForState(.stopped, controller: controller)
+        XCTAssertTrue(try fixture.commands().contains("-exec-interrupt --all"))
         try await controller.stop()
+    }
+
+    func testARM7SimulatorPauseUsesProcessSignalWhenMIInterruptIsUnsupported() async throws {
+        let fixture = try ControllerGDBFixture(signalInterrupt: true)
+        let controller = DebuggerController(plan: fixture.plan(profile: .arm7tdmi))
+        try await controller.launch()
+        _ = try await waitForSnapshot(controller)
+        try await controller.run()
+        try await waitForState(.running, controller: controller)
+
+        try await controller.pause()
+        try await waitForState(.stopped, controller: controller)
+
+        XCTAssertFalse(try fixture.commands().contains("-exec-interrupt --all"))
+        try await controller.stop()
+    }
+
+    func testRunningARM7SimulatorStopInterruptsBeforeGDBExitWithoutTimeout() async throws {
+        let fixture = try ControllerGDBFixture(signalInterrupt: true)
+        let controller = DebuggerController(plan: fixture.plan(profile: .arm7tdmi))
+        try await controller.launch()
+        _ = try await waitForSnapshot(controller)
+        try await controller.run()
+        try await waitForState(.running, controller: controller)
+        let started = ContinuousClock.now
+
+        try await controller.stop()
+
+        XCTAssertLessThan(started.duration(to: .now), .seconds(1))
+        let state = await controller.currentState
+        XCTAssertEqual(state, .ready)
+        XCTAssertTrue(try fixture.commands().contains("-gdb-exit"))
+        XCTAssertFalse(try fixture.commands().contains("-exec-interrupt --all"))
     }
 
     func testOptionalPaneFailureKeepsStoppedSnapshotAndDiagnostic() async throws {
@@ -138,7 +175,7 @@ final class DebuggerControllerTests: XCTestCase {
             emitRunningWhileStackHung: true
         )
         let controller = DebuggerController(
-            plan: fixture.plan(profile: .arm7tdmi),
+            plan: fixture.plan(profile: .arm7tdmi, backend: .qemuMPS2AN386),
             snapshotCommandTimeout: .milliseconds(500)
         )
 
@@ -180,7 +217,10 @@ final class DebuggerControllerTests: XCTestCase {
         XCTAssertEqual(Darwin.kill(oldChild, 0), 0)
 
         try await controller.buildStarted()
-        try await controller.buildSucceeded(plan: newFixture.plan(profile: .arm7tdmi))
+        try await controller.buildSucceeded(plan: newFixture.plan(
+            profile: .arm7tdmi,
+            backend: .qemuMPS2AN386
+        ))
         try await controller.launch()
         let snapshot = try await waitForSnapshot(controller, fullName: "/tmp/new/main.s")
         XCTAssertEqual(snapshot.location?.fullName, "/tmp/new/main.s")
@@ -496,6 +536,7 @@ private final class ControllerGDBFixture {
     let hangStack: Bool
     let emitRunningWhileStackHung: Bool
     let autoExitWithStubbornChild: Bool
+    let signalInterrupt: Bool
     let label: String
     let pidLog: URL
     let childPIDFile: URL
@@ -507,6 +548,7 @@ private final class ControllerGDBFixture {
         hangStack: Bool = false,
         emitRunningWhileStackHung: Bool = false,
         autoExitWithStubbornChild: Bool = false,
+        signalInterrupt: Bool = false,
         label: String = "课程"
     ) throws {
         self.failMemory = failMemory
@@ -515,6 +557,7 @@ private final class ControllerGDBFixture {
         self.hangStack = hangStack
         self.emitRunningWhileStackHung = emitRunningWhileStackHung
         self.autoExitWithStubbornChild = autoExitWithStubbornChild
+        self.signalInterrupt = signalInterrupt
         self.label = label
         directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -539,10 +582,13 @@ private final class ControllerGDBFixture {
         try? FileManager.default.removeItem(at: directory)
     }
 
-    func plan(profile: ProfileID) -> DebugLaunchPlan {
+    func plan(
+        profile: ProfileID,
+        backend: DebugBackend = .gdbSimulator
+    ) -> DebugLaunchPlan {
         DebugLaunchPlan(
             profile: profile,
-            backend: .gdbSimulator,
+            backend: backend,
             gdbExecutable: script.path,
             gdbArguments: [
                 "--capture", capture.path,
@@ -552,6 +598,7 @@ private final class ControllerGDBFixture {
                 "--hang-stack", hangStack ? "yes" : "no",
                 "--emit-running-while-stack-hung", emitRunningWhileStackHung ? "yes" : "no",
                 "--auto-exit-with-stubborn-child", autoExitWithStubbornChild ? "yes" : "no",
+                "--signal-interrupt", signalInterrupt ? "yes" : "no",
                 "--label", label,
                 "--pid-log", pidLog.path,
                 "--child-pid-file", childPIDFile.path
@@ -602,6 +649,7 @@ hang_frame = sys.argv[sys.argv.index("--hang-frame") + 1] == "yes"
 hang_stack = sys.argv[sys.argv.index("--hang-stack") + 1] == "yes"
 emit_running_while_stack_hung = sys.argv[sys.argv.index("--emit-running-while-stack-hung") + 1] == "yes"
 auto_exit_with_stubborn_child = sys.argv[sys.argv.index("--auto-exit-with-stubborn-child") + 1] == "yes"
+signal_interrupt = sys.argv[sys.argv.index("--signal-interrupt") + 1] == "yes"
 label = sys.argv[sys.argv.index("--label") + 1]
 pid_log = sys.argv[sys.argv.index("--pid-log") + 1]
 child_pid_file = sys.argv[sys.argv.index("--child-pid-file") + 1]
@@ -622,6 +670,15 @@ if auto_exit_with_stubborn_child:
 def out(value):
     sys.stdout.write(value + "\n")
     sys.stdout.flush()
+
+running = False
+def handle_sigint(_signum, _frame):
+    global running
+    if signal_interrupt and running:
+        running = False
+        out('*stopped,reason="signal-received",frame={addr="0x1000",func="main"}')
+
+signal.signal(signal.SIGINT, handle_sigint)
 
 for value in range(1, 6):
     out('~"console-%d"' % value)
@@ -669,15 +726,20 @@ for raw in sys.stdin:
         out(token + '^done,asm_insns=[{address="0x1000",func-name="main",offset="0",inst="mov r0, #42"}]')
     elif command == "-exec-continue":
         out(token + "^done")
+        running = True
         threading.Thread(target=lambda: (time.sleep(0.15), out("*running,thread-id=\"all\"")), daemon=True).start()
     elif command == "-exec-interrupt --all":
-        out(token + "^done")
-        out('*stopped,reason="signal-received",frame={addr="0x1000",func="main"}')
+        if signal_interrupt:
+            out(token + '^error,msg="simulator MI interrupt unsupported"')
+        else:
+            out(token + "^done")
+            out('*stopped,reason="signal-received",frame={addr="0x1000",func="main"}')
     elif command.startswith("-break-insert"):
         out(token + '^done,bkpt={number="7",addr="0x1000"}')
     elif command == "-gdb-exit":
-        out(token + "^exit")
-        sys.exit(0)
+        if not (signal_interrupt and running):
+            out(token + "^exit")
+            sys.exit(0)
     else:
         out(token + "^done")
 """#

@@ -26,6 +26,7 @@ public enum GDBMISessionError: Error, Equatable, Sendable {
     case launchFailed(executable: String, detail: String)
     case writeFailed(String)
     case waitFailed(String)
+    case signalFailed(String)
     case endOfFile
     case processExited(ProcessTermination)
     case commandFailed(MICommandFailure)
@@ -33,7 +34,7 @@ public enum GDBMISessionError: Error, Equatable, Sendable {
     public var exitCode: YagartoExitCode {
         switch self {
         case .launchFailed: .missingTool
-        case .processExited, .writeFailed, .waitFailed, .endOfFile: .buildFailure
+        case .processExited, .writeFailed, .waitFailed, .signalFailed, .endOfFile: .buildFailure
         case .notStarted, .alreadyStarted, .invalidCommand, .invalidLaunchValue,
              .missingOptionValue, .commandFailed:
             .configuration
@@ -43,6 +44,37 @@ public enum GDBMISessionError: Error, Equatable, Sendable {
     public var isProcessExit: Bool {
         if case .processExited = self { return true }
         return false
+    }
+}
+
+extension GDBMISessionError: LocalizedError {
+    public var errorDescription: String? {
+        switch self {
+        case .notStarted:
+            return "GDB 调试会话尚未启动。"
+        case .alreadyStarted:
+            return "GDB 调试会话已经启动。"
+        case .invalidCommand:
+            return "GDB 命令格式无效。"
+        case .invalidLaunchValue(let field):
+            return "GDB 启动参数包含无效值：\(field)。"
+        case .missingOptionValue(let option):
+            return "GDB 启动选项缺少参数：\(option)。"
+        case .launchFailed(let executable, let detail):
+            return "无法启动 GDB（\(executable)）：\(detail)"
+        case .writeFailed(let detail):
+            return "无法向 GDB 发送命令：\(detail)"
+        case .waitFailed(let detail):
+            return "等待 GDB 退出失败：\(detail)"
+        case .signalFailed(let detail):
+            return "无法暂停 ARM7 仿真器：\(detail)"
+        case .endOfFile:
+            return "GDB 调试会话已结束。"
+        case .processExited(let termination):
+            return "GDB 已退出（\(termination.reason.rawValue)，状态 \(termination.status)）。"
+        case .commandFailed(let failure):
+            return "GDB 命令失败：\(failure.message ?? failure.command)"
+        }
     }
 }
 
@@ -362,6 +394,16 @@ public actor GDBMISession {
             }
         } onCancel: {
             Task { await self.cancelRequest(token) }
+        }
+    }
+
+    public func interruptProcessGroup() throws {
+        guard let processBox, termination == nil, terminalFailure == nil else {
+            if let terminalFailure { throw terminalFailure }
+            throw termination.map(GDBMISessionError.processExited) ?? .notStarted
+        }
+        guard processBox.signalGroup(SIGINT) == 0 else {
+            throw GDBMISessionError.signalFailed(String(cString: strerror(errno)))
         }
     }
 

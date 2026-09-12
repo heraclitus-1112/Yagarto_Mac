@@ -171,7 +171,12 @@ public actor DebuggerController {
 
     public func pause() async throws {
         try requireState(.running, operation: "pause")
-        _ = try await requiredSession().send("-exec-interrupt --all")
+        let activeSession = try requiredSession()
+        if plan?.backend == .gdbSimulator {
+            try await interruptSimulator(activeSession)
+        } else {
+            _ = try await activeSession.send("-exec-interrupt --all")
+        }
     }
 
     public func stepInstruction() async throws {
@@ -185,13 +190,35 @@ public actor DebuggerController {
     }
 
     public func stop() async throws {
+        let stoppedSession = session
+        var interruptFailure: (any Error)?
+        if machine.state == .running,
+           plan?.backend == .gdbSimulator,
+           let stoppedSession {
+            do {
+                try await interruptSimulator(stoppedSession)
+            } catch {
+                interruptFailure = error
+            }
+        }
+        if machine.state == .ready {
+            generation = UUID()
+            if let stoppedSession, session === stoppedSession { session = nil }
+            await cancelAndAwaitBackgroundTasks()
+            if let stoppedSession { await stoppedSession.shutdown(timeout: .zero) }
+            return
+        }
         try transition(.terminationStarted)
         generation = UUID()
-        let stoppedSession = session
         session = nil
         await cancelAndAwaitBackgroundTasks()
-        if let stoppedSession { await stoppedSession.shutdown() }
+        if let stoppedSession {
+            await stoppedSession.shutdown(
+                timeout: interruptFailure == nil ? .seconds(2) : .zero
+            )
+        }
         try transition(.terminationCompleted)
+        if let interruptFailure { throw interruptFailure }
     }
 
     public func readMemory(_ request: DebugMemoryRequest) async throws -> [MIMemoryBlock] {
@@ -428,6 +455,23 @@ public actor DebuggerController {
             request.cancel()
             timeout.cancel()
         }
+    }
+
+    private func interruptSimulator(_ activeSession: GDBMISession) async throws {
+        try await activeSession.interruptProcessGroup()
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(1))
+        while clock.now < deadline {
+            switch machine.state {
+            case .stopped:
+                return
+            case .running:
+                try await Task.sleep(for: .milliseconds(10))
+            case .ready, .idle, .building, .launching, .terminating:
+                throw DebuggerControllerError.commandTimedOut("等待 ARM7 仿真器暂停")
+            }
+        }
+        throw DebuggerControllerError.commandTimedOut("等待 ARM7 仿真器暂停")
     }
 
     private static func registerDisplayNames(for profile: ProfileID) -> [String] {

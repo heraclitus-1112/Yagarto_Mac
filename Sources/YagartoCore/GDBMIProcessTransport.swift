@@ -132,8 +132,9 @@ final class GDBMIChildProcess: Sendable {
         return .success(.init(reason: .exit, status: (status >> 8) & 0xFF))
     }
 
-    func signalGroup(_ signal: Int32) {
-        _ = Darwin.kill(-processGroupIdentifier, signal)
+    @discardableResult
+    func signalGroup(_ signal: Int32) -> Int32 {
+        Darwin.kill(-processGroupIdentifier, signal)
     }
 
     func groupExists() -> Bool {

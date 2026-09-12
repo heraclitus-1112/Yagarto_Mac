@@ -6,6 +6,30 @@ import XCTest
 @testable import YagartoCore
 
 final class GDBMISessionTests: XCTestCase {
+    func testCommandFailureHasActionableLocalizedDescription() {
+        let record = MIResultRecord(
+            token: 7,
+            resultClass: .error,
+            results: MIResults([
+                MIResult(
+                    variable: "msg",
+                    value: .constant("simulator MI interrupt unsupported")
+                )
+            ])
+        )
+        let failure = MICommandFailure(
+            token: 7,
+            command: "-exec-interrupt --all",
+            message: "simulator MI interrupt unsupported",
+            record: record
+        )
+
+        XCTAssertEqual(
+            GDBMISessionError.commandFailed(failure).localizedDescription,
+            "GDB 命令失败：simulator MI interrupt unsupported"
+        )
+    }
+
     func testTransportUsesPOSIXSpawnWithPreExecProcessGroup() {
         XCTAssertEqual(GDBMISession.launchStrategy, .posixSpawnProcessGroup)
     }
