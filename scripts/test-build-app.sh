@@ -7,6 +7,7 @@ output=$("$script_directory/build-app.sh" Debug)
 test "$(printf '%s\n' "$output" | wc -l | tr -d ' ')" -eq 1
 test -x "$output/Contents/MacOS/YagartoMacApp"
 test "$(plutil -extract CFBundleIdentifier raw -o - "$output/Contents/Info.plist")" = "org.yagarto.mac.app"
+test -f "$output/YagartoMac_YagartoCore.bundle/arm7tdmi.ld"
 test -f "$output/Contents/Resources/examples/arm7tdmi/array-addressing/yagarto.json"
 test -f "$output/Contents/Resources/examples/arm7tdmi/array-addressing/array-addressing.s"
 test ! -e "$output/Contents/Resources/examples/arm7tdmi/array-addressing/.yagarto"

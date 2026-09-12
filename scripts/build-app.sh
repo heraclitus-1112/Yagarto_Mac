@@ -39,7 +39,8 @@ if [ "$xcode_status" -eq 0 ]; then
 elif grep -Eq 'required plug-in failed to load|xcodebuild failed to load a required plug-in|DVTPlugInLoading' "$build_log"; then
   echo "警告：本机 Xcode 插件无法加载，改用 SwiftPM 生成无 Developer ID 签名的等价 .app；详情：$build_log" >&2
   swift build --package-path "$project_root" -c "$swift_configuration" --product YagartoMacApp \
-    -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors >&2
+    -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors \
+    -Xswiftc -gnone >&2
   binary_directory=$(swift build --package-path "$project_root" -c "$swift_configuration" --show-bin-path)
   staging_directory=$(mktemp -d "$dist_directory/.YagartoMacApp.XXXXXX")
   trap 'rm -rf -- "$staging_directory"' EXIT HUP INT TERM
@@ -67,9 +68,17 @@ else
   exit "$xcode_status"
 fi
 
+embedded_resource_bundle="$app_path/Contents/Resources/YagartoMac_YagartoCore.bundle"
+root_resource_bundle="$app_path/YagartoMac_YagartoCore.bundle"
+if [ -d "$embedded_resource_bundle" ]; then
+  rm -rf -- "$root_resource_bundle"
+  ditto "$embedded_resource_bundle" "$root_resource_bundle"
+fi
+
 plutil -lint "$app_path/Contents/Info.plist" >/dev/null
 test "$(plutil -extract CFBundleIdentifier raw -o - "$app_path/Contents/Info.plist")" = "org.yagarto.mac.app"
 test "$(plutil -extract CFBundleShortVersionString raw -o - "$app_path/Contents/Info.plist")" = "0.4.0"
 test -x "$app_path/Contents/MacOS/YagartoMacApp"
+test -f "$root_resource_bundle/arm7tdmi.ld"
 test -f "$app_path/Contents/Resources/examples/arm7tdmi/array-addressing/yagarto.json"
 echo "$app_path"
