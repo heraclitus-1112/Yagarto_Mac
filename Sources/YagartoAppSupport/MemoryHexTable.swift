@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import AppKit
+import ObjectiveC
 import SwiftUI
 import YagartoCore
 
@@ -152,8 +153,164 @@ private struct NativeMemoryTable: NSViewRepresentable {
     }
 }
 
+private struct MemoryNativeAccessibilityMetadata {
+    let identifier: String
+    let label: String
+    let value: String?
+}
+
+struct MemoryNativeAccessibilityOverrideRecord: Equatable {
+    let attribute: String
+    let value: String
+    let succeeded: Bool
+}
+
 @MainActor
-final class MemoryNativeTableController: NSObject, NSTableViewDataSource, NSTableViewDelegate {
+private protocol MemoryNativeTableAccessibilityProviding: AnyObject {
+    func accessibilityMetadataForRow(_ row: Int) -> MemoryNativeAccessibilityMetadata?
+    func accessibilityMetadataForCell(
+        column: Int,
+        row: Int
+    ) -> MemoryNativeAccessibilityMetadata?
+    func accessibilityMetadataForHeader(column: Int) -> MemoryNativeAccessibilityMetadata?
+}
+
+@MainActor
+private final class MemoryNativeTableView: NSTableView {
+    weak var accessibilityMetadataProvider: (any MemoryNativeTableAccessibilityProviding)?
+    private(set) var accessibilityOverrideRecords:
+        [String: [MemoryNativeAccessibilityOverrideRecord]] = [:]
+
+    private var isDecoratingAccessibility = false
+
+    @objc(accessibilityRows)
+    func rawAccessibilityRows() -> NSArray? {
+        guard let proxies = systemAccessibilityRows() else { return nil }
+        for (row, proxy) in proxies.enumerated() {
+            if let metadata = accessibilityMetadataProvider?.accessibilityMetadataForRow(row) {
+                decorate(proxy, with: metadata)
+            }
+        }
+        return proxies
+    }
+
+    override func layout() {
+        super.layout()
+        decorateAccessibilityRowsAndHeaders()
+    }
+
+    override func accessibilityCell(forColumn column: Int, row: Int) -> Any? {
+        guard let proxy = super.accessibilityCell(forColumn: column, row: row) else {
+            return nil
+        }
+        if let metadata = accessibilityMetadataProvider?.accessibilityMetadataForCell(
+            column: column,
+            row: row
+        ) {
+            decorate(proxy, with: metadata)
+        }
+        return proxy
+    }
+
+    private func decorateAccessibilityRowsAndHeaders() {
+        guard !isDecoratingAccessibility else { return }
+        isDecoratingAccessibility = true
+        defer { isDecoratingAccessibility = false }
+
+        _ = rawAccessibilityRows()
+
+        guard let headerView else { return }
+        for (column, proxy) in accessibilityObjects(
+            attribute: "AXChildren",
+            from: headerView
+        ).enumerated() {
+            if let metadata = accessibilityMetadataProvider?.accessibilityMetadataForHeader(
+                column: column
+            ) {
+                decorate(proxy, with: metadata)
+            }
+        }
+    }
+
+    private func decorate(_ proxy: Any, with metadata: MemoryNativeAccessibilityMetadata) {
+        guard let object = proxy as? NSObject else { return }
+        var records = [
+            overrideAccessibilityAttribute("AXIdentifier", to: metadata.identifier, on: object),
+            overrideAccessibilityAttribute("AXDescription", to: metadata.label, on: object)
+        ]
+        if let value = metadata.value {
+            records.append(overrideAccessibilityAttribute("AXValue", to: value, on: object))
+        }
+        accessibilityOverrideRecords[metadata.identifier] = records
+    }
+
+    private func overrideAccessibilityAttribute(
+        _ attribute: String,
+        to value: String,
+        on object: NSObject
+    ) -> MemoryNativeAccessibilityOverrideRecord {
+        let selector = NSSelectorFromString("accessibilitySetOverrideValue:forAttribute:")
+        guard object.responds(to: selector), let implementation = object.method(for: selector) else {
+            return MemoryNativeAccessibilityOverrideRecord(
+                attribute: attribute,
+                value: value,
+                succeeded: false
+            )
+        }
+        typealias OverrideMethod = @convention(c) (
+            AnyObject,
+            Selector,
+            AnyObject?,
+            AnyObject
+        ) -> Bool
+        let method = unsafeBitCast(implementation, to: OverrideMethod.self)
+        let didOverride = method(object, selector, value as NSString, attribute as NSString)
+        // AppKit exposes override values to external AX clients. Its in-process
+        // legacy getter continues to report the proxy's original value.
+        return MemoryNativeAccessibilityOverrideRecord(
+            attribute: attribute,
+            value: value,
+            succeeded: didOverride
+        )
+    }
+
+    private func systemAccessibilityRows() -> NSArray? {
+        let selector = NSSelectorFromString("accessibilityRows")
+        guard
+            let superclass = class_getSuperclass(MemoryNativeTableView.self),
+            let method = class_getInstanceMethod(superclass, selector)
+        else {
+            return nil
+        }
+        typealias RowsMethod = @convention(c) (
+            AnyObject,
+            Selector
+        ) -> Unmanaged<AnyObject>?
+        let implementation = method_getImplementation(method)
+        let rowsMethod = unsafeBitCast(implementation, to: RowsMethod.self)
+        return rowsMethod(self, selector)?.takeUnretainedValue() as? NSArray
+    }
+
+    private func accessibilityObjects(attribute: String, from object: NSObject) -> [Any] {
+        let selector = NSSelectorFromString("accessibilityAttributeValue:")
+        guard
+            object.responds(to: selector),
+            let rawValue = object.perform(selector, with: attribute)?.takeUnretainedValue(),
+            let array = rawValue as? NSArray
+        else {
+            return []
+        }
+        return array.map { $0 }
+    }
+
+    func resetAccessibilityOverrideRecords() {
+        accessibilityOverrideRecords.removeAll(keepingCapacity: true)
+    }
+}
+
+@MainActor
+final class MemoryNativeTableController: NSObject, NSTableViewDataSource, NSTableViewDelegate,
+    MemoryNativeTableAccessibilityProviding {
     private enum Column: Equatable {
         case address
         case byte(Int)
@@ -205,8 +362,11 @@ final class MemoryNativeTableController: NSObject, NSTableViewDataSource, NSTabl
     }
 
     let scrollView = NSScrollView()
-    let tableView = NSTableView()
+    let tableView: NSTableView
     private(set) var reloadCount = 0
+    var accessibilityOverrideRecords: [String: [MemoryNativeAccessibilityOverrideRecord]] {
+        (tableView as? MemoryNativeTableView)?.accessibilityOverrideRecords ?? [:]
+    }
 
     private var rows: [MemoryTableRow] = []
     private let columns: [Column] = [
@@ -218,7 +378,10 @@ final class MemoryNativeTableController: NSObject, NSTableViewDataSource, NSTabl
     ]
 
     override init() {
+        let nativeTableView = MemoryNativeTableView()
+        tableView = nativeTableView
         super.init()
+        nativeTableView.accessibilityMetadataProvider = self
         configureTable()
         configureScrollView()
     }
@@ -226,8 +389,10 @@ final class MemoryNativeTableController: NSObject, NSTableViewDataSource, NSTabl
     func update(rows: [MemoryTableRow]) {
         guard rows != self.rows else { return }
         self.rows = rows
+        (tableView as? MemoryNativeTableView)?.resetAccessibilityOverrideRecords()
         reloadCount += 1
         tableView.reloadData()
+        tableView.needsLayout = true
     }
 
     func numberOfRows(in tableView: NSTableView) -> Int {
@@ -342,6 +507,45 @@ final class MemoryNativeTableController: NSObject, NSTableViewDataSource, NSTabl
         case .ascii:
             return "\(prefix)-ascii"
         }
+    }
+
+    fileprivate func accessibilityMetadataForRow(
+        _ row: Int
+    ) -> MemoryNativeAccessibilityMetadata? {
+        guard rows.indices.contains(row) else { return nil }
+        return MemoryNativeAccessibilityMetadata(
+            identifier: "memory-table-row-\(row)",
+            label: "内存行",
+            value: nil
+        )
+    }
+
+    fileprivate func accessibilityMetadataForCell(
+        column: Int,
+        row: Int
+    ) -> MemoryNativeAccessibilityMetadata? {
+        guard columns.indices.contains(column), rows.indices.contains(row) else {
+            return nil
+        }
+        let tableColumn = columns[column]
+        let presentation = cellPresentation(for: tableColumn, row: rows[row])
+        return MemoryNativeAccessibilityMetadata(
+            identifier: cellAccessibilityIdentifier(for: tableColumn, row: row),
+            label: tableColumn.title,
+            value: presentation.accessibilityValue
+        )
+    }
+
+    fileprivate func accessibilityMetadataForHeader(
+        column: Int
+    ) -> MemoryNativeAccessibilityMetadata? {
+        guard columns.indices.contains(column) else { return nil }
+        let tableColumn = columns[column]
+        return MemoryNativeAccessibilityMetadata(
+            identifier: tableColumn.accessibilityIdentifier,
+            label: tableColumn.title,
+            value: nil
+        )
     }
 }
 

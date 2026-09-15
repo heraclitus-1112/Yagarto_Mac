@@ -89,6 +89,119 @@ final class MemoryHexTableTests: XCTestCase {
         }
     }
 
+    func testSystemTableAccessibilityProxiesExposeRowCellAndHeaderMetadata() throws {
+        let controller = MemoryNativeTableController()
+        controller.update(rows: try formattedRows())
+
+        try withWindow(contentView: controller.scrollView) {
+            let table = controller.tableView
+            let rowValues = try rawAccessibilityObjects(
+                from: table,
+                selectorName: "accessibilityRows"
+            )
+            let rowValue = try XCTUnwrap(rowValues.first)
+            let row = try accessibilityObject(from: rowValue, description: "row")
+            XCTAssertEqual(accessibilityRole(of: row), .row)
+            XCTAssertNil(accessibilityString("AXIdentifier", of: row))
+            assertNonZeroAccessibilityFrame(row)
+
+            let columnIndices = [0, 1, 5, 17]
+            let cells = try columnIndices.map { column in
+                let value = try XCTUnwrap(table.accessibilityCell(forColumn: column, row: 0))
+                return try accessibilityObject(
+                    from: value,
+                    description: "cell column \(column)"
+                )
+            }
+            XCTAssertEqual(cells.map(accessibilityRole), Array(repeating: .cell, count: 4))
+            XCTAssertEqual(
+                cells.map { accessibilityString("AXIdentifier", of: $0) },
+                Array(repeating: nil, count: 4)
+            )
+            XCTAssertEqual(cells.map { accessibilityString("AXDescription", of: $0) }, [
+                "地址",
+                "+0",
+                "+4",
+                "ASCII"
+            ])
+            XCTAssertEqual(
+                cells.map { accessibilityString("AXValue", of: $0) },
+                Array(repeating: nil, count: 4)
+            )
+            cells.forEach { assertNonZeroAccessibilityFrame($0) }
+
+            assertAccessibilityOverrides(
+                in: controller,
+                identifier: "memory-table-row-0",
+                expected: ["AXIdentifier": "memory-table-row-0", "AXDescription": "内存行"]
+            )
+            assertAccessibilityOverrides(
+                in: controller,
+                identifier: "memory-table-row-0-address",
+                expected: [
+                    "AXIdentifier": "memory-table-row-0-address",
+                    "AXDescription": "地址",
+                    "AXValue": "0x00008000"
+                ]
+            )
+            assertAccessibilityOverrides(
+                in: controller,
+                identifier: "memory-table-row-0-byte-0",
+                expected: [
+                    "AXIdentifier": "memory-table-row-0-byte-0",
+                    "AXDescription": "+0",
+                    "AXValue": "FC"
+                ]
+            )
+            assertAccessibilityOverrides(
+                in: controller,
+                identifier: "memory-table-row-0-byte-4",
+                expected: [
+                    "AXIdentifier": "memory-table-row-0-byte-4",
+                    "AXDescription": "+4",
+                    "AXValue": "空"
+                ]
+            )
+            assertAccessibilityOverrides(
+                in: controller,
+                identifier: "memory-table-row-0-ascii",
+                expected: [
+                    "AXIdentifier": "memory-table-row-0-ascii",
+                    "AXDescription": "ASCII",
+                    "AXValue": "....            "
+                ]
+            )
+
+            let header = try accessibilityObject(
+                from: XCTUnwrap(accessibilityAttribute("AXHeader", of: table)),
+                description: "header container"
+            )
+            let headerValues = try rawAccessibilityObjects(
+                from: header,
+                attribute: "AXChildren"
+            )
+            let headers = try headerValues.enumerated().map { index, value in
+                try accessibilityObject(from: value, description: "header \(index)")
+            }
+            XCTAssertEqual(headers.map { accessibilityString("AXIdentifier", of: $0) }, [
+                "memory-table-header-address"
+            ] + (0..<16).map {
+                "memory-table-header-byte-\($0)"
+            } + [
+                "memory-table-header-ascii"
+            ])
+            headers.forEach { assertNonZeroAccessibilityFrame($0) }
+            let headerRecords = controller.accessibilityOverrideRecords
+                .filter { $0.key.hasPrefix("memory-table-header-") }
+            XCTAssertEqual(headerRecords.count, 18)
+            XCTAssertTrue(
+                headerRecords.values
+                    .flatMap { $0 }
+                    .allSatisfy(\.succeeded)
+            )
+        }
+    }
+
     func testEmptyContentsResolveToEmptyState() {
         XCTAssertEqual(
             MemoryHexTableContent(blocks: [block(begin: "0x8000", contents: "")]),
@@ -286,6 +399,101 @@ final class MemoryHexTableTests: XCTestCase {
         let frame = view.accessibilityFrame()
         XCTAssertGreaterThan(frame.width, 0, "AX frame: \(frame)", file: file, line: line)
         XCTAssertGreaterThan(frame.height, 0, "AX frame: \(frame)", file: file, line: line)
+    }
+
+    private func assertNonZeroAccessibilityFrame(
+        _ object: NSObject,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        guard
+            let position = accessibilityAttribute("AXPosition", of: object) as? NSValue,
+            let size = accessibilityAttribute("AXSize", of: object) as? NSValue
+        else {
+            return XCTFail(
+                "System proxy \(type(of: object)) does not expose AXPosition and AXSize",
+                file: file,
+                line: line
+            )
+        }
+        let frame = NSRect(origin: position.pointValue, size: size.sizeValue)
+        XCTAssertGreaterThan(frame.width, 0, "AX frame: \(frame)", file: file, line: line)
+        XCTAssertGreaterThan(frame.height, 0, "AX frame: \(frame)", file: file, line: line)
+    }
+
+    private func accessibilityObject(
+        from value: Any,
+        description: String
+    ) throws -> NSObject {
+        try XCTUnwrap(
+            value as? NSObject,
+            "System \(description) proxy has runtime type \(type(of: value))"
+        )
+    }
+
+    private func accessibilityRole(of object: NSObject) -> NSAccessibility.Role? {
+        guard let rawValue = accessibilityString("AXRole", of: object) else {
+            return nil
+        }
+        return NSAccessibility.Role(rawValue: rawValue)
+    }
+
+    private func accessibilityString(_ attribute: String, of object: NSObject) -> String? {
+        accessibilityAttribute(attribute, of: object) as? String
+    }
+
+    private func accessibilityAttribute(_ attribute: String, of object: NSObject) -> Any? {
+        let selector = NSSelectorFromString("accessibilityAttributeValue:")
+        guard object.responds(to: selector) else { return nil }
+        return object.perform(selector, with: attribute)?.takeUnretainedValue()
+    }
+
+    private func rawAccessibilityObjects(
+        from object: NSObject,
+        selectorName: String
+    ) throws -> [Any] {
+        let selector = NSSelectorFromString(selectorName)
+        let rawValue = try XCTUnwrap(
+            object.perform(selector)?.takeUnretainedValue(),
+            "Selector \(selectorName) returned nil"
+        )
+        let array = try XCTUnwrap(
+            rawValue as? NSArray,
+            "Selector \(selectorName) returned \(type(of: rawValue)) instead of NSArray"
+        )
+        return array.map { $0 }
+    }
+
+    private func assertAccessibilityOverrides(
+        in controller: MemoryNativeTableController,
+        identifier: String,
+        expected: [String: String],
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        let records = controller.accessibilityOverrideRecords[identifier] ?? []
+        XCTAssertEqual(
+            Dictionary(uniqueKeysWithValues: records.map { ($0.attribute, $0.value) }),
+            expected,
+            file: file,
+            line: line
+        )
+        XCTAssertTrue(records.allSatisfy(\.succeeded), file: file, line: line)
+    }
+
+    private func rawAccessibilityObjects(
+        from object: NSObject,
+        attribute: String
+    ) throws -> [Any] {
+        let rawValue = try XCTUnwrap(
+            accessibilityAttribute(attribute, of: object),
+            "Attribute \(attribute) returned nil"
+        )
+        let array = try XCTUnwrap(
+            rawValue as? NSArray,
+            "Attribute \(attribute) returned \(type(of: rawValue)) instead of NSArray"
+        )
+        return array.map { $0 }
     }
 
     private struct AccessibilitySnapshot {
