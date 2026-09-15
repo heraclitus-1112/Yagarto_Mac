@@ -83,6 +83,7 @@ public struct DebugSnapshot: Equatable, Sendable {
     public let registers: [DebugRegister]
     public let stack: [MIFrame]
     public let memory: [MIMemoryBlock]
+    public let memoryRequest: DebugMemoryRequest?
     public let disassembly: [MIInstruction]
     public let console: [DebugConsoleEntry]
     public let diagnostics: [DebugDiagnostic]
@@ -93,6 +94,7 @@ public struct DebugSnapshot: Equatable, Sendable {
         registers: [DebugRegister],
         stack: [MIFrame],
         memory: [MIMemoryBlock],
+        memoryRequest: DebugMemoryRequest? = nil,
         disassembly: [MIInstruction],
         console: [DebugConsoleEntry],
         diagnostics: [DebugDiagnostic]
@@ -102,6 +104,7 @@ public struct DebugSnapshot: Equatable, Sendable {
         self.registers = registers
         self.stack = stack
         self.memory = memory
+        self.memoryRequest = memoryRequest
         self.disassembly = disassembly
         self.console = console
         self.diagnostics = diagnostics

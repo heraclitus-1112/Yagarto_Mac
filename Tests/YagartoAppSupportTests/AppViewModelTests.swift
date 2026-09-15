@@ -898,7 +898,12 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertTrue(model.memory.isEmpty)
 
         await model.start(.debug)
-        await debug.emit(.snapshot(fixture.snapshot(line: 1, r0: 1, memory: [stoppedBlock])))
+        await debug.emit(.snapshot(fixture.snapshot(
+            line: 1,
+            r0: 1,
+            memory: [stoppedBlock],
+            memoryRequest: .yagartoWindow
+        )))
         await waitUntil { model.memory == [stoppedBlock] }
         XCTAssertEqual(model.snapshot?.memory, [stoppedBlock])
 
@@ -939,7 +944,12 @@ final class AppViewModelTests: XCTestCase {
         let oldBlock = fixture.memoryBlock(begin: "0x8000", contents: "01")
         let newBlock = fixture.memoryBlock(begin: "0xA000", contents: "02")
         let model = try await stoppedModel(fixture: fixture, debug: debug)
-        await debug.emit(.snapshot(fixture.snapshot(line: 1, r0: 1, memory: [oldBlock])))
+        await debug.emit(.snapshot(fixture.snapshot(
+            line: 1,
+            r0: 1,
+            memory: [oldBlock],
+            memoryRequest: .yagartoWindow
+        )))
         await waitUntil { model.memory == [oldBlock] }
         await debug.emit(.stateChanged(.running))
         await waitUntil { model.state == .running }
@@ -956,7 +966,12 @@ final class AppViewModelTests: XCTestCase {
 
         await debug.emit(.stateChanged(.stopped))
         await waitUntil { model.state == .stopped }
-        await debug.emit(.snapshot(fixture.snapshot(line: 2, r0: 2, memory: [newBlock])))
+        await debug.emit(.snapshot(fixture.snapshot(
+            line: 2,
+            r0: 2,
+            memory: [newBlock],
+            memoryRequest: request
+        )))
         await waitUntil { model.memory == [newBlock] }
         XCTAssertEqual(model.memory, [newBlock])
     }
@@ -1008,14 +1023,65 @@ final class AppViewModelTests: XCTestCase {
     func testCurrentMemoryWindowReadFailureSurfacesChineseErrorAndReturnsNil() async throws {
         let fixture = try ViewModelFixture()
         let debug = FakeDebugService()
+        let oldBlock = fixture.memoryBlock(begin: "0x8000", contents: "88")
         await debug.failMemoryRead(for: "0x00009000")
         let model = try await stoppedModel(fixture: fixture, debug: debug)
+        await debug.emit(.snapshot(fixture.snapshot(
+            line: 1,
+            r0: 1,
+            memory: [oldBlock],
+            memoryRequest: .yagartoWindow
+        )))
+        await waitUntil { model.memory == [oldBlock] }
 
         let normalized = await model.setMemoryWindowAddress("0x9000")
 
         XCTAssertNil(normalized)
         XCTAssertEqual(model.errorMessage, "测试内存读取失败。")
         XCTAssertTrue(model.memory.isEmpty)
+    }
+
+    func testMatchingSnapshotClearsPreviousMemoryError() async throws {
+        let fixture = try ViewModelFixture()
+        let debug = FakeDebugService()
+        let request = DebugMemoryRequest(address: "0x00009000", byteCount: 112)
+        let recoveredBlock = fixture.memoryBlock(begin: "0x9000", contents: "99")
+        await debug.failMemoryRead(for: request.address)
+        let model = try await stoppedModel(fixture: fixture, debug: debug)
+        _ = await model.setMemoryWindowAddress("0x9000")
+        XCTAssertEqual(model.errorMessage, "测试内存读取失败。")
+
+        await debug.emit(.snapshot(fixture.snapshot(
+            line: 2,
+            r0: 2,
+            memory: [recoveredBlock],
+            memoryRequest: request
+        )))
+        await waitUntil { model.memory == [recoveredBlock] }
+
+        XCTAssertNil(model.errorMessage)
+    }
+
+    func testMatchingSnapshotDoesNotClearNewerGlobalError() async throws {
+        let fixture = try ViewModelFixture()
+        let debug = FakeDebugService()
+        let request = DebugMemoryRequest(address: "0x00009000", byteCount: 112)
+        let recoveredBlock = fixture.memoryBlock(begin: "0x9000", contents: "99")
+        await debug.failMemoryRead(for: request.address)
+        let model = try await stoppedModel(fixture: fixture, debug: debug)
+        _ = await model.setMemoryWindowAddress("0x9000")
+        XCTAssertEqual(model.errorMessage, "测试内存读取失败。")
+        model.reportOperationError(FakeFailure.global)
+
+        await debug.emit(.snapshot(fixture.snapshot(
+            line: 2,
+            r0: 2,
+            memory: [recoveredBlock],
+            memoryRequest: request
+        )))
+        await waitUntil { model.memory == [recoveredBlock] }
+
+        XCTAssertEqual(model.errorMessage, "测试全局错误。")
     }
 
     func testNewerMemoryReadWinsWhenOlderReadSucceedsLast() async throws {
@@ -1066,23 +1132,45 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertNil(model.errorMessage)
     }
 
-    func testStoppedSnapshotInvalidatesOlderDirectMemoryRead() async throws {
+    func testOldStoppedSnapshotDoesNotInterruptNewMemoryWindowConfiguration() async throws {
         let fixture = try ViewModelFixture()
         let debug = FakeDebugService()
-        let directBlock = fixture.memoryBlock(begin: "0xA000", contents: "AA")
-        let snapshotBlock = fixture.memoryBlock(begin: "0xB000", contents: "BB")
-        await debug.suspendMemoryRead(for: "0x0000A000")
+        let initialBlock = fixture.memoryBlock(begin: "0x8000", contents: "11")
+        let staleBlock = fixture.memoryBlock(begin: "0x8000", contents: "22")
+        let finalBlock = fixture.memoryBlock(begin: "0x9000", contents: "99")
+        await debug.setMemoryResult([finalBlock], for: "0x00009000")
+        await debug.suspendMemoryConfiguration(for: "0x00009000")
         let model = try await stoppedModel(fixture: fixture, debug: debug)
-        let reading = Task { await model.setMemoryWindowAddress("0xA000") }
-        await debug.waitUntilMemoryReadStarted("0x0000A000")
+        await debug.emit(.snapshot(fixture.snapshot(
+            line: 1,
+            r0: 1,
+            memory: [initialBlock],
+            memoryRequest: .yagartoWindow
+        )))
+        await waitUntil { model.memory == [initialBlock] }
 
-        await debug.emit(.snapshot(fixture.snapshot(line: 2, r0: 2, memory: [snapshotBlock])))
-        await waitUntil { model.memory == [snapshotBlock] }
-        await debug.finishMemoryRead("0x0000A000", with: [directBlock])
+        let configuring = Task { await model.setMemoryWindowAddress("0x9000") }
+        await debug.waitUntilMemoryConfigurationStarted("0x00009000")
+        await debug.emitSnapshot(
+            fixture.snapshot(
+                line: 8,
+                r0: 8,
+                memory: [staleBlock],
+                memoryRequest: .yagartoWindow
+            ),
+            followedBy: "old-stopped-snapshot-barrier"
+        )
+        await waitUntil { model.debugDiagnostics.contains { $0.message == "old-stopped-snapshot-barrier" } }
+        let memoryAfterOldSnapshot = model.memory
+        let registerAfterOldSnapshot = model.snapshot?.registers.first?.value?.numeric
 
-        let result = await reading.value
-        XCTAssertNil(result)
-        XCTAssertEqual(model.memory, [snapshotBlock])
+        await debug.finishMemoryConfiguration("0x00009000")
+        let normalized = await configuring.value
+
+        XCTAssertEqual(memoryAfterOldSnapshot, [initialBlock])
+        XCTAssertEqual(registerAfterOldSnapshot, 8)
+        XCTAssertEqual(normalized, "0x00009000")
+        XCTAssertEqual(model.memory, [finalBlock])
         XCTAssertNil(model.errorMessage)
     }
 
@@ -1147,6 +1235,84 @@ final class AppViewModelTests: XCTestCase {
 
         XCTAssertTrue(model.memory.isEmpty)
         XCTAssertNil(model.errorMessage)
+    }
+
+    func testLegacyMemoryReadTracksDesiredRequestAndOwnsItsFailure() async throws {
+        let fixture = try ViewModelFixture()
+        let debug = FakeDebugService()
+        let request = DebugMemoryRequest(address: "0x3000", byteCount: 16)
+        let oldBlock = fixture.memoryBlock(begin: "0x8000", contents: "88")
+        let staleBlock = fixture.memoryBlock(begin: "0x8000", contents: "77")
+        let recoveredBlock = fixture.memoryBlock(begin: "0x3000", contents: "33")
+        await debug.failMemoryRead(for: request.address)
+        let model = try await stoppedModel(fixture: fixture, debug: debug)
+        await debug.emit(.snapshot(fixture.snapshot(
+            line: 1,
+            r0: 1,
+            memory: [oldBlock],
+            memoryRequest: .yagartoWindow
+        )))
+        await waitUntil { model.memory == [oldBlock] }
+
+        await model.readMemory(address: request.address, length: "16")
+        XCTAssertTrue(model.memory.isEmpty)
+        XCTAssertEqual(model.errorMessage, "测试内存读取失败。")
+        await debug.emitSnapshot(
+            fixture.snapshot(
+                line: 2,
+                r0: 2,
+                memory: [staleBlock],
+                memoryRequest: .yagartoWindow
+            ),
+            followedBy: "legacy-stale-snapshot-barrier"
+        )
+        await waitUntil {
+            model.debugDiagnostics.contains { $0.message == "legacy-stale-snapshot-barrier" }
+        }
+        XCTAssertTrue(model.memory.isEmpty)
+        XCTAssertEqual(model.errorMessage, "测试内存读取失败。")
+        await debug.emitSnapshot(
+            fixture.snapshot(
+                line: 3,
+                r0: 3,
+                memory: [recoveredBlock],
+                memoryRequest: request
+            ),
+            followedBy: "legacy-matching-snapshot-barrier"
+        )
+        await waitUntil {
+            model.debugDiagnostics.contains { $0.message == "legacy-matching-snapshot-barrier" }
+        }
+
+        XCTAssertEqual(model.memory, [recoveredBlock])
+        XCTAssertNil(model.errorMessage)
+    }
+
+    func testCloseFromReadyInvalidatesPendingMemoryWindowConfiguration() async throws {
+        let fixture = try ViewModelFixture()
+        let debug = FakeDebugService()
+        let initialBlock = fixture.memoryBlock(begin: "0x3000", contents: "33")
+        await debug.setMemoryResult([initialBlock], for: "0x3000")
+        let model = AppViewModel(
+            documentService: FakeDocumentService(document: fixture.document),
+            buildService: FakeBuildService(result: fixture.buildResult),
+            debugService: debug
+        )
+        await model.open(fixture.document.sourceURL)
+        await model.build()
+        await model.readMemory(address: "0x3000", length: "16")
+        model.reportOperationError(FakeFailure.global)
+        await debug.suspendMemoryConfiguration(for: "0x00009000")
+
+        let configuring = Task { await model.setMemoryWindowAddress("0x9000") }
+        await debug.waitUntilMemoryConfigurationStarted("0x00009000")
+        await model.close()
+        await debug.finishMemoryConfiguration("0x00009000")
+        let normalized = await configuring.value
+
+        XCTAssertNil(normalized)
+        XCTAssertEqual(model.memory, [initialBlock])
+        XCTAssertEqual(model.errorMessage, "测试全局错误。")
     }
 
     func testMemoryValidationRecoveryAndCloseStopAreBounded() async throws {
@@ -1862,6 +2028,7 @@ private enum FakeFailure: Error, Sendable {
     case breakpoint
     case launch
     case memory
+    case global
 }
 
 extension FakeFailure: LocalizedError {
@@ -1870,6 +2037,7 @@ extension FakeFailure: LocalizedError {
         case .breakpoint: return "测试断点失败。"
         case .launch: return "测试启动失败。"
         case .memory: return "测试内存读取失败。"
+        case .global: return "测试全局错误。"
         }
     }
 }
@@ -2018,7 +2186,8 @@ private struct ViewModelFixture {
     func snapshot(
         line: UInt64,
         r0: UInt64,
-        memory: [MIMemoryBlock] = []
+        memory: [MIMemoryBlock] = [],
+        memoryRequest: DebugMemoryRequest? = nil
     ) -> DebugSnapshot {
         DebugSnapshot(
             stopReason: .endSteppingRange,
@@ -2032,6 +2201,7 @@ private struct ViewModelFixture {
             registers: [DebugRegister(name: "r0", value: MIRawNumeric(raw: "0x\(String(r0, radix: 16))", numeric: r0))],
             stack: [],
             memory: memory,
+            memoryRequest: memoryRequest,
             disassembly: [],
             console: [],
             diagnostics: []

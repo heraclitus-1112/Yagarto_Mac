@@ -47,6 +47,8 @@ public final class AppViewModel {
     private var documentRevision: UInt64 = 0
     private var openGeneration: UInt64 = 0
     private var memoryOperationGeneration: UInt64 = 0
+    private var desiredMemoryRequest = DebugMemoryRequest.yagartoWindow
+    private var memoryErrorGeneration: UInt64?
 
     public init(
         documentService: any DocumentServicing,
@@ -132,7 +134,7 @@ public final class AppViewModel {
         isProjectOperationInProgress = true
         defer { isProjectOperationInProgress = false }
         let report = await projectCreationService.importProjects(request)
-        errorMessage = nil
+        clearPresentedError()
         return report
     }
 
@@ -164,7 +166,7 @@ public final class AppViewModel {
             _ = try await documentService.save(snapshot)
             guard matchesDocument(version), let current = self.document else { return }
             self.document = current.acknowledgingSave(of: snapshot)
-            errorMessage = nil
+            clearPresentedError()
         } catch {
             guard matchesDocument(version) else { return }
             present(error)
@@ -178,7 +180,7 @@ public final class AppViewModel {
             try machine.apply(.buildStarted)
             breakpointIdentifiers = [:]
             clearRuntimePresentation()
-            errorMessage = nil
+            clearPresentedError()
             buildDiagnostics = []
             let buildDocument = currentDocument
             if buildDocument.isDirty {
@@ -253,7 +255,7 @@ public final class AppViewModel {
             try? await Task.sleep(for: .milliseconds(10))
         }
         if state == .terminating {
-            errorMessage = "停止调试器超时；后台清理仍在继续。"
+            presentGlobalMessage("停止调试器超时；后台清理仍在继续。")
         }
     }
 
@@ -262,13 +264,15 @@ public final class AppViewModel {
         let operationState = state
         do {
             let request = try MemoryRequestValidator.request(address: address, length: length)
+            desiredMemoryRequest = request
             let blocks = try await debugService.readMemory(request)
             guard isCurrentMemoryOperation(generation, state: operationState) else { return }
             memory = blocks
-            errorMessage = nil
+            clearMemoryError()
         } catch {
             guard isCurrentMemoryOperation(generation, state: operationState) else { return }
-            present(error)
+            memory = []
+            presentMemoryError(error, generation: generation)
         }
     }
 
@@ -281,21 +285,23 @@ public final class AppViewModel {
                 address: normalized,
                 byteCount: MemoryWindowLayout.byteCount
             )
+            desiredMemoryRequest = request
             try await debugService.setMemoryRequest(request)
             guard isCurrentMemoryOperation(generation, state: operationState) else { return nil }
             guard state == .stopped else {
                 memory = []
-                errorMessage = nil
+                clearMemoryError()
                 return normalized
             }
             let blocks = try await debugService.readMemory(request)
             guard isCurrentMemoryOperation(generation, state: .stopped) else { return nil }
             memory = blocks
-            errorMessage = nil
+            clearMemoryError()
             return normalized
         } catch {
             guard isCurrentMemoryOperation(generation, state: operationState) else { return nil }
-            present(error)
+            memory = []
+            presentMemoryError(error, generation: generation)
             return nil
         }
     }
@@ -328,6 +334,7 @@ public final class AppViewModel {
     }
 
     public func close() async {
+        invalidateMemoryOperations()
         guard !isProjectOperationInProgress else { return }
         retireStart()
         invalidateDocumentOperations()
@@ -354,18 +361,20 @@ public final class AppViewModel {
             transitionFromDebugger(to: newState)
         case .snapshot(let newSnapshot):
             guard state == .stopped else { return }
-            invalidateMemoryOperations()
             let previous = snapshot?.registers ?? []
             snapshot = newSnapshot
             registerRows = RegisterPresentation.rows(current: newSnapshot.registers, previous: previous)
-            memory = newSnapshot.memory
+            if newSnapshot.memoryRequest == desiredMemoryRequest {
+                memory = newSnapshot.memory
+                clearMemoryError()
+            }
             console.replace(with: newSnapshot.console)
             debugDiagnostics.append(contentsOf: newSnapshot.diagnostics)
         case .consoleAppended(let entry):
             console.append(entry)
         case .diagnostic(let diagnostic):
             debugDiagnostics.append(diagnostic)
-            if diagnostic.isCritical { errorMessage = diagnostic.message }
+            if diagnostic.isCritical { presentGlobalMessage(diagnostic.message) }
         case .eventsDropped(let total):
             debugDiagnostics.append(DebugDiagnostic(
                 pane: .session,
@@ -407,14 +416,35 @@ public final class AppViewModel {
     private func performDebugCommand(_ operation: () async throws -> Void) async {
         do {
             try await operation()
-            errorMessage = nil
+            clearPresentedError()
         } catch {
             present(error)
         }
     }
 
     private func present(_ error: Error) {
+        presentGlobalMessage(error.localizedDescription)
+    }
+
+    private func presentGlobalMessage(_ message: String) {
+        memoryErrorGeneration = nil
+        errorMessage = message
+    }
+
+    private func presentMemoryError(_ error: Error, generation: UInt64) {
+        memoryErrorGeneration = generation
         errorMessage = error.localizedDescription
+    }
+
+    private func clearMemoryError() {
+        guard memoryErrorGeneration != nil else { return }
+        memoryErrorGeneration = nil
+        errorMessage = nil
+    }
+
+    private func clearPresentedError() {
+        memoryErrorGeneration = nil
+        errorMessage = nil
     }
 
     private func install(_ openedDocument: WorkspaceDocument) {
@@ -430,7 +460,7 @@ public final class AppViewModel {
         breakpointRequestGenerations = [:]
         reconcilingBreakpoints = []
         debugSessionGeneration &+= 1
-        errorMessage = nil
+        clearPresentedError()
         machine = DebuggerStateMachine()
         selectedRange = nil
     }
@@ -457,7 +487,7 @@ public final class AppViewModel {
         debugSessionGeneration &+= 1
         clearRuntimePresentation()
         stopTask = nil
-        if let error { errorMessage = "停止调试器失败：\(error)" }
+        if let error { presentGlobalMessage("停止调试器失败：\(error)") }
     }
 
     private func clearRuntimePresentation() {
@@ -555,7 +585,7 @@ public final class AppViewModel {
                 }
             }
             guard isCurrentStart(generation, session: session, document: document) else { return }
-            errorMessage = nil
+            clearPresentedError()
         } catch {
             guard isCurrentStart(generation, session: session, document: document) else { return }
             if state == .launching { try? machine.apply(.launchFailed) }

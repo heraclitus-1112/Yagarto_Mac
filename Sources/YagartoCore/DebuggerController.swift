@@ -363,6 +363,7 @@ public actor DebuggerController {
         var registerValues: [MIRegisterValue] = []
         var stack: [MIFrame] = []
         var memory: [MIMemoryBlock] = []
+        var actualMemoryRequest: DebugMemoryRequest?
         var disassembly: [MIInstruction] = []
 
         do {
@@ -405,6 +406,7 @@ public actor DebuggerController {
         do {
             let request = memoryRequest
             try validate(request)
+            actualMemoryRequest = request
             memory = try await sendSnapshotCommand(
                 "-data-read-memory-bytes \(request.address) \(request.byteCount)",
                 to: session
@@ -437,6 +439,7 @@ public actor DebuggerController {
             registers: makeRegisters(names: registerNames, values: registerValues),
             stack: stack,
             memory: memory,
+            memoryRequest: actualMemoryRequest,
             disassembly: disassembly,
             console: console,
             diagnostics: diagnostics

@@ -39,6 +39,7 @@ final class DebuggerControllerTests: XCTestCase {
         XCTAssertEqual(snapshot.location?.line?.numeric, 12)
         XCTAssertEqual(snapshot.stack.count, 2)
         XCTAssertEqual(snapshot.memory.first?.contents, "002affff")
+        XCTAssertEqual(snapshot.memoryRequest, .yagartoWindow)
         XCTAssertEqual(snapshot.disassembly.first?.instruction, "mov r0, #42")
         XCTAssertEqual(snapshot.registers.map(\.name), (0...15).map { "r\($0)" } + ["CPSR"])
         XCTAssertEqual(snapshot.registers.first?.value?.numeric, 42)
@@ -119,6 +120,7 @@ final class DebuggerControllerTests: XCTestCase {
         let fixture = try ControllerGDBFixture(hangFirstMemory: true)
         let controller = DebuggerController(plan: fixture.plan(profile: .arm7tdmi))
         let events = await controller.events()
+        let request = DebugMemoryRequest(address: "0x9000", byteCount: 112)
         try await controller.launch()
         try await waitForCommand(
             "-data-read-memory-bytes 0x8000 112",
@@ -127,12 +129,11 @@ final class DebuggerControllerTests: XCTestCase {
         let beforeUpdate = await controller.latestSnapshot
         XCTAssertNil(beforeUpdate)
 
-        try await controller.setMemoryRequest(
-            DebugMemoryRequest(address: "0x9000", byteCount: 112)
-        )
+        try await controller.setMemoryRequest(request)
 
         let updated = try await waitForSnapshot(controller, memoryBegin: 0x9000)
         XCTAssertEqual(updated.memory.first?.begin.numeric, 0x9000)
+        XCTAssertEqual(updated.memoryRequest, request)
         try fixture.releaseFirstMemoryResponse()
         try await waitForConsole("old-memory-response-drained", from: events)
         let afterOldResponse = await controller.latestSnapshot
