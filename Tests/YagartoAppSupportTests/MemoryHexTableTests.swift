@@ -104,15 +104,94 @@ final class MemoryHexTableTests: XCTestCase {
         XCTAssertEqual(message, "内存块 0x8000 包含无效的十六进制数据。")
     }
 
-    func testMemoryHexTableRendersInRealHostingView() throws {
-        let hosting = NSHostingView(rootView: MemoryHexTable(blocks: [
+    func testPublicWrapperHostsPopulatedNativeTableWithIdentifiersAndContents() throws {
+        try withHostedMemoryHexTable(blocks: [
             block(begin: "0x8000", contents: "fcfdeeff")
-        ]).frame(width: 800, height: 320))
+        ]) { hosting in
+            let table = try XCTUnwrap(findView(
+                ofType: NSTableView.self,
+                identifier: "memory-table",
+                in: hosting
+            ))
+            XCTAssertEqual(table.numberOfRows, 1)
+            XCTAssertEqual(table.tableColumns.count, 18)
+            XCTAssertEqual(
+                table.tableColumns.map { $0.headerCell.accessibilityIdentifier() },
+                ["memory-table-header-address"]
+                    + (0..<16).map { "memory-table-header-byte-\($0)" }
+                    + ["memory-table-header-ascii"]
+            )
 
-        try withWindow(contentView: hosting) {
-            let bitmap = try render(hosting)
-            XCTAssertEqual(bitmap.pixelsWide, 800)
-            XCTAssertEqual(bitmap.pixelsHigh, 320)
+            let rowView = try XCTUnwrap(table.rowView(atRow: 0, makeIfNecessary: true))
+            XCTAssertEqual(rowView.accessibilityIdentifier(), "memory-table-row-0")
+
+            let cells = try (0..<18).map { try cell(in: table, column: $0, row: 0) }
+            XCTAssertEqual(
+                cells.map { $0.accessibilityIdentifier() },
+                ["memory-table-row-0-address"]
+                    + (0..<16).map { "memory-table-row-0-byte-\($0)" }
+                    + ["memory-table-row-0-ascii"]
+            )
+            XCTAssertEqual(
+                cells.map { $0.textField?.stringValue },
+                ["0x00008000"]
+                    + ["FC", "FD", "EE", "FF"]
+                    + Array(repeating: " ", count: 12)
+                    + ["....            "]
+            )
+        }
+    }
+
+    func testPublicWrapperHostsEmptyInputAndContentsAsNativeSecondaryPrompt() throws {
+        let emptyInputs: [[MIMemoryBlock]] = [
+            [],
+            [block(begin: "0x8000", contents: "")]
+        ]
+
+        for blocks in emptyInputs {
+            try withHostedMemoryHexTable(blocks: blocks) { hosting in
+                let emptyLabel = try XCTUnwrap(findView(
+                    ofType: NSTextField.self,
+                    identifier: "memory-table-empty",
+                    in: hosting
+                ))
+
+                XCTAssertEqual(emptyLabel.stringValue, "输入地址和长度，然后在程序暂停时读取内存。")
+                XCTAssertEqual(emptyLabel.textColor, .secondaryLabelColor)
+                XCTAssertNotNil(findView(
+                    ofType: NSView.self,
+                    identifier: "memory-table",
+                    in: hosting
+                ))
+                XCTAssertNil(findView(ofType: NSTableView.self, in: hosting))
+            }
+        }
+    }
+
+    func testPublicWrapperHostsMalformedContentsAsNativeOrangeWarning() throws {
+        try withHostedMemoryHexTable(blocks: [
+            block(begin: "0x8000", contents: "GG")
+        ]) { hosting in
+            let errorLabel = try XCTUnwrap(findView(
+                ofType: NSTextField.self,
+                identifier: "memory-table-error",
+                in: hosting
+            ))
+            let warningIcon = try XCTUnwrap(findView(
+                ofType: NSImageView.self,
+                identifier: "memory-table-error-icon",
+                in: hosting
+            ))
+
+            XCTAssertEqual(errorLabel.stringValue, "内存块 0x8000 包含无效的十六进制数据。")
+            XCTAssertEqual(errorLabel.textColor, .systemOrange)
+            XCTAssertNotNil(warningIcon.image)
+            XCTAssertEqual(warningIcon.contentTintColor, .systemOrange)
+            XCTAssertNotNil(findView(
+                ofType: NSView.self,
+                identifier: "memory-table",
+                in: hosting
+            ))
         }
     }
 
@@ -164,6 +243,36 @@ final class MemoryHexTableTests: XCTestCase {
         contentView.layoutSubtreeIfNeeded()
         RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.05))
         try operation()
+    }
+
+    private func withHostedMemoryHexTable(
+        blocks: [MIMemoryBlock],
+        operation: (NSView) throws -> Void
+    ) throws {
+        let hosting = NSHostingView(rootView: MemoryHexTable(blocks: blocks).frame(
+            width: 800,
+            height: 320
+        ))
+        try withWindow(contentView: hosting) {
+            try operation(hosting)
+        }
+    }
+
+    private func findView<ViewType: NSView>(
+        ofType type: ViewType.Type,
+        identifier: String? = nil,
+        in root: NSView
+    ) -> ViewType? {
+        if let view = root as? ViewType,
+           identifier == nil || view.accessibilityIdentifier() == identifier {
+            return view
+        }
+        for subview in root.subviews {
+            if let match = findView(ofType: type, identifier: identifier, in: subview) {
+                return match
+            }
+        }
+        return nil
     }
 
     private func assertNonZeroAccessibilityFrame(
@@ -218,20 +327,4 @@ final class MemoryHexTableTests: XCTestCase {
         }
     }
 
-    private func render(_ view: NSView) throws -> NSBitmapImageRep {
-        let bitmap = try XCTUnwrap(NSBitmapImageRep(
-            bitmapDataPlanes: nil,
-            pixelsWide: Int(view.bounds.width),
-            pixelsHigh: Int(view.bounds.height),
-            bitsPerSample: 8,
-            samplesPerPixel: 4,
-            hasAlpha: true,
-            isPlanar: false,
-            colorSpaceName: .deviceRGB,
-            bytesPerRow: 0,
-            bitsPerPixel: 0
-        ))
-        view.cacheDisplay(in: view.bounds, to: bitmap)
-        return bitmap
-    }
 }

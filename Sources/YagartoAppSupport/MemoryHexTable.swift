@@ -35,28 +35,104 @@ public struct MemoryHexTable: View {
     public var body: some View {
         switch content {
         case .empty:
-            VStack {
-                Text("输入地址和长度，然后在程序暂停时读取内存。")
-                    .foregroundStyle(.secondary)
-                    .accessibilityIdentifier("memory-table-empty")
-            }
-            .accessibilityElement(children: .contain)
-            .accessibilityIdentifier("memory-table")
+            NativeMemoryStatus(content: .empty)
         case .rows(let rows):
             NativeMemoryTable(rows: rows)
         case .error(let message):
-            VStack {
-                Label {
-                    Text(message)
-                } icon: {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                }
-                .foregroundStyle(.orange)
-                .accessibilityIdentifier("memory-table-error")
-            }
-            .accessibilityElement(children: .contain)
-            .accessibilityIdentifier("memory-table")
+            NativeMemoryStatus(content: .error(message))
         }
+    }
+}
+
+private enum NativeMemoryStatusContent {
+    case empty
+    case error(String)
+}
+
+private struct NativeMemoryStatus: NSViewRepresentable {
+    let content: NativeMemoryStatusContent
+
+    func makeNSView(context: Context) -> MemoryNativeStatusView {
+        MemoryNativeStatusView()
+    }
+
+    func updateNSView(_ view: MemoryNativeStatusView, context: Context) {
+        view.update(content: content)
+    }
+}
+
+@MainActor
+private final class MemoryNativeStatusView: NSView {
+    private let stack = NSStackView()
+    private let warningIcon = NSImageView()
+    private let statusLabel = NSTextField(labelWithString: "")
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        setAccessibilityElement(true)
+        setAccessibilityRole(.group)
+        setAccessibilityIdentifier("memory-table")
+        setAccessibilityLabel("内存")
+
+        warningIcon.translatesAutoresizingMaskIntoConstraints = false
+        warningIcon.image = NSImage(
+            systemSymbolName: "exclamationmark.triangle.fill",
+            accessibilityDescription: "警告"
+        )
+        warningIcon.imageScaling = .scaleProportionallyDown
+        warningIcon.setAccessibilityIdentifier("memory-table-error-icon")
+        warningIcon.setAccessibilityLabel("警告")
+
+        statusLabel.isSelectable = true
+        statusLabel.isEditable = false
+        statusLabel.lineBreakMode = .byWordWrapping
+        statusLabel.maximumNumberOfLines = 0
+
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        stack.orientation = .horizontal
+        stack.alignment = .centerY
+        stack.spacing = 6
+        stack.addArrangedSubview(warningIcon)
+        stack.addArrangedSubview(statusLabel)
+        addSubview(stack)
+
+        NSLayoutConstraint.activate([
+            warningIcon.widthAnchor.constraint(equalToConstant: 16),
+            warningIcon.heightAnchor.constraint(equalToConstant: 16),
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
+            stack.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -8),
+            stack.topAnchor.constraint(greaterThanOrEqualTo: topAnchor, constant: 8),
+            stack.bottomAnchor.constraint(lessThanOrEqualTo: bottomAnchor, constant: -8),
+            stack.centerYAnchor.constraint(equalTo: centerYAnchor)
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override var intrinsicContentSize: NSSize {
+        let fittingSize = stack.fittingSize
+        return NSSize(width: fittingSize.width + 16, height: fittingSize.height + 16)
+    }
+
+    func update(content: NativeMemoryStatusContent) {
+        switch content {
+        case .empty:
+            warningIcon.isHidden = true
+            statusLabel.stringValue = "输入地址和长度，然后在程序暂停时读取内存。"
+            statusLabel.textColor = .secondaryLabelColor
+            statusLabel.setAccessibilityIdentifier("memory-table-empty")
+        case .error(let message):
+            warningIcon.isHidden = false
+            warningIcon.contentTintColor = .systemOrange
+            statusLabel.stringValue = message
+            statusLabel.textColor = .systemOrange
+            statusLabel.setAccessibilityIdentifier("memory-table-error")
+        }
+        statusLabel.setAccessibilityLabel(statusLabel.stringValue)
+        invalidateIntrinsicContentSize()
     }
 }
 
