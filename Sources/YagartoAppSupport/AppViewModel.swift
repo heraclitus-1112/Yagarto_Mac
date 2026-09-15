@@ -46,6 +46,7 @@ public final class AppViewModel {
     private var documentIdentifier: UUID?
     private var documentRevision: UInt64 = 0
     private var openGeneration: UInt64 = 0
+    private var memoryOperationGeneration: UInt64 = 0
 
     public init(
         documentService: any DocumentServicing,
@@ -91,6 +92,7 @@ public final class AppViewModel {
     public func open(_ url: URL) async {
         guard isEnabled(.open) else { return }
         retireStart()
+        invalidateMemoryOperations()
         openGeneration &+= 1
         let generation = openGeneration
         do {
@@ -106,6 +108,7 @@ public final class AppViewModel {
     public func createProject(_ request: ProjectCreationRequest) async -> CreatedProject? {
         guard isEnabled(.newProject) else { return nil }
         retireStart()
+        invalidateMemoryOperations()
         openGeneration &+= 1
         let generation = openGeneration
         isProjectOperationInProgress = true
@@ -255,12 +258,45 @@ public final class AppViewModel {
     }
 
     public func readMemory(address: String, length: String) async {
+        let generation = beginMemoryOperation()
+        let operationState = state
         do {
             let request = try MemoryRequestValidator.request(address: address, length: length)
-            memory = try await debugService.readMemory(request)
+            let blocks = try await debugService.readMemory(request)
+            guard isCurrentMemoryOperation(generation, state: operationState) else { return }
+            memory = blocks
             errorMessage = nil
         } catch {
+            guard isCurrentMemoryOperation(generation, state: operationState) else { return }
             present(error)
+        }
+    }
+
+    public func setMemoryWindowAddress(_ rawAddress: String) async -> String? {
+        let generation = beginMemoryOperation()
+        let operationState = state
+        do {
+            let normalized = try MemoryWindowAddress.normalized(rawAddress)
+            let request = DebugMemoryRequest(
+                address: normalized,
+                byteCount: MemoryWindowLayout.byteCount
+            )
+            try await debugService.setMemoryRequest(request)
+            guard isCurrentMemoryOperation(generation, state: operationState) else { return nil }
+            guard state == .stopped else {
+                memory = []
+                errorMessage = nil
+                return normalized
+            }
+            let blocks = try await debugService.readMemory(request)
+            guard isCurrentMemoryOperation(generation, state: .stopped) else { return nil }
+            memory = blocks
+            errorMessage = nil
+            return normalized
+        } catch {
+            guard isCurrentMemoryOperation(generation, state: operationState) else { return nil }
+            present(error)
+            return nil
         }
     }
 
@@ -318,9 +354,11 @@ public final class AppViewModel {
             transitionFromDebugger(to: newState)
         case .snapshot(let newSnapshot):
             guard state == .stopped else { return }
+            invalidateMemoryOperations()
             let previous = snapshot?.registers ?? []
             snapshot = newSnapshot
             registerRows = RegisterPresentation.rows(current: newSnapshot.registers, previous: previous)
+            memory = newSnapshot.memory
             console.replace(with: newSnapshot.console)
             debugDiagnostics.append(contentsOf: newSnapshot.diagnostics)
         case .consoleAppended(let entry):
@@ -354,6 +392,9 @@ public final class AppViewModel {
             if newState == .stopped {
                 scheduleStoppedBreakpointReconciliation()
             }
+            if newState == .running {
+                clearMemoryPresentation()
+            }
             if newState == .ready {
                 retireStart()
                 breakpointIdentifiers = [:]
@@ -383,8 +424,7 @@ public final class AppViewModel {
         latestBuild = nil
         buildDiagnostics = []
         debugDiagnostics = []
-        snapshot = nil
-        registerRows = []
+        clearRuntimePresentation()
         breakpoints = BreakpointLines()
         breakpointIdentifiers = [:]
         breakpointRequestGenerations = [:]
@@ -397,6 +437,7 @@ public final class AppViewModel {
 
     private func beginStopIfNeeded() {
         guard stopTask == nil else { return }
+        invalidateMemoryOperations()
         if state != .terminating { try? machine.apply(.terminationStarted) }
         guard state == .terminating else { return }
         let service = debugService
@@ -422,7 +463,28 @@ public final class AppViewModel {
     private func clearRuntimePresentation() {
         snapshot = nil
         registerRows = []
+        clearMemoryPresentation()
+    }
+
+    private func clearMemoryPresentation() {
+        invalidateMemoryOperations()
         memory = []
+    }
+
+    private func beginMemoryOperation() -> UInt64 {
+        memoryOperationGeneration &+= 1
+        return memoryOperationGeneration
+    }
+
+    private func invalidateMemoryOperations() {
+        memoryOperationGeneration &+= 1
+    }
+
+    private func isCurrentMemoryOperation(
+        _ generation: UInt64,
+        state expectedState: DebuggerState
+    ) -> Bool {
+        generation == memoryOperationGeneration && state == expectedState
     }
 
     private func performStart(
