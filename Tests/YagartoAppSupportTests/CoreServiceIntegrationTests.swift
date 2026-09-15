@@ -513,6 +513,119 @@ final class CoreServiceIntegrationTests: XCTestCase {
         XCTAssertEqual(applied, [requestB, requestA, requestB])
         try await adapter.stop()
     }
+
+    func testReadFailureBeforeControllerSideEffectAppliesLatestPendingRequest() async throws {
+        let fixture = try AdapterMIFixture()
+        let gate = ControlledAdapterMemoryIO()
+        let adapter = memoryControlledAdapter(fixture: fixture, gate: gate)
+        try await adapter.prepare(adapterBuild(for: fixture.directory))
+        _ = try await adapter.launch(mode: .debug, breakpoints: [])
+        await gate.clearAppliedRequests()
+        let request = DebugMemoryRequest(
+            address: "0xB000",
+            byteCount: 112,
+            observationID: UUID()
+        )
+        let observationID = try XCTUnwrap(request.observationID)
+        await gate.failReadBeforeApply(observationID)
+
+        do {
+            _ = try await adapter.readMemory(request)
+            XCTFail("expected the direct read to fail before applying its request")
+        } catch AdapterMITestError.forcedMemoryRead {
+            // The original read error remains observable after reconciliation.
+        }
+
+        let applied = await gate.appliedRequests()
+        XCTAssertEqual(applied, [request])
+        try await adapter.stop()
+    }
+
+    func testReadFailureAfterStopDoesNotApplyPendingRequestToRetiredSession() async throws {
+        let fixture = try AdapterMIFixture()
+        let gate = ControlledAdapterMemoryIO()
+        let adapter = memoryControlledAdapter(fixture: fixture, gate: gate)
+        try await adapter.prepare(adapterBuild(for: fixture.directory))
+        _ = try await adapter.launch(mode: .debug, breakpoints: [])
+        await gate.clearAppliedRequests()
+        let request = DebugMemoryRequest(
+            address: "0xB000",
+            byteCount: 112,
+            observationID: UUID()
+        )
+        let observationID = try XCTUnwrap(request.observationID)
+        await gate.suspendRead(observationID)
+        await gate.failReadBeforeApply(observationID)
+
+        let reading = Task { try await adapter.readMemory(request) }
+        await gate.waitUntilReadStarted(observationID)
+        try await adapter.stop()
+        await gate.resumeRead(observationID)
+        do {
+            _ = try await reading.value
+            XCTFail("expected the retired-session read to fail")
+        } catch AdapterMITestError.forcedMemoryRead {
+            // A retired session must not receive a forced reconciliation.
+        }
+
+        let applied = await gate.appliedRequests()
+        XCTAssertTrue(applied.isEmpty)
+    }
+
+    func testReadAndReconciliationFailurePreservesReadErrorAndPublishesDiagnostic() async throws {
+        let fixture = try AdapterMIFixture()
+        let gate = ControlledAdapterMemoryIO()
+        let adapter = memoryControlledAdapter(fixture: fixture, gate: gate)
+        try await adapter.prepare(adapterBuild(for: fixture.directory))
+        _ = try await adapter.launch(mode: .debug, breakpoints: [])
+        let events = await adapter.events()
+        await gate.clearAppliedRequests()
+        let request = DebugMemoryRequest(
+            address: "0xB000",
+            byteCount: 112,
+            observationID: UUID()
+        )
+        let observationID = try XCTUnwrap(request.observationID)
+        await gate.failReadBeforeApply(observationID)
+        await gate.failApply(observationID)
+
+        do {
+            _ = try await adapter.readMemory(request)
+            XCTFail("expected the direct read to preserve its original failure")
+        } catch AdapterMITestError.forcedMemoryRead {
+            // Reconciliation failure must not replace the original read error.
+        }
+
+        let diagnostic = try await firstDiagnostic(
+            from: events,
+            containing: "内存读取失败后同步请求失败"
+        )
+        XCTAssertEqual(
+            diagnostic.message,
+            "内存读取失败后同步请求失败：测试内存请求同步失败。"
+        )
+        XCTAssertFalse(diagnostic.isCritical)
+        let applied = await gate.appliedRequests()
+        XCTAssertTrue(applied.isEmpty)
+        try await adapter.stop()
+    }
+}
+
+private func memoryControlledAdapter(
+    fixture: AdapterMIFixture,
+    gate: ControlledAdapterMemoryIO
+) -> CoreDebugAdapter {
+    CoreDebugAdapter(
+        overrides: [.gdb: fixture.script.path],
+        environment: ProcessInfo.processInfo.environment,
+        gdbSimulatorPath: fixture.script.path,
+        memoryRequestApplicator: { controller, request in
+            try await gate.apply(request, to: controller)
+        },
+        memoryReader: { controller, request in
+            try await gate.read(request, from: controller)
+        }
+    )
 }
 
 private actor AdapterStopGate {
@@ -546,6 +659,8 @@ private actor ControlledAdapterMemoryIO {
     private var readContinuations: [UUID: CheckedContinuation<Void, Never>] = [:]
     private var setStartWaiters: [UUID: [CheckedContinuation<Void, Never>]] = [:]
     private var readStartWaiters: [UUID: [CheckedContinuation<Void, Never>]] = [:]
+    private var failingApplyIDs: Set<UUID> = []
+    private var failingReadBeforeApplyIDs: Set<UUID> = []
     private var failingReadIDs: Set<UUID> = []
     private var applied: [DebugMemoryRequest] = []
 
@@ -556,6 +671,10 @@ private actor ControlledAdapterMemoryIO {
                 setContinuations[observationID] = continuation
                 setStartWaiters.removeValue(forKey: observationID)?.forEach { $0.resume() }
             }
+        }
+        if let observationID = request.observationID,
+           failingApplyIDs.remove(observationID) != nil {
+            throw AdapterMITestError.forcedMemoryApply
         }
         try await controller.setMemoryRequest(request)
         applied.append(request)
@@ -572,6 +691,10 @@ private actor ControlledAdapterMemoryIO {
                 readStartWaiters.removeValue(forKey: observationID)?.forEach { $0.resume() }
             }
         }
+        if let observationID = request.observationID,
+           failingReadBeforeApplyIDs.remove(observationID) != nil {
+            throw AdapterMITestError.forcedMemoryRead
+        }
         let blocks = try await controller.readMemory(request)
         applied.append(request)
         if let observationID = request.observationID,
@@ -583,6 +706,10 @@ private actor ControlledAdapterMemoryIO {
 
     func suspendSet(_ observationID: UUID) { suspendedSetIDs.insert(observationID) }
     func suspendRead(_ observationID: UUID) { suspendedReadIDs.insert(observationID) }
+    func failApply(_ observationID: UUID) { failingApplyIDs.insert(observationID) }
+    func failReadBeforeApply(_ observationID: UUID) {
+        failingReadBeforeApplyIDs.insert(observationID)
+    }
     func failRead(_ observationID: UUID) { failingReadIDs.insert(observationID) }
 
     func waitUntilSetStarted(_ observationID: UUID) async {
@@ -645,6 +772,33 @@ private func firstSnapshot(
     }
 }
 
+private func firstDiagnostic(
+    from stream: AsyncStream<DebuggerEvent>,
+    containing text: String,
+    timeout: Duration = .seconds(3)
+) async throws -> DebugDiagnostic {
+    try await withThrowingTaskGroup(of: DebugDiagnostic.self) { group in
+        group.addTask {
+            for await event in stream {
+                if case .diagnostic(let diagnostic) = event,
+                   diagnostic.message.contains(text) {
+                    return diagnostic
+                }
+            }
+            throw AdapterMITestError.timeout
+        }
+        group.addTask {
+            try await Task.sleep(for: timeout)
+            throw AdapterMITestError.timeout
+        }
+        defer { group.cancelAll() }
+        guard let diagnostic = try await group.next() else {
+            throw AdapterMITestError.timeout
+        }
+        return diagnostic
+    }
+}
+
 private func waitUntilProcessIsGone(_ processIdentifier: pid_t) async throws {
     let deadline = ContinuousClock.now.advanced(by: .seconds(3))
     while ContinuousClock.now < deadline {
@@ -654,9 +808,21 @@ private func waitUntilProcessIsGone(_ processIdentifier: pid_t) async throws {
     throw AdapterMITestError.timeout
 }
 
-private enum AdapterMITestError: Error {
+private enum AdapterMITestError: Error, LocalizedError {
     case timeout
+    case forcedMemoryApply
     case forcedMemoryRead
+
+    var errorDescription: String? {
+        switch self {
+        case .timeout:
+            return "测试等待超时。"
+        case .forcedMemoryApply:
+            return "测试内存请求同步失败。"
+        case .forcedMemoryRead:
+            return "测试内存读取失败。"
+        }
+    }
 }
 
 private final class AdapterMIFixture: @unchecked Sendable {

@@ -245,12 +245,20 @@ public actor CoreDebugAdapter: DebugServicing {
         let memory: [MIMemoryBlock]
         do {
             memory = try await memoryReader(activeSession.controller, request)
-        } catch {
-            try? await reconcileMemoryRequest(
-                afterApplying: requestRevision,
-                to: activeSession
-            )
-            throw error
+        } catch let readError {
+            do {
+                try await reconcileMemoryRequest(
+                    afterApplying: nil,
+                    to: activeSession
+                )
+            } catch let synchronizationError {
+                publish(.diagnostic(DebugDiagnostic(
+                    pane: .memory,
+                    isCritical: false,
+                    message: "内存读取失败后同步请求失败：\(synchronizationError.localizedDescription)"
+                )), from: activeSession.identifier)
+            }
+            throw readError
         }
         try await reconcileMemoryRequest(
             afterApplying: requestRevision,
@@ -305,7 +313,7 @@ public actor CoreDebugAdapter: DebugServicing {
     }
 
     private func reconcileMemoryRequest(
-        afterApplying appliedRevision: UInt64,
+        afterApplying appliedRevision: UInt64?,
         to session: SessionRecord
     ) async throws {
         var appliedRevision = appliedRevision
