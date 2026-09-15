@@ -4,6 +4,7 @@
 .tools/
 .yagarto/
 .planning/
+.worktrees/
 DerivedData/
 dist/
 YagartoMacApp.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
