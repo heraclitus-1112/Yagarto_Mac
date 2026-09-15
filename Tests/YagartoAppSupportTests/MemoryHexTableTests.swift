@@ -57,6 +57,21 @@ final class MemoryHexTableTests: XCTestCase {
         XCTAssertTrue(identifiers.contains("memory-table-error"))
     }
 
+    func testRowGroupDoesNotRepeatAddressFromAddressChild() {
+        let snapshot = hostedAccessibilitySnapshot(
+            for: MemoryHexTable(blocks: [
+                block(begin: "0x8000", contents: "fcfdeeff")
+            ])
+        )
+
+        XCTAssertEqual(snapshot.labels["memory-table-row-0"], "内存行")
+        XCTAssertNil(snapshot.values["memory-table-row-0"])
+        XCTAssertEqual(
+            snapshot.labels["memory-table-row-0-address"],
+            "地址 0x00008000"
+        )
+    }
+
     private func block(begin: String, contents: String) -> MIMemoryBlock {
         MIMemoryBlock(
             begin: MIRawNumeric(raw: begin),
@@ -100,6 +115,8 @@ final class MemoryHexTableTests: XCTestCase {
     private struct AccessibilitySnapshot {
         var identifiers: Set<String> = []
         var childIdentifiers: [String: Set<String>] = [:]
+        var labels: [String: String] = [:]
+        var values: [String: String] = [:]
     }
 
     private func collectAccessibilitySnapshot(
@@ -113,6 +130,12 @@ final class MemoryHexTableTests: XCTestCase {
         if let identifier = accessibilityIdentifier(of: object) {
             snapshot.identifiers.insert(identifier)
             snapshot.childIdentifiers[identifier] = Set(children.compactMap(accessibilityIdentifier))
+            if let label = accessibilityLabel(of: object) {
+                snapshot.labels[identifier] = label
+            }
+            if let value = accessibilityValue(of: object) {
+                snapshot.values[identifier] = value
+            }
         }
 
         if let view = object as? NSView {
@@ -150,6 +173,20 @@ final class MemoryHexTableTests: XCTestCase {
             return identifier.isEmpty ? nil : identifier
         }
         return (object as? NSAccessibilityElement)?.accessibilityIdentifier()
+    }
+
+    private func accessibilityLabel(of object: NSObject) -> String? {
+        if let view = object as? NSView {
+            return view.accessibilityLabel()
+        }
+        return (object as? NSAccessibilityElement)?.accessibilityLabel()
+    }
+
+    private func accessibilityValue(of object: NSObject) -> String? {
+        if let view = object as? NSView {
+            return view.accessibilityValue() as? String
+        }
+        return (object as? NSAccessibilityElement)?.accessibilityValue() as? String
     }
 
     private func accessibilityChildren(of object: NSObject) -> [NSObject] {

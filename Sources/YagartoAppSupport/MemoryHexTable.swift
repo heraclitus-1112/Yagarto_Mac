@@ -166,7 +166,7 @@ public struct MemoryHexTable: View {
             let rowIdentifier = "memory-table-row-\(index)"
             let rowElement = element(
                 identifier: rowIdentifier,
-                label: "内存行 \(row.addressText)",
+                label: "内存行",
                 role: .group,
                 parent: self
             )
