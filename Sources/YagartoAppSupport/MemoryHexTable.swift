@@ -190,6 +190,13 @@ private final class MemoryNativeTableView: NSTableView {
             if let metadata = accessibilityMetadataProvider?.accessibilityMetadataForRow(row) {
                 decorate(proxy, with: metadata)
             }
+            guard let rowObject = proxy as? NSObject else { continue }
+            for (column, cellProxy) in accessibilityObjects(
+                attribute: "AXChildren",
+                from: rowObject
+            ).enumerated() {
+                decorateCellProxy(cellProxy, column: column, row: row)
+            }
         }
         return proxies
     }
@@ -203,13 +210,17 @@ private final class MemoryNativeTableView: NSTableView {
         guard let proxy = super.accessibilityCell(forColumn: column, row: row) else {
             return nil
         }
+        decorateCellProxy(proxy, column: column, row: row)
+        return proxy
+    }
+
+    private func decorateCellProxy(_ proxy: Any, column: Int, row: Int) {
         if let metadata = accessibilityMetadataProvider?.accessibilityMetadataForCell(
             column: column,
             row: row
         ) {
             decorate(proxy, with: metadata)
         }
-        return proxy
     }
 
     private func decorateAccessibilityRowsAndHeaders() {

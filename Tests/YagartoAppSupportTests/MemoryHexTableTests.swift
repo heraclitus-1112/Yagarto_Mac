@@ -202,6 +202,51 @@ final class MemoryHexTableTests: XCTestCase {
         }
     }
 
+    func testRowAccessibilityChildrenPathDecoratesAllSystemCellProxies() throws {
+        let controller = MemoryNativeTableController()
+        controller.update(rows: try formattedRows())
+        XCTAssertTrue(controller.accessibilityOverrideRecords.isEmpty)
+
+        try withWindow(contentView: controller.scrollView) {
+            let rows = try rawAccessibilityObjects(
+                from: controller.tableView,
+                selectorName: "accessibilityRows"
+            )
+            let row = try accessibilityObject(
+                from: XCTUnwrap(rows.first),
+                description: "row"
+            )
+            let cellValues = try rawAccessibilityObjects(
+                from: row,
+                attribute: "AXChildren"
+            )
+            let cells = try cellValues.enumerated().map { column, value in
+                try accessibilityObject(
+                    from: value,
+                    description: "row child column \(column)"
+                )
+            }
+
+            XCTAssertEqual(cells.count, 18)
+            XCTAssertEqual(cells.map(accessibilityRole), Array(repeating: .cell, count: 18))
+            cells.forEach { assertNonZeroAccessibilityFrame($0) }
+
+            let cellRecords = controller.accessibilityOverrideRecords
+                .filter { $0.key.hasPrefix("memory-table-row-0-") }
+            XCTAssertEqual(cellRecords.count, 18)
+            XCTAssertTrue(cellRecords.values.flatMap { $0 }.allSatisfy(\.succeeded))
+            assertAccessibilityOverrides(
+                in: controller,
+                identifier: "memory-table-row-0-byte-4",
+                expected: [
+                    "AXIdentifier": "memory-table-row-0-byte-4",
+                    "AXDescription": "+4",
+                    "AXValue": "空"
+                ]
+            )
+        }
+    }
+
     func testEmptyContentsResolveToEmptyState() {
         XCTAssertEqual(
             MemoryHexTableContent(blocks: [block(begin: "0x8000", contents: "")]),
