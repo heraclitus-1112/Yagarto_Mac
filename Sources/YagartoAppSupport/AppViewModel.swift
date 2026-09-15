@@ -473,6 +473,7 @@ public final class AppViewModel {
     private func beginStopIfNeeded() {
         guard stopTask == nil else { return }
         invalidateMemoryOperations()
+        resetDesiredMemoryRequest()
         if state != .terminating { try? machine.apply(.terminationStarted) }
         guard state == .terminating else { return }
         let service = debugService
@@ -490,7 +491,6 @@ public final class AppViewModel {
         if state == .terminating { try? machine.apply(.terminationCompleted) }
         breakpointIdentifiers = [:]
         debugSessionGeneration &+= 1
-        resetDesiredMemoryRequest()
         clearRuntimePresentation()
         stopTask = nil
         if let error { presentGlobalMessage("停止调试器失败：\(error)") }
@@ -536,6 +536,12 @@ public final class AppViewModel {
     ) async {
         do {
             try await debugService.prepare(build)
+            guard isCurrentStart(generation, session: session, document: document) else { return }
+            try await synchronizeDesiredMemoryRequestForStart(
+                generation: generation,
+                session: session,
+                document: document
+            )
             guard isCurrentStart(generation, session: session, document: document) else { return }
             let requests = breakpoints.lines.sorted().map {
                 DebugSourceBreakpoint(file: document.sourceURL, line: $0)
@@ -617,6 +623,19 @@ public final class AppViewModel {
             && canonicalPath(self.document?.sourceURL) == canonicalPath(document.sourceURL)
             && state != .ready
             && state != .terminating
+    }
+
+    private func synchronizeDesiredMemoryRequestForStart(
+        generation: UInt64,
+        session: UInt64,
+        document: WorkspaceDocument
+    ) async throws {
+        while isCurrentStart(generation, session: session, document: document) {
+            let request = desiredMemoryRequest
+            try await debugService.setMemoryRequest(request)
+            guard isCurrentStart(generation, session: session, document: document) else { return }
+            if request == desiredMemoryRequest { return }
+        }
     }
 
     private func retireStart() {

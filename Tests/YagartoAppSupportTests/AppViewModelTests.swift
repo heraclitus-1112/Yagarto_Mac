@@ -1450,6 +1450,52 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertEqual(model.state, .idle)
     }
 
+    func testProfileResetSynchronizesDefaultMemoryRequestBeforeNextLaunch() async throws {
+        let fixture = try ViewModelFixture()
+        let debug = FakeDebugService()
+        let model = AppViewModel(
+            documentService: FakeDocumentService(document: fixture.document),
+            buildService: FakeBuildService(result: fixture.buildResult),
+            debugService: debug
+        )
+        await model.open(fixture.document.sourceURL)
+        await model.build()
+        _ = await model.setMemoryWindowAddress("0x9000")
+
+        model.changeProfile(to: .cortexM4)
+        await model.build()
+        await model.start(.debug)
+
+        let configuredRequests = await debug.configuredRequests()
+        XCTAssertEqual(configuredRequests.last, .yagartoWindow)
+    }
+
+    func testMemoryRequestSubmittedDuringStopSurvivesOldStopCompletion() async throws {
+        let fixture = try ViewModelFixture()
+        let debug = FakeDebugService()
+        let customRequest = DebugMemoryRequest(address: "0x00009000", byteCount: 112)
+        let customBlock = fixture.memoryBlock(begin: "0x9000", contents: "99")
+        await debug.suspendNextStop()
+        let model = try await stoppedModel(fixture: fixture, debug: debug)
+
+        let stopping = Task { await model.stop() }
+        await debug.waitUntilStopStarted()
+        let normalized = await model.setMemoryWindowAddress("0x9000")
+        await debug.finishStop()
+        await stopping.value
+        await model.start(.debug)
+        await debug.emit(.snapshot(fixture.snapshot(
+            line: 1,
+            r0: 1,
+            memory: [customBlock],
+            memoryRequest: customRequest
+        )))
+        await waitUntil { model.snapshot?.registers.first?.value?.numeric == 1 }
+
+        XCTAssertEqual(normalized, customRequest.address)
+        XCTAssertEqual(model.memory, [customBlock])
+    }
+
     func testCreateProjectOpensCreatedDocumentWithoutBuilding() async throws {
         let fixture = try ViewModelFixture()
         let created = CreatedProject(
@@ -1546,6 +1592,7 @@ final class AppViewModelTests: XCTestCase {
         await model.build()
         await model.start(.debug)
         XCTAssertEqual(model.state, .stopped)
+        await debug.clearMemoryRequestRecords()
         return model
     }
 }
@@ -1878,6 +1925,10 @@ private actor FakeDebugService: DebugServicing {
     private var pendingMemoryReads: [String: [CheckedContinuation<[MIMemoryBlock], any Error>]] = [:]
     private var memoryReadStartCounts: [String: Int] = [:]
     private var memoryReadStartWaiters: [String: [CheckedContinuation<Void, Never>]] = [:]
+    private var shouldSuspendStop = false
+    private var stopStarted = false
+    private var stopStartWaiters: [CheckedContinuation<Void, Never>] = []
+    private var pendingStop: CheckedContinuation<Void, Never>?
     private var shouldFailBreakpoint = false
     private var shouldFailBreakpointRemoval = false
     private var breakpointFailureLines: Set<Int> = []
@@ -1932,7 +1983,18 @@ private actor FakeDebugService: DebugServicing {
     }
     func stepOver() async throws { recordedCalls.append("stepOver") }
     func resume() async throws { recordedCalls.append("continue") }
-    func stop() async throws { recordedCalls.append("stop") }
+    func stop() async throws {
+        recordedCalls.append("stop")
+        if shouldSuspendStop {
+            shouldSuspendStop = false
+            await withCheckedContinuation { continuation in
+                pendingStop = continuation
+                stopStarted = true
+                stopStartWaiters.forEach { $0.resume() }
+                stopStartWaiters.removeAll()
+            }
+        }
+    }
     func setMemoryRequest(_ request: DebugMemoryRequest) async throws {
         configuredMemoryRequests.append(request)
         if suspendedMemoryConfigurations.remove(request.address) != nil {
@@ -1981,6 +2043,19 @@ private actor FakeDebugService: DebugServicing {
     func calls() -> [String] { recordedCalls }
     func configuredRequests() -> [DebugMemoryRequest] { configuredMemoryRequests }
     func readRequests() -> [DebugMemoryRequest] { readMemoryRequests }
+    func clearMemoryRequestRecords() {
+        configuredMemoryRequests = []
+        readMemoryRequests = []
+    }
+    func suspendNextStop() { shouldSuspendStop = true }
+    func waitUntilStopStarted() async {
+        if stopStarted { return }
+        await withCheckedContinuation { stopStartWaiters.append($0) }
+    }
+    func finishStop() {
+        pendingStop?.resume()
+        pendingStop = nil
+    }
     func suspendMemoryConfiguration(for address: String) {
         suspendedMemoryConfigurations.insert(address)
     }
