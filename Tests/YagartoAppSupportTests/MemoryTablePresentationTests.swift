@@ -5,6 +5,113 @@ import YagartoCore
 @testable import YagartoAppSupport
 
 final class MemoryTablePresentationTests: XCTestCase {
+    func testMemoryWindowLayoutUsesCourseDefaults() {
+        XCTAssertEqual(MemoryWindowLayout.defaultAddress, 0x8000)
+        XCTAssertEqual(MemoryWindowLayout.defaultAddressText, "0x00008000")
+        XCTAssertEqual(MemoryWindowLayout.bytesPerRow, 16)
+        XCTAssertEqual(MemoryWindowLayout.wordsPerRow, 4)
+        XCTAssertEqual(MemoryWindowLayout.rowCount, 7)
+        XCTAssertEqual(MemoryWindowLayout.byteCount, 112)
+    }
+
+    func testMemoryWindowAddressNormalizesStrictHexAndFallsBackToDefault() throws {
+        XCTAssertEqual(try MemoryWindowAddress.normalized("0x8000"), "0x00008000")
+        XCTAssertEqual(try MemoryWindowAddress.normalized("0x2000_1000"), "0x20001000")
+        XCTAssertEqual(try MemoryWindowAddress.value("0x8000"), 0x8000)
+        XCTAssertEqual(MemoryWindowAddress.valueOrDefault("$sp"), 0x8000)
+
+        for address in ["$sp", "8000", "0X8000", "0x20; quit", ""] {
+            XCTAssertThrowsError(try MemoryWindowAddress.normalized(address))
+        }
+    }
+
+    func testMemoryWindowAddressStepsBySixteenBytesAndRejectsOverflow() throws {
+        XCTAssertEqual(try MemoryWindowAddress.stepped("0x8000", byRows: 1), "0x00008010")
+        XCTAssertEqual(try MemoryWindowAddress.stepped("0x8000", byRows: -1), "0x00007FF0")
+        XCTAssertEqual(
+            try MemoryWindowAddress.normalized("0xFFFFFFFFFFFFFF90"),
+            "0xFFFFFFFFFFFFFF90"
+        )
+
+        XCTAssertThrowsError(try MemoryWindowAddress.normalized("0xFFFFFFFFFFFFFF91"))
+        XCTAssertThrowsError(try MemoryWindowAddress.stepped("0xFFFFFFFFFFFFFF90", byRows: 1))
+        XCTAssertThrowsError(try MemoryWindowAddress.stepped("0x0", byRows: -1))
+    }
+
+    func testFormatsDefaultWindowAsSevenRowsOfLittleEndianWords() throws {
+        let rows = try MemoryWordTableFormatter.rows(
+            from: [block(begin: "0x8000", contents: "fcfdeeff010000000200000003000000")],
+            baseAddress: 0x8000
+        )
+
+        XCTAssertEqual(rows.count, 7)
+        XCTAssertEqual(rows[0].address, 0x8000)
+        XCTAssertEqual(rows[0].addressText, "0x00008000")
+        XCTAssertEqual(rows[0].bytes, [
+            0xFC, 0xFD, 0xEE, 0xFF,
+            0x01, 0x00, 0x00, 0x00,
+            0x02, 0x00, 0x00, 0x00,
+            0x03, 0x00, 0x00, 0x00
+        ])
+        XCTAssertEqual(rows[0].wordTexts, [
+            "0xFFEEFDFC", "0x00000001", "0x00000002", "0x00000003"
+        ])
+        XCTAssertEqual(rows[0].wordAccessibilityValues, rows[0].wordTexts)
+        XCTAssertEqual(rows[0].asciiText, "................")
+
+        XCTAssertEqual(rows[1].address, 0x8010)
+        XCTAssertEqual(rows[1].bytes, Array<UInt8?>(repeating: nil, count: 16))
+        XCTAssertEqual(rows[1].wordTexts, Array(repeating: "", count: 4))
+        XCTAssertEqual(rows[1].wordAccessibilityValues, Array(repeating: "空", count: 4))
+        XCTAssertEqual(rows[1].asciiText, String(repeating: " ", count: 16))
+        XCTAssertEqual(rows[6].address, 0x8060)
+    }
+
+    func testMarksPartialAndEmptyWordsForAccessibility() throws {
+        let partialRows = try MemoryWordTableFormatter.rows(
+            from: [block(begin: "0x8000", contents: "010203")],
+            baseAddress: 0x8000,
+            rowCount: 1
+        )
+
+        XCTAssertEqual(partialRows[0].wordTexts, Array(repeating: "", count: 4))
+        XCTAssertEqual(
+            partialRows[0].wordAccessibilityValues,
+            ["数据不完整", "空", "空", "空"]
+        )
+        XCTAssertEqual(partialRows[0].asciiText, "...             ")
+
+        let emptyRows = try MemoryWordTableFormatter.rows(
+            from: [],
+            baseAddress: 0x8000,
+            rowCount: 1
+        )
+        XCTAssertEqual(emptyRows[0].wordTexts, Array(repeating: "", count: 4))
+        XCTAssertEqual(emptyRows[0].wordAccessibilityValues, Array(repeating: "空", count: 4))
+    }
+
+    func testWordWindowPreservesExactUnalignedBaseAddress() throws {
+        let rows = try MemoryWordTableFormatter.rows(
+            from: [block(begin: "0x8003", contents: "01000000")],
+            baseAddress: 0x8003,
+            rowCount: 2
+        )
+
+        XCTAssertEqual(rows.map(\.addressText), ["0x00008003", "0x00008013"])
+        XCTAssertEqual(rows[0].wordTexts, ["0x00000001", "", "", ""])
+        XCTAssertEqual(rows[1].bytes, Array<UInt8?>(repeating: nil, count: 16))
+    }
+
+    func testWordWindowRejectsByteCountOverflow() {
+        XCTAssertThrowsError(
+            try MemoryWordTableFormatter.rows(
+                from: [],
+                baseAddress: 0,
+                rowCount: 1 << 60
+            )
+        )
+    }
+
     func testFormatsTwentyBytesAsSixteenByteRowAndPaddedRemainder() throws {
         let rows = try MemoryTableFormatter.rows(from: [
             block(
