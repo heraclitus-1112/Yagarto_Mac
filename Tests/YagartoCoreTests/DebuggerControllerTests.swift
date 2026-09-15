@@ -140,6 +140,28 @@ final class DebuggerControllerTests: XCTestCase {
         try await controller.stop()
     }
 
+    func testReadMemoryReplacesInFlightStoppedSnapshotBeforePublishing() async throws {
+        let fixture = try ControllerGDBFixture(hangFirstMemory: true)
+        let controller = DebuggerController(plan: fixture.plan(profile: .arm7tdmi))
+        let events = await controller.events()
+        try await controller.launch()
+        try await waitForCommand(
+            "-data-read-memory-bytes 0x8000 112",
+            fixture: fixture
+        )
+
+        let direct = try await controller.readMemory(
+            DebugMemoryRequest(address: "0x9000", byteCount: 112)
+        )
+        try fixture.releaseFirstMemoryResponse()
+        try await waitForConsole("old-memory-response-drained", from: events)
+        let final = try await waitForSnapshot(controller, memoryBegin: 0x9000)
+
+        XCTAssertEqual(direct.first?.begin.numeric, 0x9000)
+        XCTAssertEqual(final.memory.first?.begin.numeric, 0x9000)
+        try await controller.stop()
+    }
+
     func testSetMemoryRequestRejectsInvalidRequestWithoutAStateRequirement() async throws {
         let controller = DebuggerController(profile: .arm7tdmi)
 

@@ -12,6 +12,7 @@ public actor CoreDebugAdapter: DebugServicing {
     private let overrides: [ToolIdentifier: String]
     private let environment: [String: String]
     private let explicitGDBSimulatorPath: String?
+    private let postStopSessionSynchronization: (@Sendable () async -> Void)?
     private var debugPlan: DebugLaunchPlan?
     private var runPlan: DebugLaunchPlan?
     private var nextSessionIdentifier: UInt64 = 0
@@ -37,6 +38,19 @@ public actor CoreDebugAdapter: DebugServicing {
         self.overrides = overrides
         self.environment = environment
         explicitGDBSimulatorPath = gdbSimulatorPath
+        postStopSessionSynchronization = nil
+    }
+
+    init(
+        overrides: [ToolIdentifier: String] = [:],
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        gdbSimulatorPath: String? = nil,
+        postStopSessionSynchronization: @escaping @Sendable () async -> Void
+    ) {
+        self.overrides = overrides
+        self.environment = environment
+        explicitGDBSimulatorPath = gdbSimulatorPath
+        self.postStopSessionSynchronization = postStopSessionSynchronization
     }
 
     public func events() -> AsyncStream<DebuggerEvent> {
@@ -152,6 +166,9 @@ public actor CoreDebugAdapter: DebugServicing {
         }
         do {
             try await stopSession(activeSession)
+            if let postStopSessionSynchronization {
+                await postStopSessionSynchronization()
+            }
             resetPendingMemoryRequest(
                 ifUnchanged: requestRevision,
                 stoppedSessionIdentifier: activeSession.identifier

@@ -305,6 +305,69 @@ final class CoreServiceIntegrationTests: XCTestCase {
         try await adapter.stop()
         try await waitUntilProcessIsGone(thirdPID)
     }
+
+    func testCoreDebugAdapterOldStopCannotResetPendingAfterNewSessionBecomesActive() async throws {
+        let fixture = try AdapterMIFixture()
+        let stopGate = AdapterStopGate()
+        let adapter = CoreDebugAdapter(
+            overrides: [.gdb: fixture.script.path],
+            environment: ProcessInfo.processInfo.environment,
+            gdbSimulatorPath: fixture.script.path,
+            postStopSessionSynchronization: { await stopGate.pauseOnce() }
+        )
+        try await adapter.prepare(adapterBuild(for: fixture.directory))
+        try await adapter.setMemoryRequest(
+            DebugMemoryRequest(address: "0xA000", byteCount: 112)
+        )
+
+        let firstEvents = await adapter.events()
+        _ = try await adapter.launch(mode: .debug, breakpoints: [])
+        _ = try await firstSnapshot(from: firstEvents)
+        let oldStop = Task { try await adapter.stop() }
+        await stopGate.waitUntilPaused()
+
+        let secondEvents = await adapter.events()
+        _ = try await adapter.launch(mode: .debug, breakpoints: [])
+        _ = try await firstSnapshot(from: secondEvents)
+        await stopGate.resume()
+        try await oldStop.value
+
+        let thirdEvents = await adapter.events()
+        _ = try await adapter.launch(mode: .debug, breakpoints: [])
+        _ = try await firstSnapshot(from: thirdEvents)
+        let requests = try fixture.commands().filter {
+            $0.hasPrefix("-data-read-memory-bytes")
+        }
+        XCTAssertEqual(requests, Array(
+            repeating: "-data-read-memory-bytes 0xA000 112",
+            count: 3
+        ))
+        try await adapter.stop()
+    }
+}
+
+private actor AdapterStopGate {
+    private var hasPaused = false
+    private var pauseWaiters: [CheckedContinuation<Void, Never>] = []
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    func pauseOnce() async {
+        guard !hasPaused else { return }
+        hasPaused = true
+        pauseWaiters.forEach { $0.resume() }
+        pauseWaiters.removeAll()
+        await withCheckedContinuation { continuation = $0 }
+    }
+
+    func waitUntilPaused() async {
+        if hasPaused { return }
+        await withCheckedContinuation { pauseWaiters.append($0) }
+    }
+
+    func resume() {
+        continuation?.resume()
+        continuation = nil
+    }
 }
 
 private func adapterBuild(for directory: URL) -> AppBuildResult {

@@ -252,9 +252,7 @@ public actor DebuggerController {
 
     public func readMemory(_ request: DebugMemoryRequest) async throws -> [MIMemoryBlock] {
         try requireState(.stopped, operation: "readMemory")
-        try validate(request)
-        memoryRequest = request
-        memoryRequestRevision &+= 1
+        try setMemoryRequest(request)
         let record = try await requiredSession().send(
             "-data-read-memory-bytes \(request.address) \(request.byteCount)"
         )
