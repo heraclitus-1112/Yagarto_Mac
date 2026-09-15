@@ -38,9 +38,12 @@ final class MemoryHexTableTests: XCTestCase {
 
             let addressCell = try cell(in: table, column: 0, row: 0)
             let firstByteCell = try cell(in: table, column: 1, row: 0)
+            let emptyByteCell = try cell(in: table, column: 5, row: 0)
             let asciiCell = try cell(in: table, column: 17, row: 0)
             XCTAssertEqual(addressCell.accessibilityIdentifier(), "memory-table-row-0-address")
             XCTAssertEqual(firstByteCell.accessibilityIdentifier(), "memory-table-row-0-byte-0")
+            XCTAssertEqual(emptyByteCell.textField?.stringValue, " ")
+            XCTAssertEqual(emptyByteCell.accessibilityValue() as? String, "空")
             XCTAssertEqual(asciiCell.accessibilityIdentifier(), "memory-table-row-0-ascii")
 
             for cellView in [addressCell, firstByteCell, asciiCell] {

@@ -253,12 +253,12 @@ final class MemoryNativeTableController: NSObject, NSTableViewDataSource, NSTabl
         ) as? MemoryNativeTableCellView ?? MemoryNativeTableCellView()
         cell.identifier = column.identifier
 
-        let value = text(for: column, row: rows[row])
+        let presentation = cellPresentation(for: column, row: rows[row])
         cell.update(
-            text: value,
+            text: presentation.text,
             accessibilityIdentifier: cellAccessibilityIdentifier(for: column, row: row),
             accessibilityLabel: column.title,
-            accessibilityValue: value.isEmpty ? "空" : value
+            accessibilityValue: presentation.accessibilityValue
         )
         return cell
     }
@@ -317,15 +317,18 @@ final class MemoryNativeTableController: NSObject, NSTableViewDataSource, NSTabl
         scrollView.drawsBackground = true
     }
 
-    private func text(for column: Column, row: MemoryTableRow) -> String {
+    private func cellPresentation(
+        for column: Column,
+        row: MemoryTableRow
+    ) -> (text: String, accessibilityValue: String) {
         switch column {
         case .address:
-            return row.addressText
+            return (row.addressText, row.addressText)
         case .byte(let index):
             let text = row.byteTexts[index]
-            return text.isEmpty ? " " : text
+            return text.isEmpty ? (" ", "空") : (text, text)
         case .ascii:
-            return row.asciiText
+            return (row.asciiText, row.asciiText)
         }
     }
 
