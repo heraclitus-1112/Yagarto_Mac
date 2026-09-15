@@ -61,6 +61,7 @@ public struct DebugMemoryRequest: Equatable, Sendable {
         self.byteCount = byteCount
     }
 
+    public static let yagartoWindow = DebugMemoryRequest(address: "0x8000", byteCount: 112)
     public static let stackWindow = DebugMemoryRequest(address: "$sp", byteCount: 64)
 }
 

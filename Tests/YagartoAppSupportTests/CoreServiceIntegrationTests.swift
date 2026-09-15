@@ -114,6 +114,71 @@ final class CoreServiceIntegrationTests: XCTestCase {
         XCTAssertTrue(commands.contains("-gdb-exit"))
     }
 
+    func testCoreDebugAdapterAppliesPendingAndActiveMemoryRequestsThenResetsAfterStop() async throws {
+        let fixture = try AdapterMIFixture()
+        let adapter = CoreDebugAdapter(
+            overrides: [.gdb: fixture.script.path],
+            gdbSimulatorPath: fixture.script.path
+        )
+        try await adapter.prepare(adapterBuild(for: fixture.directory))
+        try await adapter.setMemoryRequest(
+            DebugMemoryRequest(address: "0x9000", byteCount: 112)
+        )
+
+        let initialEvents = await adapter.events()
+        _ = try await adapter.launch(mode: .debug, breakpoints: [])
+        _ = try await firstSnapshot(from: initialEvents)
+        let commandsBeforeActiveRequest = try fixture.commands()
+
+        try await adapter.setMemoryRequest(
+            DebugMemoryRequest(address: "0xA000", byteCount: 112)
+        )
+
+        XCTAssertEqual(try fixture.commands(), commandsBeforeActiveRequest)
+        let stepEvents = await adapter.events()
+        try await adapter.stepInstruction()
+        _ = try await firstSnapshot(from: stepEvents)
+        try await adapter.stop()
+
+        let relaunchedEvents = await adapter.events()
+        _ = try await adapter.launch(mode: .debug, breakpoints: [])
+        _ = try await firstSnapshot(from: relaunchedEvents)
+        let requests = try fixture.commands().filter {
+            $0.hasPrefix("-data-read-memory-bytes")
+        }
+        XCTAssertEqual(requests, [
+            "-data-read-memory-bytes 0x9000 112",
+            "-data-read-memory-bytes 0xA000 112",
+            "-data-read-memory-bytes 0x8000 112"
+        ])
+        try await adapter.stop()
+    }
+
+    func testCoreDebugAdapterStopWithoutSessionResetsPendingMemoryRequest() async throws {
+        let fixture = try AdapterMIFixture()
+        let adapter = CoreDebugAdapter(
+            overrides: [.gdb: fixture.script.path],
+            gdbSimulatorPath: fixture.script.path
+        )
+        try await adapter.prepare(adapterBuild(for: fixture.directory))
+        try await adapter.setMemoryRequest(
+            DebugMemoryRequest(address: "0x9000", byteCount: 112)
+        )
+
+        try await adapter.stop()
+
+        let events = await adapter.events()
+        _ = try await adapter.launch(mode: .debug, breakpoints: [])
+        _ = try await firstSnapshot(from: events)
+        XCTAssertTrue(
+            try fixture.commands().contains("-data-read-memory-bytes 0x8000 112")
+        )
+        XCTAssertFalse(
+            try fixture.commands().contains("-data-read-memory-bytes 0x9000 112")
+        )
+        try await adapter.stop()
+    }
+
     func testCoreDebugAdapterSynchronizesSafeBreakpointBeforeRunAndRejectsOutsidePath() async throws {
         let fixture = try AdapterMIFixture()
         let configuration = ProjectConfiguration(
@@ -185,6 +250,9 @@ final class CoreServiceIntegrationTests: XCTestCase {
 
         let oldStop = Task { try await adapter.stop() }
         try await fixture.waitForCommand("-gdb-exit", from: firstPID)
+        try await adapter.setMemoryRequest(
+            DebugMemoryRequest(address: "0xA000", byteCount: 112)
+        )
 
         let secondEvents = await adapter.events()
         _ = try await adapter.launch(mode: .debug, breakpoints: [])
@@ -194,6 +262,11 @@ final class CoreServiceIntegrationTests: XCTestCase {
         try await oldStop.value
 
         XCTAssertEqual(kill(secondPID, 0), 0, "旧 stop 不得终止新会话")
+        XCTAssertTrue(
+            try fixture.commands(from: secondPID)
+                .contains("-data-read-memory-bytes 0xA000 112"),
+            "旧 stop 不得覆盖其启动后收到的新内存窗口"
+        )
         try await adapter.stop()
         try await waitUntilProcessIsGone(secondPID)
         try await waitUntilProcessIsGone(firstPID)
@@ -206,6 +279,23 @@ final class CoreServiceIntegrationTests: XCTestCase {
         try await adapter.stop()
         try await waitUntilProcessIsGone(thirdPID)
     }
+}
+
+private func adapterBuild(for directory: URL) -> AppBuildResult {
+    let configuration = ProjectConfiguration(
+        profile: .arm7tdmi,
+        entry: "start",
+        sources: ["main.s"],
+        outputName: "adapter"
+    )
+    return AppBuildResult(
+        configuration: configuration,
+        projectDirectory: directory,
+        elf: directory.appendingPathComponent("adapter.elf"),
+        artifacts: [],
+        diagnostics: [],
+        output: ""
+    )
 }
 
 private func firstSnapshot(
@@ -385,6 +475,16 @@ private final class AdapterSessionGenerationFixture: @unchecked Sendable {
             try await Task.sleep(for: .milliseconds(10))
         }
         throw AdapterMITestError.timeout
+    }
+
+    func commands(from processIdentifier: pid_t) throws -> [String] {
+        try String(contentsOf: commandFile, encoding: .utf8)
+            .split(separator: "\n")
+            .compactMap { line in
+                let prefix = "\(processIdentifier):"
+                guard line.hasPrefix(prefix) else { return nil }
+                return String(line.dropFirst(prefix.count))
+            }
     }
 
     private func processIdentifiers() -> [pid_t] {

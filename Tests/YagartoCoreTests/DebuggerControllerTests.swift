@@ -6,6 +6,17 @@ import XCTest
 @testable import YagartoCore
 
 final class DebuggerControllerTests: XCTestCase {
+    func testYagartoMemoryWindowUsesFixedDisplayRange() {
+        XCTAssertEqual(
+            DebugMemoryRequest.yagartoWindow,
+            DebugMemoryRequest(address: "0x8000", byteCount: 112)
+        )
+        XCTAssertEqual(
+            DebugMemoryRequest.stackWindow,
+            DebugMemoryRequest(address: "$sp", byteCount: 64)
+        )
+    }
+
     func testControllerTimeoutHasActionableLocalizedDescription() {
         XCTAssertEqual(
             DebuggerControllerError.commandTimedOut("等待 ARM7 仿真器暂停").localizedDescription,
@@ -37,7 +48,62 @@ final class DebuggerControllerTests: XCTestCase {
 
         let emitted = try await firstSnapshot(from: events)
         XCTAssertEqual(emitted, snapshot)
+        let commands = try fixture.commands()
+        XCTAssertTrue(commands.contains("-data-read-memory-bytes 0x8000 112"))
+        XCTAssertFalse(commands.contains("-data-read-memory-bytes $sp 64"))
         try await controller.stop()
+    }
+
+    func testSetMemoryRequestWaitsForNextStopAndStopRestoresDefault() async throws {
+        let fixture = try ControllerGDBFixture()
+        let controller = DebuggerController(plan: fixture.plan(
+            profile: .arm7tdmi,
+            backend: .qemuMPS2AN386
+        ))
+        try await controller.launch()
+        _ = try await waitForSnapshot(controller)
+        try await controller.run()
+        try await waitForState(.running, controller: controller)
+        let commandsBeforeRequest = try fixture.commands()
+
+        try await controller.setMemoryRequest(
+            DebugMemoryRequest(address: "0x9000", byteCount: 112)
+        )
+
+        XCTAssertEqual(try fixture.commands(), commandsBeforeRequest)
+        try await controller.pause()
+        try await waitForState(.stopped, controller: controller)
+        try await waitForCommand(
+            "-data-read-memory-bytes 0x9000 112",
+            fixture: fixture
+        )
+        try await controller.stop()
+
+        try await controller.launch()
+        _ = try await waitForSnapshot(controller)
+        let commands = try fixture.commands()
+        XCTAssertEqual(
+            commands.filter { $0 == "-data-read-memory-bytes 0x8000 112" }.count,
+            2
+        )
+        XCTAssertEqual(
+            commands.filter { $0 == "-data-read-memory-bytes 0x9000 112" }.count,
+            1
+        )
+        try await controller.stop()
+    }
+
+    func testSetMemoryRequestRejectsInvalidRequestWithoutAStateRequirement() async throws {
+        let controller = DebuggerController(profile: .arm7tdmi)
+
+        do {
+            try await controller.setMemoryRequest(
+                DebugMemoryRequest(address: "0x8000;quit", byteCount: 112)
+            )
+            XCTFail("expected invalid memory request")
+        } catch let error as DebuggerControllerError {
+            XCTAssertEqual(error, .invalidMemoryRequest)
+        }
     }
 
     func testResultDoneNeverGuessesRunningStateBeforeAsyncRunning() async throws {

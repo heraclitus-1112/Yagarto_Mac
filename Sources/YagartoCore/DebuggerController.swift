@@ -22,7 +22,7 @@ public actor DebuggerController {
     private var currentSnapshotTaskID: UUID?
     private var recoveryTask: TrackedTask?
     private var console: [DebugConsoleEntry] = []
-    private var memoryRequest = DebugMemoryRequest.stackWindow
+    private var memoryRequest = DebugMemoryRequest.yagartoWindow
     private var subscribers: [UUID: AsyncStream<DebuggerEvent>.Continuation] = [:]
     private var totalDroppedEvents = 0
 
@@ -190,6 +190,7 @@ public actor DebuggerController {
     }
 
     public func stop() async throws {
+        defer { memoryRequest = .yagartoWindow }
         let stoppedSession = session
         var interruptFailure: (any Error)?
         if machine.state == .running,
@@ -219,6 +220,11 @@ public actor DebuggerController {
         }
         try transition(.terminationCompleted)
         if let interruptFailure { throw interruptFailure }
+    }
+
+    public func setMemoryRequest(_ request: DebugMemoryRequest) throws {
+        try validate(request)
+        memoryRequest = request
     }
 
     public func readMemory(_ request: DebugMemoryRequest) async throws -> [MIMemoryBlock] {

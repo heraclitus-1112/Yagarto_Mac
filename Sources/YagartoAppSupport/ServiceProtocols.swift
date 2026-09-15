@@ -111,7 +111,12 @@ public protocol DebugServicing: Sendable {
     func stepOver() async throws
     func resume() async throws
     func stop() async throws
+    func setMemoryRequest(_ request: DebugMemoryRequest) async throws
     func readMemory(_ request: DebugMemoryRequest) async throws -> [MIMemoryBlock]
     func setBreakpoint(file: URL, line: Int) async throws -> DebugBreakpoint
     func removeBreakpoint(identifier: String) async throws
+}
+
+public extension DebugServicing {
+    func setMemoryRequest(_ request: DebugMemoryRequest) async throws {}
 }

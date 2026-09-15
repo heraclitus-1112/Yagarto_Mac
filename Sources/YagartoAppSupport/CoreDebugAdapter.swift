@@ -17,6 +17,8 @@ public actor CoreDebugAdapter: DebugServicing {
     private var nextSessionIdentifier: UInt64 = 0
     private var activeSession: SessionRecord?
     private var cleanupTasks: [UInt64: Task<Void, Error>] = [:]
+    private var pendingMemoryRequest = DebugMemoryRequest.yagartoWindow
+    private var memoryRequestRevision: UInt64 = 0
     private var subscribers: [UUID: AsyncStream<DebuggerEvent>.Continuation] = [:]
 
     public private(set) var preparedBackend: DebugBackend?
@@ -117,6 +119,8 @@ public actor CoreDebugAdapter: DebugServicing {
         )
         activeSession = record
         do {
+            try await newController.setMemoryRequest(pendingMemoryRequest)
+            try requireActive(record)
             try await newController.launch()
             try requireActive(record)
             try await waitUntilStopped(newController)
@@ -141,8 +145,33 @@ public actor CoreDebugAdapter: DebugServicing {
     public func resume() async throws { try await requiredController().continue() }
 
     public func stop() async throws {
-        guard let activeSession else { return }
-        try await stopSession(activeSession)
+        let requestRevision = memoryRequestRevision
+        guard let activeSession else {
+            resetPendingMemoryRequest(ifUnchanged: requestRevision)
+            return
+        }
+        do {
+            try await stopSession(activeSession)
+            resetPendingMemoryRequest(
+                ifUnchanged: requestRevision,
+                stoppedSessionIdentifier: activeSession.identifier
+            )
+        } catch {
+            resetPendingMemoryRequest(
+                ifUnchanged: requestRevision,
+                stoppedSessionIdentifier: activeSession.identifier
+            )
+            throw error
+        }
+    }
+
+    public func setMemoryRequest(_ request: DebugMemoryRequest) async throws {
+        try Self.validate(request)
+        pendingMemoryRequest = request
+        memoryRequestRevision &+= 1
+        if let activeSession {
+            try await activeSession.controller.setMemoryRequest(request)
+        }
     }
 
     public func readMemory(_ request: DebugMemoryRequest) async throws -> [MIMemoryBlock] {
@@ -170,6 +199,20 @@ public actor CoreDebugAdapter: DebugServicing {
 
     private func removeSubscriber(_ identifier: UUID) {
         subscribers[identifier] = nil
+    }
+
+    private func resetPendingMemoryRequest(
+        ifUnchanged revision: UInt64,
+        stoppedSessionIdentifier: UInt64? = nil
+    ) {
+        guard memoryRequestRevision == revision else { return }
+        if let stoppedSessionIdentifier,
+           let activeSession,
+           activeSession.identifier != stoppedSessionIdentifier {
+            return
+        }
+        pendingMemoryRequest = .yagartoWindow
+        memoryRequestRevision &+= 1
     }
 
     private func waitUntilStopped(_ controller: DebuggerController) async throws {
@@ -230,6 +273,15 @@ public actor CoreDebugAdapter: DebugServicing {
             throw DebuggerControllerError.invalidBreakpointLocation
         }
         return "\(source.path):\(breakpoint.line)"
+    }
+
+    private static func validate(_ request: DebugMemoryRequest) throws {
+        let pattern = #"^[A-Za-z0-9_$+*/().-]+$"#
+        guard request.byteCount > 0,
+              request.byteCount <= 1_048_576,
+              request.address.range(of: pattern, options: .regularExpression) != nil else {
+            throw DebuggerControllerError.invalidMemoryRequest
+        }
     }
 
     private func requireActive(_ record: SessionRecord) throws {
