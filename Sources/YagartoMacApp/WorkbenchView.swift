@@ -313,16 +313,7 @@ struct WorkbenchView: View {
                     .disabled(model.state != .stopped)
                     .accessibilityIdentifier("memory-read")
             }
-            ScrollView {
-                VStack(alignment: .leading) {
-                    ForEach(Array(model.memory.enumerated()), id: \.offset) { _, block in
-                        Text("\(block.begin.raw): \(block.contents)")
-                            .font(.system(.caption, design: .monospaced))
-                            .textSelection(.enabled)
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
+            MemoryHexTable(blocks: model.memory)
         }
     }
 
