@@ -1084,6 +1084,69 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertEqual(model.errorMessage, "测试全局错误。")
     }
 
+    func testFailedMatchingSnapshotDoesNotClearMemoryError() async throws {
+        let fixture = try ViewModelFixture()
+        let debug = FakeDebugService()
+        let request = DebugMemoryRequest(address: "0x00009000", byteCount: 112)
+        let diagnostic = DebugDiagnostic(
+            pane: .memory,
+            isCritical: false,
+            message: "测试 snapshot 内存读取失败"
+        )
+        await debug.failMemoryRead(for: request.address)
+        let model = try await stoppedModel(fixture: fixture, debug: debug)
+        _ = await model.setMemoryWindowAddress("0x9000")
+        XCTAssertEqual(model.errorMessage, "测试内存读取失败。")
+
+        await debug.emitSnapshot(
+            fixture.snapshot(
+                line: 2,
+                r0: 2,
+                memoryRequest: request,
+                diagnostics: [diagnostic]
+            ),
+            followedBy: "failed-matching-snapshot-error-barrier"
+        )
+        await waitUntil {
+            model.debugDiagnostics.contains { $0.message == "failed-matching-snapshot-error-barrier" }
+        }
+
+        XCTAssertEqual(model.errorMessage, "测试内存读取失败。")
+        XCTAssertTrue(model.memory.isEmpty)
+    }
+
+    func testFailedMatchingSnapshotDoesNotReplaceSuccessfulDirectMemory() async throws {
+        let fixture = try ViewModelFixture()
+        let debug = FakeDebugService()
+        let request = DebugMemoryRequest(address: "0x00009000", byteCount: 112)
+        let directBlock = fixture.memoryBlock(begin: "0x9000", contents: "99")
+        let diagnostic = DebugDiagnostic(
+            pane: .memory,
+            isCritical: false,
+            message: "测试 snapshot 内存读取失败"
+        )
+        await debug.setMemoryResult([directBlock], for: request.address)
+        let model = try await stoppedModel(fixture: fixture, debug: debug)
+        _ = await model.setMemoryWindowAddress("0x9000")
+        XCTAssertEqual(model.memory, [directBlock])
+
+        await debug.emitSnapshot(
+            fixture.snapshot(
+                line: 2,
+                r0: 2,
+                memoryRequest: request,
+                diagnostics: [diagnostic]
+            ),
+            followedBy: "failed-matching-snapshot-data-barrier"
+        )
+        await waitUntil {
+            model.debugDiagnostics.contains { $0.message == "failed-matching-snapshot-data-barrier" }
+        }
+
+        XCTAssertEqual(model.memory, [directBlock])
+        XCTAssertNil(model.errorMessage)
+    }
+
     func testNewerMemoryReadWinsWhenOlderReadSucceedsLast() async throws {
         let fixture = try ViewModelFixture()
         let debug = FakeDebugService()
@@ -1191,6 +1254,29 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertEqual(model.state, .ready)
         XCTAssertTrue(model.memory.isEmpty)
         XCTAssertNil(model.errorMessage)
+    }
+
+    func testStopResetsDesiredMemoryRequestBeforeNextSessionSnapshot() async throws {
+        let fixture = try ViewModelFixture()
+        let debug = FakeDebugService()
+        let customBlock = fixture.memoryBlock(begin: "0x9000", contents: "99")
+        let defaultBlock = fixture.memoryBlock(begin: "0x8000", contents: "88")
+        await debug.setMemoryResult([customBlock], for: "0x00009000")
+        let model = try await stoppedModel(fixture: fixture, debug: debug)
+        _ = await model.setMemoryWindowAddress("0x9000")
+        XCTAssertEqual(model.memory, [customBlock])
+
+        await model.stop()
+        await model.start(.debug)
+        await debug.emit(.snapshot(fixture.snapshot(
+            line: 1,
+            r0: 1,
+            memory: [defaultBlock],
+            memoryRequest: .yagartoWindow
+        )))
+        await waitUntil { model.snapshot?.registers.first?.value?.numeric == 1 }
+
+        XCTAssertEqual(model.memory, [defaultBlock])
     }
 
     func testProfileChangeInvalidatesOlderLegacyMemoryRead() async throws {
@@ -2187,7 +2273,8 @@ private struct ViewModelFixture {
         line: UInt64,
         r0: UInt64,
         memory: [MIMemoryBlock] = [],
-        memoryRequest: DebugMemoryRequest? = nil
+        memoryRequest: DebugMemoryRequest? = nil,
+        diagnostics: [DebugDiagnostic] = []
     ) -> DebugSnapshot {
         DebugSnapshot(
             stopReason: .endSteppingRange,
@@ -2204,7 +2291,7 @@ private struct ViewModelFixture {
             memoryRequest: memoryRequest,
             disassembly: [],
             console: [],
-            diagnostics: []
+            diagnostics: diagnostics
         )
     }
 

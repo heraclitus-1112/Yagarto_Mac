@@ -156,6 +156,7 @@ public final class AppViewModel {
         machine = DebuggerStateMachine()
         breakpointIdentifiers = [:]
         debugSessionGeneration &+= 1
+        resetDesiredMemoryRequest()
         clearRuntimePresentation()
     }
 
@@ -364,7 +365,10 @@ public final class AppViewModel {
             let previous = snapshot?.registers ?? []
             snapshot = newSnapshot
             registerRows = RegisterPresentation.rows(current: newSnapshot.registers, previous: previous)
-            if newSnapshot.memoryRequest == desiredMemoryRequest {
+            let memoryReadFailed = newSnapshot.diagnostics.contains { $0.pane == .memory }
+            if let memoryRequest = newSnapshot.memoryRequest,
+               memoryRequest == desiredMemoryRequest,
+               !memoryReadFailed {
                 memory = newSnapshot.memory
                 clearMemoryError()
             }
@@ -460,6 +464,7 @@ public final class AppViewModel {
         breakpointRequestGenerations = [:]
         reconcilingBreakpoints = []
         debugSessionGeneration &+= 1
+        resetDesiredMemoryRequest()
         clearPresentedError()
         machine = DebuggerStateMachine()
         selectedRange = nil
@@ -485,6 +490,7 @@ public final class AppViewModel {
         if state == .terminating { try? machine.apply(.terminationCompleted) }
         breakpointIdentifiers = [:]
         debugSessionGeneration &+= 1
+        resetDesiredMemoryRequest()
         clearRuntimePresentation()
         stopTask = nil
         if let error { presentGlobalMessage("停止调试器失败：\(error)") }
@@ -508,6 +514,10 @@ public final class AppViewModel {
 
     private func invalidateMemoryOperations() {
         memoryOperationGeneration &+= 1
+    }
+
+    private func resetDesiredMemoryRequest() {
+        desiredMemoryRequest = .yagartoWindow
     }
 
     private func isCurrentMemoryOperation(
