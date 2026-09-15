@@ -55,10 +55,12 @@ public struct DebugDiagnostic: Equatable, Sendable {
 public struct DebugMemoryRequest: Equatable, Sendable {
     public let address: String
     public let byteCount: Int
+    public let observationID: UUID?
 
-    public init(address: String, byteCount: Int) {
+    public init(address: String, byteCount: Int, observationID: UUID? = nil) {
         self.address = address
         self.byteCount = byteCount
+        self.observationID = observationID
     }
 
     public static let yagartoWindow = DebugMemoryRequest(address: "0x8000", byteCount: 112)

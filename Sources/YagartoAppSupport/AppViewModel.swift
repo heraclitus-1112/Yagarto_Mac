@@ -264,7 +264,12 @@ public final class AppViewModel {
         let generation = beginMemoryOperation()
         let operationState = state
         do {
-            let request = try MemoryRequestValidator.request(address: address, length: length)
+            let validatedRequest = try MemoryRequestValidator.request(address: address, length: length)
+            let request = DebugMemoryRequest(
+                address: validatedRequest.address,
+                byteCount: validatedRequest.byteCount,
+                observationID: UUID()
+            )
             desiredMemoryRequest = request
             let blocks = try await debugService.readMemory(request)
             guard isCurrentMemoryOperation(generation, state: operationState) else { return }
@@ -284,7 +289,8 @@ public final class AppViewModel {
             let normalized = try MemoryWindowAddress.normalized(rawAddress)
             let request = DebugMemoryRequest(
                 address: normalized,
-                byteCount: MemoryWindowLayout.byteCount
+                byteCount: MemoryWindowLayout.byteCount,
+                observationID: UUID()
             )
             desiredMemoryRequest = request
             try await debugService.setMemoryRequest(request)

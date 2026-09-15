@@ -344,6 +344,175 @@ final class CoreServiceIntegrationTests: XCTestCase {
         ))
         try await adapter.stop()
     }
+
+    func testConcurrentMemorySetsReapplyLatestRequestAfterStaleCompletion() async throws {
+        let fixture = try AdapterMIFixture()
+        let gate = ControlledAdapterMemoryIO()
+        let adapter = CoreDebugAdapter(
+            overrides: [.gdb: fixture.script.path],
+            environment: ProcessInfo.processInfo.environment,
+            gdbSimulatorPath: fixture.script.path,
+            memoryRequestApplicator: { controller, request in
+                try await gate.apply(request, to: controller)
+            },
+            memoryReader: { controller, request in
+                try await gate.read(request, from: controller)
+            }
+        )
+        try await adapter.prepare(adapterBuild(for: fixture.directory))
+        _ = try await adapter.launch(mode: .debug, breakpoints: [])
+        await gate.clearAppliedRequests()
+        let requestA = DebugMemoryRequest(
+            address: "0xA000",
+            byteCount: 112,
+            observationID: UUID()
+        )
+        let requestB = DebugMemoryRequest(
+            address: "0xB000",
+            byteCount: 112,
+            observationID: UUID()
+        )
+        let requestAID = try XCTUnwrap(requestA.observationID)
+        await gate.suspendSet(requestAID)
+
+        let settingA = Task { try await adapter.setMemoryRequest(requestA) }
+        await gate.waitUntilSetStarted(requestAID)
+        try await adapter.setMemoryRequest(requestB)
+        await gate.resumeSet(requestAID)
+        try await settingA.value
+
+        let applied = await gate.appliedRequests()
+        XCTAssertEqual(applied, [requestB, requestA, requestB])
+        try await adapter.stop()
+    }
+
+    func testLaunchReappliesMemoryRequestChangedDuringInitialConfiguration() async throws {
+        let fixture = try AdapterMIFixture()
+        let gate = ControlledAdapterMemoryIO()
+        let adapter = CoreDebugAdapter(
+            overrides: [.gdb: fixture.script.path],
+            environment: ProcessInfo.processInfo.environment,
+            gdbSimulatorPath: fixture.script.path,
+            memoryRequestApplicator: { controller, request in
+                try await gate.apply(request, to: controller)
+            },
+            memoryReader: { controller, request in
+                try await gate.read(request, from: controller)
+            }
+        )
+        try await adapter.prepare(adapterBuild(for: fixture.directory))
+        let requestA = DebugMemoryRequest(
+            address: "0xA000",
+            byteCount: 112,
+            observationID: UUID()
+        )
+        let requestB = DebugMemoryRequest(
+            address: "0xB000",
+            byteCount: 112,
+            observationID: UUID()
+        )
+        let requestAID = try XCTUnwrap(requestA.observationID)
+        try await adapter.setMemoryRequest(requestA)
+        await gate.suspendSet(requestAID)
+
+        let launching = Task { try await adapter.launch(mode: .debug, breakpoints: []) }
+        await gate.waitUntilSetStarted(requestAID)
+        try await adapter.setMemoryRequest(requestB)
+        await gate.resumeSet(requestAID)
+        _ = try await launching.value
+
+        let applied = await gate.appliedRequests()
+        XCTAssertEqual(applied, [requestB, requestA, requestB])
+        try await adapter.stop()
+    }
+
+    func testStaleDirectReadReappliesLatestPendingMemoryRequest() async throws {
+        let fixture = try AdapterMIFixture()
+        let gate = ControlledAdapterMemoryIO()
+        let adapter = CoreDebugAdapter(
+            overrides: [.gdb: fixture.script.path],
+            environment: ProcessInfo.processInfo.environment,
+            gdbSimulatorPath: fixture.script.path,
+            memoryRequestApplicator: { controller, request in
+                try await gate.apply(request, to: controller)
+            },
+            memoryReader: { controller, request in
+                try await gate.read(request, from: controller)
+            }
+        )
+        try await adapter.prepare(adapterBuild(for: fixture.directory))
+        _ = try await adapter.launch(mode: .debug, breakpoints: [])
+        await gate.clearAppliedRequests()
+        let requestA = DebugMemoryRequest(
+            address: "0xA000",
+            byteCount: 112,
+            observationID: UUID()
+        )
+        let requestB = DebugMemoryRequest(
+            address: "0xB000",
+            byteCount: 112,
+            observationID: UUID()
+        )
+        let requestAID = try XCTUnwrap(requestA.observationID)
+        await gate.suspendRead(requestAID)
+
+        let readingA = Task { try await adapter.readMemory(requestA) }
+        await gate.waitUntilReadStarted(requestAID)
+        try await adapter.setMemoryRequest(requestB)
+        await gate.resumeRead(requestAID)
+        _ = try await readingA.value
+
+        let applied = await gate.appliedRequests()
+        XCTAssertEqual(applied, [requestB, requestA, requestB])
+        try await adapter.stop()
+    }
+
+    func testStaleFailedDirectReadReappliesLatestPendingMemoryRequest() async throws {
+        let fixture = try AdapterMIFixture()
+        let gate = ControlledAdapterMemoryIO()
+        let adapter = CoreDebugAdapter(
+            overrides: [.gdb: fixture.script.path],
+            environment: ProcessInfo.processInfo.environment,
+            gdbSimulatorPath: fixture.script.path,
+            memoryRequestApplicator: { controller, request in
+                try await gate.apply(request, to: controller)
+            },
+            memoryReader: { controller, request in
+                try await gate.read(request, from: controller)
+            }
+        )
+        try await adapter.prepare(adapterBuild(for: fixture.directory))
+        _ = try await adapter.launch(mode: .debug, breakpoints: [])
+        await gate.clearAppliedRequests()
+        let requestA = DebugMemoryRequest(
+            address: "0xA000",
+            byteCount: 112,
+            observationID: UUID()
+        )
+        let requestB = DebugMemoryRequest(
+            address: "0xB000",
+            byteCount: 112,
+            observationID: UUID()
+        )
+        let requestAID = try XCTUnwrap(requestA.observationID)
+        await gate.suspendRead(requestAID)
+        await gate.failRead(requestAID)
+
+        let readingA = Task { try await adapter.readMemory(requestA) }
+        await gate.waitUntilReadStarted(requestAID)
+        try await adapter.setMemoryRequest(requestB)
+        await gate.resumeRead(requestAID)
+        do {
+            _ = try await readingA.value
+            XCTFail("expected the stale direct read to fail")
+        } catch AdapterMITestError.forcedMemoryRead {
+            // The original read error is preserved after backend reconciliation.
+        }
+
+        let applied = await gate.appliedRequests()
+        XCTAssertEqual(applied, [requestB, requestA, requestB])
+        try await adapter.stop()
+    }
 }
 
 private actor AdapterStopGate {
@@ -368,6 +537,74 @@ private actor AdapterStopGate {
         continuation?.resume()
         continuation = nil
     }
+}
+
+private actor ControlledAdapterMemoryIO {
+    private var suspendedSetIDs: Set<UUID> = []
+    private var suspendedReadIDs: Set<UUID> = []
+    private var setContinuations: [UUID: CheckedContinuation<Void, Never>] = [:]
+    private var readContinuations: [UUID: CheckedContinuation<Void, Never>] = [:]
+    private var setStartWaiters: [UUID: [CheckedContinuation<Void, Never>]] = [:]
+    private var readStartWaiters: [UUID: [CheckedContinuation<Void, Never>]] = [:]
+    private var failingReadIDs: Set<UUID> = []
+    private var applied: [DebugMemoryRequest] = []
+
+    func apply(_ request: DebugMemoryRequest, to controller: DebuggerController) async throws {
+        if let observationID = request.observationID,
+           suspendedSetIDs.remove(observationID) != nil {
+            await withCheckedContinuation { continuation in
+                setContinuations[observationID] = continuation
+                setStartWaiters.removeValue(forKey: observationID)?.forEach { $0.resume() }
+            }
+        }
+        try await controller.setMemoryRequest(request)
+        applied.append(request)
+    }
+
+    func read(
+        _ request: DebugMemoryRequest,
+        from controller: DebuggerController
+    ) async throws -> [MIMemoryBlock] {
+        if let observationID = request.observationID,
+           suspendedReadIDs.remove(observationID) != nil {
+            await withCheckedContinuation { continuation in
+                readContinuations[observationID] = continuation
+                readStartWaiters.removeValue(forKey: observationID)?.forEach { $0.resume() }
+            }
+        }
+        let blocks = try await controller.readMemory(request)
+        applied.append(request)
+        if let observationID = request.observationID,
+           failingReadIDs.remove(observationID) != nil {
+            throw AdapterMITestError.forcedMemoryRead
+        }
+        return blocks
+    }
+
+    func suspendSet(_ observationID: UUID) { suspendedSetIDs.insert(observationID) }
+    func suspendRead(_ observationID: UUID) { suspendedReadIDs.insert(observationID) }
+    func failRead(_ observationID: UUID) { failingReadIDs.insert(observationID) }
+
+    func waitUntilSetStarted(_ observationID: UUID) async {
+        if setContinuations[observationID] != nil { return }
+        await withCheckedContinuation { setStartWaiters[observationID, default: []].append($0) }
+    }
+
+    func waitUntilReadStarted(_ observationID: UUID) async {
+        if readContinuations[observationID] != nil { return }
+        await withCheckedContinuation { readStartWaiters[observationID, default: []].append($0) }
+    }
+
+    func resumeSet(_ observationID: UUID) {
+        setContinuations.removeValue(forKey: observationID)?.resume()
+    }
+
+    func resumeRead(_ observationID: UUID) {
+        readContinuations.removeValue(forKey: observationID)?.resume()
+    }
+
+    func clearAppliedRequests() { applied = [] }
+    func appliedRequests() -> [DebugMemoryRequest] { applied }
 }
 
 private func adapterBuild(for directory: URL) -> AppBuildResult {
@@ -419,6 +656,7 @@ private func waitUntilProcessIsGone(_ processIdentifier: pid_t) async throws {
 
 private enum AdapterMITestError: Error {
     case timeout
+    case forcedMemoryRead
 }
 
 private final class AdapterMIFixture: @unchecked Sendable {

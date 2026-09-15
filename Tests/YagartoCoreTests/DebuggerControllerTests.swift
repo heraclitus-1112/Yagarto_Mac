@@ -17,6 +17,21 @@ final class DebuggerControllerTests: XCTestCase {
         )
     }
 
+    func testMemoryRequestObservationIdentityParticipatesInEquality() {
+        let firstID = UUID()
+        let secondID = UUID()
+
+        XCTAssertEqual(
+            DebugMemoryRequest(address: "0x9000", byteCount: 112, observationID: firstID),
+            DebugMemoryRequest(address: "0x9000", byteCount: 112, observationID: firstID)
+        )
+        XCTAssertNotEqual(
+            DebugMemoryRequest(address: "0x9000", byteCount: 112, observationID: firstID),
+            DebugMemoryRequest(address: "0x9000", byteCount: 112, observationID: secondID)
+        )
+        XCTAssertNil(DebugMemoryRequest.yagartoWindow.observationID)
+    }
+
     func testControllerTimeoutHasActionableLocalizedDescription() {
         XCTAssertEqual(
             DebuggerControllerError.commandTimedOut("等待 ARM7 仿真器暂停").localizedDescription,
@@ -120,7 +135,11 @@ final class DebuggerControllerTests: XCTestCase {
         let fixture = try ControllerGDBFixture(hangFirstMemory: true)
         let controller = DebuggerController(plan: fixture.plan(profile: .arm7tdmi))
         let events = await controller.events()
-        let request = DebugMemoryRequest(address: "0x9000", byteCount: 112)
+        let request = DebugMemoryRequest(
+            address: "0x9000",
+            byteCount: 112,
+            observationID: UUID()
+        )
         try await controller.launch()
         try await waitForCommand(
             "-data-read-memory-bytes 0x8000 112",
@@ -145,21 +164,25 @@ final class DebuggerControllerTests: XCTestCase {
         let fixture = try ControllerGDBFixture(hangFirstMemory: true)
         let controller = DebuggerController(plan: fixture.plan(profile: .arm7tdmi))
         let events = await controller.events()
+        let request = DebugMemoryRequest(
+            address: "0x9000",
+            byteCount: 112,
+            observationID: UUID()
+        )
         try await controller.launch()
         try await waitForCommand(
             "-data-read-memory-bytes 0x8000 112",
             fixture: fixture
         )
 
-        let direct = try await controller.readMemory(
-            DebugMemoryRequest(address: "0x9000", byteCount: 112)
-        )
+        let direct = try await controller.readMemory(request)
         try fixture.releaseFirstMemoryResponse()
         try await waitForConsole("old-memory-response-drained", from: events)
         let final = try await waitForSnapshot(controller, memoryBegin: 0x9000)
 
         XCTAssertEqual(direct.first?.begin.numeric, 0x9000)
         XCTAssertEqual(final.memory.first?.begin.numeric, 0x9000)
+        XCTAssertEqual(final.memoryRequest, request)
         try await controller.stop()
     }
 

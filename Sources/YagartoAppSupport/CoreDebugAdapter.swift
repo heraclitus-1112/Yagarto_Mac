@@ -13,6 +13,14 @@ public actor CoreDebugAdapter: DebugServicing {
     private let environment: [String: String]
     private let explicitGDBSimulatorPath: String?
     private let postStopSessionSynchronization: (@Sendable () async -> Void)?
+    private let memoryRequestApplicator: @Sendable (
+        DebuggerController,
+        DebugMemoryRequest
+    ) async throws -> Void
+    private let memoryReader: @Sendable (
+        DebuggerController,
+        DebugMemoryRequest
+    ) async throws -> [MIMemoryBlock]
     private var debugPlan: DebugLaunchPlan?
     private var runPlan: DebugLaunchPlan?
     private var nextSessionIdentifier: UInt64 = 0
@@ -39,6 +47,12 @@ public actor CoreDebugAdapter: DebugServicing {
         self.environment = environment
         explicitGDBSimulatorPath = gdbSimulatorPath
         postStopSessionSynchronization = nil
+        memoryRequestApplicator = { controller, request in
+            try await controller.setMemoryRequest(request)
+        }
+        memoryReader = { controller, request in
+            try await controller.readMemory(request)
+        }
     }
 
     init(
@@ -51,6 +65,33 @@ public actor CoreDebugAdapter: DebugServicing {
         self.environment = environment
         explicitGDBSimulatorPath = gdbSimulatorPath
         self.postStopSessionSynchronization = postStopSessionSynchronization
+        memoryRequestApplicator = { controller, request in
+            try await controller.setMemoryRequest(request)
+        }
+        memoryReader = { controller, request in
+            try await controller.readMemory(request)
+        }
+    }
+
+    init(
+        overrides: [ToolIdentifier: String] = [:],
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        gdbSimulatorPath: String? = nil,
+        memoryRequestApplicator: @escaping @Sendable (
+            DebuggerController,
+            DebugMemoryRequest
+        ) async throws -> Void,
+        memoryReader: @escaping @Sendable (
+            DebuggerController,
+            DebugMemoryRequest
+        ) async throws -> [MIMemoryBlock]
+    ) {
+        self.overrides = overrides
+        self.environment = environment
+        explicitGDBSimulatorPath = gdbSimulatorPath
+        postStopSessionSynchronization = nil
+        self.memoryRequestApplicator = memoryRequestApplicator
+        self.memoryReader = memoryReader
     }
 
     public func events() -> AsyncStream<DebuggerEvent> {
@@ -133,7 +174,13 @@ public actor CoreDebugAdapter: DebugServicing {
         )
         activeSession = record
         do {
-            try await newController.setMemoryRequest(pendingMemoryRequest)
+            let request = pendingMemoryRequest
+            let requestRevision = memoryRequestRevision
+            try await memoryRequestApplicator(newController, request)
+            try await reconcileMemoryRequest(
+                afterApplying: requestRevision,
+                to: record
+            )
             try requireActive(record)
             try await newController.launch()
             try requireActive(record)
@@ -183,15 +230,33 @@ public actor CoreDebugAdapter: DebugServicing {
     }
 
     public func setMemoryRequest(_ request: DebugMemoryRequest) async throws {
-        try rememberMemoryRequest(request)
-        if let activeSession {
-            try await activeSession.controller.setMemoryRequest(request)
-        }
+        let requestRevision = try rememberMemoryRequest(request)
+        guard let activeSession else { return }
+        try await memoryRequestApplicator(activeSession.controller, request)
+        try await reconcileMemoryRequest(
+            afterApplying: requestRevision,
+            to: activeSession
+        )
     }
 
     public func readMemory(_ request: DebugMemoryRequest) async throws -> [MIMemoryBlock] {
-        try rememberMemoryRequest(request)
-        return try await requiredController().readMemory(request)
+        let requestRevision = try rememberMemoryRequest(request)
+        guard let activeSession else { throw DebuggerControllerError.missingLaunchPlan }
+        let memory: [MIMemoryBlock]
+        do {
+            memory = try await memoryReader(activeSession.controller, request)
+        } catch {
+            try? await reconcileMemoryRequest(
+                afterApplying: requestRevision,
+                to: activeSession
+            )
+            throw error
+        }
+        try await reconcileMemoryRequest(
+            afterApplying: requestRevision,
+            to: activeSession
+        )
+        return memory
     }
 
     public func setBreakpoint(file: URL, line: Int) async throws -> DebugBreakpoint {
@@ -231,10 +296,27 @@ public actor CoreDebugAdapter: DebugServicing {
         memoryRequestRevision &+= 1
     }
 
-    private func rememberMemoryRequest(_ request: DebugMemoryRequest) throws {
+    @discardableResult
+    private func rememberMemoryRequest(_ request: DebugMemoryRequest) throws -> UInt64 {
         try Self.validate(request)
         pendingMemoryRequest = request
         memoryRequestRevision &+= 1
+        return memoryRequestRevision
+    }
+
+    private func reconcileMemoryRequest(
+        afterApplying appliedRevision: UInt64,
+        to session: SessionRecord
+    ) async throws {
+        var appliedRevision = appliedRevision
+        while activeSession?.identifier == session.identifier,
+              appliedRevision != memoryRequestRevision {
+            let request = pendingMemoryRequest
+            let revision = memoryRequestRevision
+            try await memoryRequestApplicator(session.controller, request)
+            guard activeSession?.identifier == session.identifier else { return }
+            appliedRevision = revision
+        }
     }
 
     private func waitUntilStopped(_ controller: DebuggerController) async throws {
