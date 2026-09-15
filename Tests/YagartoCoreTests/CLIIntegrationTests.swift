@@ -6,6 +6,36 @@ import XCTest
 @testable import YagartoCore
 
 final class CLIIntegrationTests: XCTestCase {
+    func testDefaultCLIEnvironmentUsesOnlySystemToolDirectories() throws {
+        let directory = try CLITemporaryDirectory()
+
+        let environment = isolatedCLIEnvironment(in: directory.url, overrides: [:])
+
+        XCTAssertEqual(environment["PATH"], "/usr/bin:/bin")
+    }
+
+    func testRealARMBuildEnvironmentUsesResolvedNonstandardToolDirectories() throws {
+        let firstDirectory = "/custom toolchain/bin"
+        let secondDirectory = "/vendor/arm/bin"
+        let availableTools: Set<String> = [
+            "\(firstDirectory)/arm-none-eabi-as",
+            "\(firstDirectory)/arm-none-eabi-ld",
+            "\(secondDirectory)/arm-none-eabi-objcopy",
+            "\(secondDirectory)/arm-none-eabi-objdump"
+        ]
+        let resolver = ToolResolver(
+            environment: ["PATH": "\(firstDirectory):\(secondDirectory)"],
+            fileExists: { availableTools.contains($0) }
+        )
+
+        let environment = try realARMBuildEnvironment(resolver: resolver)
+
+        XCTAssertEqual(
+            environment["PATH"],
+            "\(firstDirectory):\(secondDirectory):/usr/bin:/bin"
+        )
+    }
+
     func testProcessHarnessCapturesTwoMegabytesOfStderrWithoutDeadlock() throws {
         guard FileManager.default.isExecutableFile(atPath: "/usr/bin/perl") else {
             throw XCTSkip("系统未提供 /usr/bin/perl，跳过大 stderr harness 回归")
@@ -119,7 +149,7 @@ final class CLIIntegrationTests: XCTestCase {
     }
 
     func testBuildFormatPrescanStopsAtDoubleDashBeforeFormatLikeSourceFilename() throws {
-        try requireARMBuildTools()
+        let environment = try realARMBuildEnvironment()
         let directory = try CLITemporaryDirectory()
         try Data("""
         .text
@@ -130,7 +160,8 @@ final class CLIIntegrationTests: XCTestCase {
 
         let result = try runCLI(
             ["build", "--format", "json", "--", "--format=json.s"],
-            in: directory.url
+            in: directory.url,
+            environment: environment
         )
 
         XCTAssertEqual(result.status, 0, result.stderr)
@@ -299,14 +330,18 @@ final class CLIIntegrationTests: XCTestCase {
     }
 
     func testMissingSourceReportsControlledToolOutputInTextAndJSON() throws {
-        try requireARMBuildTools()
+        let environment = try realARMBuildEnvironment()
         let directory = try CLITemporaryDirectory()
         try ConfigStore(projectDirectory: directory.url).save(ProjectConfiguration(
             sources: ["缺失 source.s"],
             outputName: "missing"
         ))
 
-        let json = try runCLI(["build", "--format", "json"], in: directory.url)
+        let json = try runCLI(
+            ["build", "--format", "json"],
+            in: directory.url,
+            environment: environment
+        )
         XCTAssertEqual(json.status, YagartoExitCode.buildFailure.rawValue)
         let payload = try decodeErrorEnvelope(json.stderr)
         XCTAssertEqual(payload.error.code, "build.step_failed")
@@ -319,7 +354,11 @@ final class CLIIntegrationTests: XCTestCase {
                 || jsonToolOutput.localizedCaseInsensitiveContains("can't open")
         )
 
-        let text = try runCLI(["build", "--format", "text"], in: directory.url)
+        let text = try runCLI(
+            ["build", "--format", "text"],
+            in: directory.url,
+            environment: environment
+        )
         XCTAssertEqual(text.status, YagartoExitCode.buildFailure.rawValue)
         XCTAssertTrue(text.stderr.contains("build.step_failed"))
         XCTAssertTrue(text.stderr.contains("工具输出："))
@@ -327,14 +366,18 @@ final class CLIIntegrationTests: XCTestCase {
     }
 
     func testMissingSourceTextIncludesDiagnosticCodeAndToolOutput() throws {
-        try requireARMBuildTools()
+        let environment = try realARMBuildEnvironment()
         let directory = try CLITemporaryDirectory()
         try ConfigStore(projectDirectory: directory.url).save(ProjectConfiguration(
             sources: ["missing-text.s"],
             outputName: "missing-text"
         ))
 
-        let result = try runCLI(["build", "--format", "text"], in: directory.url)
+        let result = try runCLI(
+            ["build", "--format", "text"],
+            in: directory.url,
+            environment: environment
+        )
 
         XCTAssertEqual(result.status, YagartoExitCode.buildFailure.rawValue)
         XCTAssertTrue(result.stderr.contains("build.step_failed"))
@@ -343,7 +386,7 @@ final class CLIIntegrationTests: XCTestCase {
     }
 
     func testInvalidAssemblyReportsControlledToolOutputInTextAndJSON() throws {
-        try requireARMBuildTools()
+        let environment = try realARMBuildEnvironment()
         let directory = try CLITemporaryDirectory()
         try Data("""
         .text
@@ -356,7 +399,11 @@ final class CLIIntegrationTests: XCTestCase {
             outputName: "bad"
         ))
 
-        let json = try runCLI(["build", "--format", "json"], in: directory.url)
+        let json = try runCLI(
+            ["build", "--format", "json"],
+            in: directory.url,
+            environment: environment
+        )
         XCTAssertEqual(json.status, YagartoExitCode.buildFailure.rawValue)
         let payload = try decodeErrorEnvelope(json.stderr)
         XCTAssertEqual(payload.error.code, "build.step_failed")
@@ -368,7 +415,11 @@ final class CLIIntegrationTests: XCTestCase {
                 || jsonToolOutput.localizedCaseInsensitiveContains("error")
         )
 
-        let text = try runCLI(["build", "--format", "text"], in: directory.url)
+        let text = try runCLI(
+            ["build", "--format", "text"],
+            in: directory.url,
+            environment: environment
+        )
         XCTAssertEqual(text.status, YagartoExitCode.buildFailure.rawValue)
         XCTAssertTrue(text.stderr.contains("build.step_failed"))
         XCTAssertTrue(text.stderr.contains("工具输出："))
@@ -376,7 +427,7 @@ final class CLIIntegrationTests: XCTestCase {
     }
 
     func testInvalidAssemblyTextIncludesDiagnosticCodeAndToolOutput() throws {
-        try requireARMBuildTools()
+        let environment = try realARMBuildEnvironment()
         let directory = try CLITemporaryDirectory()
         try Data("""
         .text
@@ -389,7 +440,11 @@ final class CLIIntegrationTests: XCTestCase {
             outputName: "bad-text"
         ))
 
-        let result = try runCLI(["build", "--format", "text"], in: directory.url)
+        let result = try runCLI(
+            ["build", "--format", "text"],
+            in: directory.url,
+            environment: environment
+        )
 
         XCTAssertEqual(result.status, YagartoExitCode.buildFailure.rawValue)
         XCTAssertTrue(result.stderr.contains("build.step_failed"))
@@ -1095,7 +1150,7 @@ final class CLIIntegrationTests: XCTestCase {
     }
 
     func testSingleFileBuildOverridesConfiguredSourcesAndDisassemblesELF() throws {
-        try requireARMBuildTools()
+        let environment = try realARMBuildEnvironment()
         let directory = try CLITemporaryDirectory()
         try Data("""
         .text
@@ -1111,7 +1166,8 @@ final class CLIIntegrationTests: XCTestCase {
 
         let build = try runCLI(
             ["build", "演示 文件.s", "--format", "json"],
-            in: directory.url
+            in: directory.url,
+            environment: environment
         )
         XCTAssertEqual(build.status, 0, build.stderr)
         XCTAssertNoThrow(try JSONSerialization.jsonObject(with: Data(build.stdout.utf8)))
@@ -1132,7 +1188,8 @@ final class CLIIntegrationTests: XCTestCase {
 
         let disassembly = try runCLI(
             ["disassemble", outputDirectory.appendingPathComponent("firmware.elf").path, "--format", "json"],
-            in: directory.url
+            in: directory.url,
+            environment: environment
         )
         XCTAssertEqual(disassembly.status, 0, disassembly.stderr)
         let payload = try XCTUnwrap(
@@ -1193,7 +1250,7 @@ final class CLIIntegrationTests: XCTestCase {
     }
 
     func testRealBuildAtomicallyReplacesPreexistingMapSymlinkWithoutChangingVictim() throws {
-        try requireARMBuildTools()
+        let environment = try realARMBuildEnvironment()
         let directory = try CLITemporaryDirectory()
         let outside = try CLITemporaryDirectory()
         try Data("""
@@ -1221,7 +1278,11 @@ final class CLIIntegrationTests: XCTestCase {
             withDestinationPath: victim.path
         )
 
-        let result = try runCLI(["build", "--format", "json"], in: directory.url)
+        let result = try runCLI(
+            ["build", "--format", "json"],
+            in: directory.url,
+            environment: environment
+        )
 
         XCTAssertEqual(result.status, 0, result.stderr)
         XCTAssertNoThrow(try JSONSerialization.jsonObject(with: Data(result.stdout.utf8)))
@@ -1662,13 +1723,31 @@ private func decodeErrorEnvelope(_ string: String) throws -> CLIErrorEnvelope {
     try JSONDecoder().decode(CLIErrorEnvelope.self, from: Data(string.utf8))
 }
 
-private func requireARMBuildTools() throws {
+private func realARMBuildEnvironment(
+    resolver: ToolResolver = ToolResolver()
+) throws -> [String: String] {
     let requiredTools: [ToolIdentifier] = [.assembler, .linker, .objcopy, .objdump]
-    let resolver = ToolResolver()
-    let missingTools = requiredTools.filter { (try? resolver.resolve($0)) == nil }
+    var missingTools: [ToolIdentifier] = []
+    var pathDirectories: [String] = []
+    for tool in requiredTools {
+        guard let executable = try? resolver.resolve(tool) else {
+            missingTools.append(tool)
+            continue
+        }
+        let directory = URL(fileURLWithPath: executable)
+            .deletingLastPathComponent()
+            .path
+        if !pathDirectories.contains(directory) {
+            pathDirectories.append(directory)
+        }
+    }
     guard missingTools.isEmpty else {
         throw XCTSkip("缺少真实 ARM 工具：\(missingTools.map(\.rawValue).joined(separator: ", "))")
     }
+    for systemDirectory in ["/usr/bin", "/bin"] where !pathDirectories.contains(systemDirectory) {
+        pathDirectories.append(systemDirectory)
+    }
+    return ["PATH": pathDirectories.joined(separator: ":")]
 }
 
 private func runCLI(
@@ -1813,7 +1892,7 @@ private func isolatedCLIEnvironment(
 ) -> [String: String] {
     [
         "HOME": directory.path,
-        "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+        "PATH": "/usr/bin:/bin",
         "TMPDIR": FileManager.default.temporaryDirectory.path,
         "LANG": "en_US.UTF-8"
     ].merging(overrides, uniquingKeysWith: { _, override in override })
