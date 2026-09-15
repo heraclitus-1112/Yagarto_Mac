@@ -17,6 +17,7 @@ public enum MemoryTableFormattingError: Error, Equatable, LocalizedError, Sendab
     case oddHexDigitCount(address: String)
     case invalidHex(address: String)
     case addressOverflow(String)
+    case invalidRowCount(Int)
     case conflictingByte(address: UInt64)
 
     public var errorDescription: String? {
@@ -29,6 +30,8 @@ public enum MemoryTableFormattingError: Error, Equatable, LocalizedError, Sendab
             return "内存块 \(address) 包含无效的十六进制数据。"
         case .addressOverflow(let address):
             return "内存块 \(address) 的地址范围超出 UInt64。"
+        case .invalidRowCount(let rowCount):
+            return "内存窗口行数必须在 1 到 256 之间，当前为 \(rowCount)。"
         case .conflictingByte(let address):
             return "内存地址 \(Self.addressText(address)) 存在冲突字节。"
         }
@@ -233,14 +236,11 @@ public enum MemoryWordTableFormatter {
         baseAddress: UInt64,
         rowCount: Int = MemoryWindowLayout.rowCount
     ) throws -> [MemoryWordTableRow] {
-        guard rowCount > 0 else { return [] }
-
-        let (byteCount, multiplicationOverflow) = UInt64(rowCount).multipliedReportingOverflow(
-            by: UInt64(MemoryWindowLayout.bytesPerRow)
-        )
-        guard !multiplicationOverflow else {
-            throw MemoryTableFormattingError.addressOverflow(String(baseAddress))
+        guard (1...256).contains(rowCount) else {
+            throw MemoryTableFormattingError.invalidRowCount(rowCount)
         }
+
+        let byteCount = UInt64(rowCount * MemoryWindowLayout.bytesPerRow)
         let (_, addressOverflow) = baseAddress.addingReportingOverflow(byteCount - 1)
         guard !addressOverflow else {
             throw MemoryTableFormattingError.addressOverflow(String(baseAddress))

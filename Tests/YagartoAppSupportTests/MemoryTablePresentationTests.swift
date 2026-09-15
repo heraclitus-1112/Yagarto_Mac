@@ -102,14 +102,34 @@ final class MemoryTablePresentationTests: XCTestCase {
         XCTAssertEqual(rows[1].bytes, Array<UInt8?>(repeating: nil, count: 16))
     }
 
-    func testWordWindowRejectsByteCountOverflow() {
-        XCTAssertThrowsError(
-            try MemoryWordTableFormatter.rows(
-                from: [],
-                baseAddress: 0,
-                rowCount: 1 << 60
-            )
+    func testWordWindowBoundsRowCountBeforeAllocation() throws {
+        XCTAssertEqual(
+            try MemoryWordTableFormatter.rows(from: [], baseAddress: 0, rowCount: 1).count,
+            1
         )
+        XCTAssertEqual(
+            try MemoryWordTableFormatter.rows(from: [], baseAddress: 0, rowCount: 256).count,
+            256
+        )
+
+        for rowCount in [-1, 0, 257, 1 << 59] {
+            XCTAssertThrowsError(
+                try MemoryWordTableFormatter.rows(
+                    from: [],
+                    baseAddress: 0,
+                    rowCount: rowCount
+                )
+            ) { error in
+                XCTAssertEqual(
+                    error as? MemoryTableFormattingError,
+                    .invalidRowCount(rowCount)
+                )
+                XCTAssertEqual(
+                    error.localizedDescription,
+                    "内存窗口行数必须在 1 到 256 之间，当前为 \(rowCount)。"
+                )
+            }
+        }
     }
 
     func testFormatsTwentyBytesAsSixteenByteRowAndPaddedRemainder() throws {
