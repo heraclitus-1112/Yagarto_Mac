@@ -8,6 +8,12 @@ public actor DebuggerController {
         let task: Task<Void, Never>
     }
 
+    private struct StoppedContext {
+        let record: MIAsyncRecord
+        let session: GDBMISession
+        let generation: UUID
+    }
+
     private let profile: ProfileID
     private let consoleLimit: Int
     private let eventBufferLimit: Int
@@ -23,6 +29,8 @@ public actor DebuggerController {
     private var recoveryTask: TrackedTask?
     private var console: [DebugConsoleEntry] = []
     private var memoryRequest = DebugMemoryRequest.yagartoWindow
+    private var memoryRequestRevision: UInt64 = 0
+    private var stoppedContext: StoppedContext?
     private var subscribers: [UUID: AsyncStream<DebuggerEvent>.Continuation] = [:]
     private var totalDroppedEvents = 0
 
@@ -108,6 +116,7 @@ public actor DebuggerController {
         try Task.checkCancellation()
         guard let plan else { throw DebuggerControllerError.missingLaunchPlan }
         try transition(.launchStarted)
+        stoppedContext = nil
         let attemptGeneration = UUID()
         generation = attemptGeneration
         var attemptSession: GDBMISession?
@@ -190,7 +199,9 @@ public actor DebuggerController {
     }
 
     public func stop() async throws {
-        defer { memoryRequest = .yagartoWindow }
+        let requestRevision = memoryRequestRevision
+        defer { resetMemoryRequest(ifUnchanged: requestRevision) }
+        stoppedContext = nil
         let stoppedSession = session
         var interruptFailure: (any Error)?
         if machine.state == .running,
@@ -202,6 +213,7 @@ public actor DebuggerController {
                 interruptFailure = error
             }
         }
+        stoppedContext = nil
         if machine.state == .ready {
             generation = UUID()
             if let stoppedSession, session === stoppedSession { session = nil }
@@ -225,12 +237,24 @@ public actor DebuggerController {
     public func setMemoryRequest(_ request: DebugMemoryRequest) throws {
         try validate(request)
         memoryRequest = request
+        memoryRequestRevision &+= 1
+        guard machine.state == .stopped,
+              let stoppedContext,
+              isCurrent(stoppedContext.generation, session: stoppedContext.session) else {
+            return
+        }
+        dispatchSnapshot(
+            stopped: stoppedContext.record,
+            session: stoppedContext.session,
+            generation: stoppedContext.generation
+        )
     }
 
     public func readMemory(_ request: DebugMemoryRequest) async throws -> [MIMemoryBlock] {
         try requireState(.stopped, operation: "readMemory")
         try validate(request)
         memoryRequest = request
+        memoryRequestRevision &+= 1
         let record = try await requiredSession().send(
             "-data-read-memory-bytes \(request.address) \(request.byteCount)"
         )
@@ -277,11 +301,17 @@ public actor DebuggerController {
         switch event {
         case .asynchronous(let record) where record.kind == .exec && record.asyncClass == "running":
             guard machine.state == .launching || machine.state == .stopped else { return }
+            stoppedContext = nil
             try? transition(.inferiorRunning)
             cancelSnapshotTasks()
         case .asynchronous(let record) where record.kind == .exec && record.asyncClass == "stopped":
             guard machine.state == .launching || machine.state == .running else { return }
             try? transition(.inferiorStopped)
+            stoppedContext = StoppedContext(
+                record: record,
+                session: sourceSession,
+                generation: eventGeneration
+            )
             dispatchSnapshot(
                 stopped: record,
                 session: sourceSession,
@@ -510,6 +540,7 @@ public actor DebuggerController {
               machine.state != .ready,
               machine.state != .idle,
               machine.state != .building else { return }
+        stoppedContext = nil
         publishDiagnostic(.init(
             pane: .session,
             isCritical: true,
@@ -560,6 +591,7 @@ public actor DebuggerController {
         generation recoveryGeneration: UUID
     ) {
         guard recoveryTask == nil else { return }
+        stoppedContext = nil
         cancelSnapshotTasks()
         let taskID = UUID()
         let task = Task { [weak self] in
@@ -622,6 +654,7 @@ public actor DebuggerController {
         }
         guard generation == attemptGeneration, machine.state == .launching else { return }
         generation = UUID()
+        stoppedContext = nil
         try? transition(.launchFailed)
     }
 
@@ -684,6 +717,12 @@ public actor DebuggerController {
               request.address.range(of: pattern, options: .regularExpression) != nil else {
             throw DebuggerControllerError.invalidMemoryRequest
         }
+    }
+
+    private func resetMemoryRequest(ifUnchanged revision: UInt64) {
+        guard memoryRequestRevision == revision else { return }
+        memoryRequest = .yagartoWindow
+        memoryRequestRevision &+= 1
     }
 
     private static func quoteMIArgument(_ value: String) -> String {

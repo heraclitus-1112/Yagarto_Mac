@@ -128,16 +128,13 @@ final class CoreServiceIntegrationTests: XCTestCase {
         let initialEvents = await adapter.events()
         _ = try await adapter.launch(mode: .debug, breakpoints: [])
         _ = try await firstSnapshot(from: initialEvents)
-        let commandsBeforeActiveRequest = try fixture.commands()
+        let activeRequestEvents = await adapter.events()
 
         try await adapter.setMemoryRequest(
             DebugMemoryRequest(address: "0xA000", byteCount: 112)
         )
 
-        XCTAssertEqual(try fixture.commands(), commandsBeforeActiveRequest)
-        let stepEvents = await adapter.events()
-        try await adapter.stepInstruction()
-        _ = try await firstSnapshot(from: stepEvents)
+        _ = try await firstSnapshot(from: activeRequestEvents)
         try await adapter.stop()
 
         let relaunchedEvents = await adapter.events()
@@ -175,6 +172,35 @@ final class CoreServiceIntegrationTests: XCTestCase {
         )
         XCTAssertFalse(
             try fixture.commands().contains("-data-read-memory-bytes 0x9000 112")
+        )
+        try await adapter.stop()
+    }
+
+    func testCoreDebugAdapterReadMemoryTracksRequestAcrossSessionReplacement() async throws {
+        let fixture = try AdapterMIFixture()
+        let adapter = CoreDebugAdapter(
+            overrides: [.gdb: fixture.script.path],
+            gdbSimulatorPath: fixture.script.path
+        )
+        try await adapter.prepare(adapterBuild(for: fixture.directory))
+        let initialEvents = await adapter.events()
+        _ = try await adapter.launch(mode: .debug, breakpoints: [])
+        _ = try await firstSnapshot(from: initialEvents)
+
+        _ = try await adapter.readMemory(
+            DebugMemoryRequest(address: "0xB000", byteCount: 16)
+        )
+
+        let replacementEvents = await adapter.events()
+        _ = try await adapter.launch(mode: .debug, breakpoints: [])
+        _ = try await firstSnapshot(from: replacementEvents)
+        let requests = try fixture.commands().filter {
+            $0.hasPrefix("-data-read-memory-bytes")
+        }
+        XCTAssertEqual(requests.last, "-data-read-memory-bytes 0xB000 16")
+        XCTAssertEqual(
+            requests.filter { $0 == "-data-read-memory-bytes 0x8000 112" }.count,
+            1
         )
         try await adapter.stop()
     }

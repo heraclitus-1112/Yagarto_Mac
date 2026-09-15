@@ -93,6 +93,53 @@ final class DebuggerControllerTests: XCTestCase {
         try await controller.stop()
     }
 
+    func testStopDoesNotOverwriteMemoryRequestSetWhileCleanupIsSuspended() async throws {
+        let fixture = try ControllerGDBFixture(delayGDBExit: true)
+        let controller = DebuggerController(plan: fixture.plan(profile: .arm7tdmi))
+        try await controller.launch()
+        _ = try await waitForSnapshot(controller)
+
+        let stop = Task { try await controller.stop() }
+        try await waitForCommand("-gdb-exit", fixture: fixture)
+        try await controller.setMemoryRequest(
+            DebugMemoryRequest(address: "0x9000", byteCount: 112)
+        )
+        try await stop.value
+
+        try await controller.launch()
+        _ = try await waitForSnapshot(controller)
+        let requests = try fixture.commands().filter {
+            $0.hasPrefix("-data-read-memory-bytes")
+        }
+        XCTAssertEqual(requests.last, "-data-read-memory-bytes 0x9000 112")
+        try await controller.stop()
+    }
+
+    func testSetMemoryRequestReplacesInFlightStoppedSnapshotBeforePublishing() async throws {
+        let fixture = try ControllerGDBFixture(hangFirstMemory: true)
+        let controller = DebuggerController(plan: fixture.plan(profile: .arm7tdmi))
+        let events = await controller.events()
+        try await controller.launch()
+        try await waitForCommand(
+            "-data-read-memory-bytes 0x8000 112",
+            fixture: fixture
+        )
+        let beforeUpdate = await controller.latestSnapshot
+        XCTAssertNil(beforeUpdate)
+
+        try await controller.setMemoryRequest(
+            DebugMemoryRequest(address: "0x9000", byteCount: 112)
+        )
+
+        let updated = try await waitForSnapshot(controller, memoryBegin: 0x9000)
+        XCTAssertEqual(updated.memory.first?.begin.numeric, 0x9000)
+        try fixture.releaseFirstMemoryResponse()
+        try await waitForConsole("old-memory-response-drained", from: events)
+        let afterOldResponse = await controller.latestSnapshot
+        XCTAssertEqual(afterOldResponse?.memory.first?.begin.numeric, 0x9000)
+        try await controller.stop()
+    }
+
     func testSetMemoryRequestRejectsInvalidRequestWithoutAStateRequirement() async throws {
         let controller = DebuggerController(profile: .arm7tdmi)
 
@@ -540,6 +587,21 @@ final class DebuggerControllerTests: XCTestCase {
         throw ControllerTestError.timeout
     }
 
+    private func waitForSnapshot(
+        _ controller: DebuggerController,
+        memoryBegin: UInt64
+    ) async throws -> DebugSnapshot {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(2))
+        while ContinuousClock.now < deadline {
+            if let snapshot = await controller.latestSnapshot,
+               snapshot.memory.first?.begin.numeric == memoryBegin {
+                return snapshot
+            }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        throw ControllerTestError.timeout
+    }
+
     private func waitForState(
         _ expected: DebuggerState,
         controller: DebuggerController
@@ -595,6 +657,29 @@ final class DebuggerControllerTests: XCTestCase {
         throw ControllerTestError.timeout
     }
 
+    private func waitForConsole(
+        _ text: String,
+        from stream: AsyncStream<DebuggerEvent>
+    ) async throws {
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask {
+                for await event in stream {
+                    if case .consoleAppended(let entry) = event,
+                       entry.text == text {
+                        return
+                    }
+                }
+                throw ControllerTestError.timeout
+            }
+            group.addTask {
+                try await Task.sleep(for: .seconds(2))
+                throw ControllerTestError.timeout
+            }
+            defer { group.cancelAll() }
+            try await group.next()
+        }
+    }
+
 }
 
 private enum ControllerTestError: Error {
@@ -630,10 +715,13 @@ private final class ControllerGDBFixture {
     let autoExitWithStubbornChild: Bool
     let signalInterrupt: Bool
     let signalStopAfter: Int
+    let delayGDBExit: Bool
+    let hangFirstMemory: Bool
     let label: String
     let pidLog: URL
     let childPIDFile: URL
     let signalLog: URL
+    let releaseMemoryFile: URL
 
     init(
         failMemory: Bool = false,
@@ -644,6 +732,8 @@ private final class ControllerGDBFixture {
         autoExitWithStubbornChild: Bool = false,
         signalInterrupt: Bool = false,
         signalStopAfter: Int = 1,
+        delayGDBExit: Bool = false,
+        hangFirstMemory: Bool = false,
         label: String = "课程"
     ) throws {
         self.failMemory = failMemory
@@ -654,6 +744,8 @@ private final class ControllerGDBFixture {
         self.autoExitWithStubbornChild = autoExitWithStubbornChild
         self.signalInterrupt = signalInterrupt
         self.signalStopAfter = signalStopAfter
+        self.delayGDBExit = delayGDBExit
+        self.hangFirstMemory = hangFirstMemory
         self.label = label
         directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -663,6 +755,7 @@ private final class ControllerGDBFixture {
         pidLog = directory.appendingPathComponent("pids.txt")
         childPIDFile = directory.appendingPathComponent("child.pid")
         signalLog = directory.appendingPathComponent("signals.txt")
+        releaseMemoryFile = directory.appendingPathComponent("release-memory")
         try Self.source.write(to: script, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
     }
@@ -697,10 +790,13 @@ private final class ControllerGDBFixture {
                 "--auto-exit-with-stubborn-child", autoExitWithStubbornChild ? "yes" : "no",
                 "--signal-interrupt", signalInterrupt ? "yes" : "no",
                 "--signal-stop-after", String(signalStopAfter),
+                "--delay-gdb-exit", delayGDBExit ? "yes" : "no",
+                "--hang-first-memory", hangFirstMemory ? "yes" : "no",
                 "--label", label,
                 "--pid-log", pidLog.path,
                 "--child-pid-file", childPIDFile.path,
-                "--signal-log", signalLog.path
+                "--signal-log", signalLog.path,
+                "--release-memory-file", releaseMemoryFile.path
             ],
             initCommands: [],
             warnings: [],
@@ -749,6 +845,10 @@ private final class ControllerGDBFixture {
         throw ControllerTestError.timeout
     }
 
+    func releaseFirstMemoryResponse() throws {
+        try Data().write(to: releaseMemoryFile)
+    }
+
     private static let source = #"""
 #!/usr/bin/python3
 import os, signal, sys, threading, time
@@ -762,10 +862,13 @@ emit_running_while_stack_hung = sys.argv[sys.argv.index("--emit-running-while-st
 auto_exit_with_stubborn_child = sys.argv[sys.argv.index("--auto-exit-with-stubborn-child") + 1] == "yes"
 signal_interrupt = sys.argv[sys.argv.index("--signal-interrupt") + 1] == "yes"
 signal_stop_after = int(sys.argv[sys.argv.index("--signal-stop-after") + 1])
+delay_gdb_exit = sys.argv[sys.argv.index("--delay-gdb-exit") + 1] == "yes"
+hang_first_memory = sys.argv[sys.argv.index("--hang-first-memory") + 1] == "yes"
 label = sys.argv[sys.argv.index("--label") + 1]
 pid_log = sys.argv[sys.argv.index("--pid-log") + 1]
 child_pid_file = sys.argv[sys.argv.index("--child-pid-file") + 1]
 signal_log = sys.argv[sys.argv.index("--signal-log") + 1]
+release_memory_file = sys.argv[sys.argv.index("--release-memory-file") + 1]
 
 with open(pid_log, "a", encoding="utf-8") as handle:
     handle.write(str(os.getpid()) + "\n")
@@ -797,6 +900,16 @@ def handle_sigint(_signum, _frame):
 
 signal.signal(signal.SIGINT, handle_sigint)
 
+def memory_result(token, begin):
+    end = hex(int(begin, 0) + 4)
+    out(token + '^done,memory=[{begin="%s",offset="0",end="%s",contents="002affff"}]' % (begin, end))
+
+def release_memory_result(token, begin):
+    while not os.path.exists(release_memory_file):
+        time.sleep(0.005)
+    memory_result(token, begin)
+    out('~"old-memory-response-drained"')
+
 for value in range(1, 6):
     out('~"console-%d"' % value)
 out('*stopped,reason="breakpoint-hit",frame={addr="0x1000",func="main",file="main.s",fullname="/tmp/%s/main.s",line="12"}' % label)
@@ -805,6 +918,7 @@ if auto_exit_with_stubborn_child:
     time.sleep(0.05)
     sys.exit(17)
 
+memory_request_count = 0
 for raw in sys.stdin:
     raw = raw.rstrip("\r\n")
     pos = 0
@@ -837,6 +951,17 @@ for raw in sys.stdin:
     elif command.startswith("-data-read-memory-bytes"):
         if fail_memory:
             out(token + '^error,msg="memory unavailable"')
+        elif hang_first_memory:
+            memory_request_count += 1
+            begin = command.split()[1]
+            if memory_request_count == 1:
+                threading.Thread(
+                    target=release_memory_result,
+                    args=(token, begin),
+                    daemon=True
+                ).start()
+            else:
+                memory_result(token, begin)
         else:
             out(token + '^done,memory=[{begin="0x1000",offset="0",end="0x1004",contents="002affff"}]')
     elif command.startswith("-data-disassemble"):
@@ -854,6 +979,8 @@ for raw in sys.stdin:
     elif command.startswith("-break-insert"):
         out(token + '^done,bkpt={number="7",addr="0x1000"}')
     elif command == "-gdb-exit":
+        if delay_gdb_exit:
+            time.sleep(0.35)
         if not (signal_interrupt and running):
             out(token + "^exit")
             sys.exit(0)

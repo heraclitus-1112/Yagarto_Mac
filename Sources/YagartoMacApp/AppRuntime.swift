@@ -264,6 +264,7 @@ private actor UITestDebugService: DebugServicing {
         continuation.yield(.stateChanged(.terminating))
         continuation.yield(.stateChanged(.ready))
     }
+    func setMemoryRequest(_ request: DebugMemoryRequest) async throws {}
     func readMemory(_ request: DebugMemoryRequest) async throws -> [MIMemoryBlock] {
         [MIMemoryBlock(
             begin: MIRawNumeric(raw: request.address),

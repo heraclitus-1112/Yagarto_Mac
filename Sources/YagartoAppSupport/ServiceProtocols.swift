@@ -116,7 +116,3 @@ public protocol DebugServicing: Sendable {
     func setBreakpoint(file: URL, line: Int) async throws -> DebugBreakpoint
     func removeBreakpoint(identifier: String) async throws
 }
-
-public extension DebugServicing {
-    func setMemoryRequest(_ request: DebugMemoryRequest) async throws {}
-}

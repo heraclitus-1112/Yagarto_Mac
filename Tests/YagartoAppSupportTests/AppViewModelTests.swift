@@ -1244,6 +1244,7 @@ private actor ControlledBreakpointDebugService: DebugServicing {
         continuation.yield(.stateChanged(.terminating))
         continuation.yield(.stateChanged(.ready))
     }
+    func setMemoryRequest(_ request: DebugMemoryRequest) async throws {}
     func readMemory(_ request: DebugMemoryRequest) async throws -> [MIMemoryBlock] { [] }
 
     func setBreakpoint(file: URL, line: Int) async throws -> DebugBreakpoint {
@@ -1376,6 +1377,7 @@ private actor FakeDebugService: DebugServicing {
     func stepOver() async throws { recordedCalls.append("stepOver") }
     func resume() async throws { recordedCalls.append("continue") }
     func stop() async throws { recordedCalls.append("stop") }
+    func setMemoryRequest(_ request: DebugMemoryRequest) async throws {}
     func readMemory(_ request: DebugMemoryRequest) async throws -> [MIMemoryBlock] {
         requests.append(request)
         return []
@@ -1437,6 +1439,7 @@ private actor SuspendedStopDebugService: DebugServicing {
         stopWaiters.removeAll()
         await withCheckedContinuation { stopContinuation = $0 }
     }
+    func setMemoryRequest(_ request: DebugMemoryRequest) async throws {}
     func readMemory(_ request: DebugMemoryRequest) async throws -> [MIMemoryBlock] { [] }
     func setBreakpoint(file: URL, line: Int) async throws -> DebugBreakpoint {
         DebugBreakpoint(id: "\(line)", location: "\(file.path):\(line)")
@@ -1495,6 +1498,7 @@ private actor SuspendedPrepareDebugService: DebugServicing {
     func stepOver() async throws {}
     func resume() async throws {}
     func stop() async throws {}
+    func setMemoryRequest(_ request: DebugMemoryRequest) async throws {}
     func readMemory(_ request: DebugMemoryRequest) async throws -> [MIMemoryBlock] { [] }
     func setBreakpoint(file: URL, line: Int) async throws -> DebugBreakpoint {
         DebugBreakpoint(id: "1", location: "\(file.path):\(line)")
@@ -1544,6 +1548,7 @@ private actor ControlledStartDebugService: DebugServicing {
     func stepOver() async throws {}
     func resume() async throws {}
     func stop() async throws {}
+    func setMemoryRequest(_ request: DebugMemoryRequest) async throws {}
     func readMemory(_ request: DebugMemoryRequest) async throws -> [MIMemoryBlock] { [] }
     func setBreakpoint(file: URL, line: Int) async throws -> DebugBreakpoint {
         DebugBreakpoint(id: "\(line)", location: "\(file.path):\(line)")

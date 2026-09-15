@@ -166,16 +166,15 @@ public actor CoreDebugAdapter: DebugServicing {
     }
 
     public func setMemoryRequest(_ request: DebugMemoryRequest) async throws {
-        try Self.validate(request)
-        pendingMemoryRequest = request
-        memoryRequestRevision &+= 1
+        try rememberMemoryRequest(request)
         if let activeSession {
             try await activeSession.controller.setMemoryRequest(request)
         }
     }
 
     public func readMemory(_ request: DebugMemoryRequest) async throws -> [MIMemoryBlock] {
-        try await requiredController().readMemory(request)
+        try rememberMemoryRequest(request)
+        return try await requiredController().readMemory(request)
     }
 
     public func setBreakpoint(file: URL, line: Int) async throws -> DebugBreakpoint {
@@ -212,6 +211,12 @@ public actor CoreDebugAdapter: DebugServicing {
             return
         }
         pendingMemoryRequest = .yagartoWindow
+        memoryRequestRevision &+= 1
+    }
+
+    private func rememberMemoryRequest(_ request: DebugMemoryRequest) throws {
+        try Self.validate(request)
+        pendingMemoryRequest = request
         memoryRequestRevision &+= 1
     }
 
