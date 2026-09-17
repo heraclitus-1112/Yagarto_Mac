@@ -235,19 +235,29 @@ public actor DebuggerController {
     }
 
     public func setMemoryRequest(_ request: DebugMemoryRequest) throws {
+        _ = try setMemoryRequest(request, ifSessionActive: { true })
+    }
+
+    @discardableResult
+    package func setMemoryRequest(
+        _ request: DebugMemoryRequest,
+        ifSessionActive isSessionActive: @Sendable () -> Bool
+    ) throws -> Bool {
         try validate(request)
+        guard isSessionActive() else { return false }
         memoryRequest = request
         memoryRequestRevision &+= 1
         guard machine.state == .stopped,
               let stoppedContext,
               isCurrent(stoppedContext.generation, session: stoppedContext.session) else {
-            return
+            return true
         }
         dispatchSnapshot(
             stopped: stoppedContext.record,
             session: stoppedContext.session,
             generation: stoppedContext.generation
         )
+        return true
     }
 
     public func readMemory(_ request: DebugMemoryRequest) async throws -> [MIMemoryBlock] {

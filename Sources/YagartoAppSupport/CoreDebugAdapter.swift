@@ -2,11 +2,29 @@
 
 import Foundation
 
+private final class MemoryRequestSessionValidity: @unchecked Sendable {
+    private let lock = NSLock()
+    private var active = true
+
+    func invalidate() {
+        lock.lock()
+        active = false
+        lock.unlock()
+    }
+
+    func isActive() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return active
+    }
+}
+
 public actor CoreDebugAdapter: DebugServicing {
     private struct SessionRecord {
         let identifier: UInt64
         let controller: DebuggerController
         let forwardingTask: Task<Void, Never>
+        let memoryRequestValidity: MemoryRequestSessionValidity
     }
 
     private let overrides: [ToolIdentifier: String]
@@ -15,7 +33,8 @@ public actor CoreDebugAdapter: DebugServicing {
     private let postStopSessionSynchronization: (@Sendable () async -> Void)?
     private let memoryRequestApplicator: @Sendable (
         DebuggerController,
-        DebugMemoryRequest
+        DebugMemoryRequest,
+        @escaping @Sendable () -> Bool
     ) async throws -> Void
     private let memoryReader: @Sendable (
         DebuggerController,
@@ -47,8 +66,11 @@ public actor CoreDebugAdapter: DebugServicing {
         self.environment = environment
         explicitGDBSimulatorPath = gdbSimulatorPath
         postStopSessionSynchronization = nil
-        memoryRequestApplicator = { controller, request in
-            try await controller.setMemoryRequest(request)
+        memoryRequestApplicator = { controller, request, isSessionActive in
+            try await controller.setMemoryRequest(
+                request,
+                ifSessionActive: isSessionActive
+            )
         }
         memoryReader = { controller, request in
             try await controller.readMemory(request)
@@ -65,8 +87,11 @@ public actor CoreDebugAdapter: DebugServicing {
         self.environment = environment
         explicitGDBSimulatorPath = gdbSimulatorPath
         self.postStopSessionSynchronization = postStopSessionSynchronization
-        memoryRequestApplicator = { controller, request in
-            try await controller.setMemoryRequest(request)
+        memoryRequestApplicator = { controller, request, isSessionActive in
+            try await controller.setMemoryRequest(
+                request,
+                ifSessionActive: isSessionActive
+            )
         }
         memoryReader = { controller, request in
             try await controller.readMemory(request)
@@ -79,7 +104,8 @@ public actor CoreDebugAdapter: DebugServicing {
         gdbSimulatorPath: String? = nil,
         memoryRequestApplicator: @escaping @Sendable (
             DebuggerController,
-            DebugMemoryRequest
+            DebugMemoryRequest,
+            @escaping @Sendable () -> Bool
         ) async throws -> Void,
         memoryReader: @escaping @Sendable (
             DebuggerController,
@@ -170,13 +196,14 @@ public actor CoreDebugAdapter: DebugServicing {
         let record = SessionRecord(
             identifier: identifier,
             controller: newController,
-            forwardingTask: forwardingTask
+            forwardingTask: forwardingTask,
+            memoryRequestValidity: MemoryRequestSessionValidity()
         )
         activeSession = record
         do {
             let request = pendingMemoryRequest
             let requestRevision = memoryRequestRevision
-            try await memoryRequestApplicator(newController, request)
+            try await applyMemoryRequest(request, to: record)
             try await reconcileMemoryRequest(
                 afterApplying: requestRevision,
                 to: record
@@ -232,7 +259,7 @@ public actor CoreDebugAdapter: DebugServicing {
     public func setMemoryRequest(_ request: DebugMemoryRequest) async throws {
         let requestRevision = try rememberMemoryRequest(request)
         guard let activeSession else { return }
-        try await memoryRequestApplicator(activeSession.controller, request)
+        try await applyMemoryRequest(request, to: activeSession)
         try await reconcileMemoryRequest(
             afterApplying: requestRevision,
             to: activeSession
@@ -321,10 +348,22 @@ public actor CoreDebugAdapter: DebugServicing {
               appliedRevision != memoryRequestRevision {
             let request = pendingMemoryRequest
             let revision = memoryRequestRevision
-            try await memoryRequestApplicator(session.controller, request)
+            try await applyMemoryRequest(request, to: session)
             guard activeSession?.identifier == session.identifier else { return }
             appliedRevision = revision
         }
+    }
+
+    private func applyMemoryRequest(
+        _ request: DebugMemoryRequest,
+        to session: SessionRecord
+    ) async throws {
+        let validity = session.memoryRequestValidity
+        try await memoryRequestApplicator(
+            session.controller,
+            request,
+            { validity.isActive() }
+        )
     }
 
     private func waitUntilStopped(_ controller: DebuggerController) async throws {
@@ -403,6 +442,7 @@ public actor CoreDebugAdapter: DebugServicing {
     }
 
     private func stopSession(_ record: SessionRecord) async throws {
+        record.memoryRequestValidity.invalidate()
         let cleanupTask: Task<Void, Error>
         if let existing = cleanupTasks[record.identifier] {
             cleanupTask = existing

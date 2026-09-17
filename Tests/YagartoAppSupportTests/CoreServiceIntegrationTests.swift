@@ -352,8 +352,12 @@ final class CoreServiceIntegrationTests: XCTestCase {
             overrides: [.gdb: fixture.script.path],
             environment: ProcessInfo.processInfo.environment,
             gdbSimulatorPath: fixture.script.path,
-            memoryRequestApplicator: { controller, request in
-                try await gate.apply(request, to: controller)
+            memoryRequestApplicator: { controller, request, isSessionActive in
+                try await gate.apply(
+                    request,
+                    to: controller,
+                    ifSessionActive: isSessionActive
+                )
             },
             memoryReader: { controller, request in
                 try await gate.read(request, from: controller)
@@ -393,8 +397,12 @@ final class CoreServiceIntegrationTests: XCTestCase {
             overrides: [.gdb: fixture.script.path],
             environment: ProcessInfo.processInfo.environment,
             gdbSimulatorPath: fixture.script.path,
-            memoryRequestApplicator: { controller, request in
-                try await gate.apply(request, to: controller)
+            memoryRequestApplicator: { controller, request, isSessionActive in
+                try await gate.apply(
+                    request,
+                    to: controller,
+                    ifSessionActive: isSessionActive
+                )
             },
             memoryReader: { controller, request in
                 try await gate.read(request, from: controller)
@@ -433,8 +441,12 @@ final class CoreServiceIntegrationTests: XCTestCase {
             overrides: [.gdb: fixture.script.path],
             environment: ProcessInfo.processInfo.environment,
             gdbSimulatorPath: fixture.script.path,
-            memoryRequestApplicator: { controller, request in
-                try await gate.apply(request, to: controller)
+            memoryRequestApplicator: { controller, request, isSessionActive in
+                try await gate.apply(
+                    request,
+                    to: controller,
+                    ifSessionActive: isSessionActive
+                )
             },
             memoryReader: { controller, request in
                 try await gate.read(request, from: controller)
@@ -474,8 +486,12 @@ final class CoreServiceIntegrationTests: XCTestCase {
             overrides: [.gdb: fixture.script.path],
             environment: ProcessInfo.processInfo.environment,
             gdbSimulatorPath: fixture.script.path,
-            memoryRequestApplicator: { controller, request in
-                try await gate.apply(request, to: controller)
+            memoryRequestApplicator: { controller, request, isSessionActive in
+                try await gate.apply(
+                    request,
+                    to: controller,
+                    ifSessionActive: isSessionActive
+                )
             },
             memoryReader: { controller, request in
                 try await gate.read(request, from: controller)
@@ -572,6 +588,69 @@ final class CoreServiceIntegrationTests: XCTestCase {
         XCTAssertTrue(applied.isEmpty)
     }
 
+    func testStopCancelsReadFailureReconciliationAlreadyWaitingToApply() async throws {
+        let fixture = try AdapterMIFixture()
+        let gate = ControlledAdapterMemoryIO()
+        let adapter = memoryControlledAdapter(fixture: fixture, gate: gate)
+        try await adapter.prepare(adapterBuild(for: fixture.directory))
+        _ = try await adapter.launch(mode: .debug, breakpoints: [])
+        await gate.clearAppliedRequests()
+        let request = DebugMemoryRequest(
+            address: "0xB000",
+            byteCount: 112,
+            observationID: UUID()
+        )
+        let observationID = try XCTUnwrap(request.observationID)
+        await gate.failReadBeforeApply(observationID)
+        await gate.suspendSet(observationID)
+
+        let reading = Task { try await adapter.readMemory(request) }
+        await gate.waitUntilSetStarted(observationID)
+        try await adapter.stop()
+        await gate.resumeSet(observationID)
+        do {
+            _ = try await reading.value
+            XCTFail("expected the retired-session read to fail")
+        } catch AdapterMITestError.forcedMemoryRead {
+            // The stopped session must reject the suspended reconciliation.
+        }
+
+        let applied = await gate.appliedRequests()
+        XCTAssertTrue(applied.isEmpty)
+    }
+
+    func testSessionReplacementCancelsReadFailureReconciliationAlreadyWaitingToApply() async throws {
+        let fixture = try AdapterMIFixture()
+        let gate = ControlledAdapterMemoryIO()
+        let adapter = memoryControlledAdapter(fixture: fixture, gate: gate)
+        try await adapter.prepare(adapterBuild(for: fixture.directory))
+        _ = try await adapter.launch(mode: .debug, breakpoints: [])
+        await gate.clearAppliedRequests()
+        let request = DebugMemoryRequest(
+            address: "0xB000",
+            byteCount: 112,
+            observationID: UUID()
+        )
+        let observationID = try XCTUnwrap(request.observationID)
+        await gate.failReadBeforeApply(observationID)
+        await gate.suspendSet(observationID)
+
+        let reading = Task { try await adapter.readMemory(request) }
+        await gate.waitUntilSetStarted(observationID)
+        _ = try await adapter.launch(mode: .debug, breakpoints: [])
+        await gate.resumeSet(observationID)
+        do {
+            _ = try await reading.value
+            XCTFail("expected the retired-session read to fail")
+        } catch AdapterMITestError.forcedMemoryRead {
+            // Only the replacement session may receive the pending request.
+        }
+
+        let applied = await gate.appliedRequests()
+        XCTAssertEqual(applied, [request])
+        try await adapter.stop()
+    }
+
     func testReadAndReconciliationFailurePreservesReadErrorAndPublishesDiagnostic() async throws {
         let fixture = try AdapterMIFixture()
         let gate = ControlledAdapterMemoryIO()
@@ -619,8 +698,12 @@ private func memoryControlledAdapter(
         overrides: [.gdb: fixture.script.path],
         environment: ProcessInfo.processInfo.environment,
         gdbSimulatorPath: fixture.script.path,
-        memoryRequestApplicator: { controller, request in
-            try await gate.apply(request, to: controller)
+        memoryRequestApplicator: { controller, request, isSessionActive in
+            try await gate.apply(
+                request,
+                to: controller,
+                ifSessionActive: isSessionActive
+            )
         },
         memoryReader: { controller, request in
             try await gate.read(request, from: controller)
@@ -664,7 +747,11 @@ private actor ControlledAdapterMemoryIO {
     private var failingReadIDs: Set<UUID> = []
     private var applied: [DebugMemoryRequest] = []
 
-    func apply(_ request: DebugMemoryRequest, to controller: DebuggerController) async throws {
+    func apply(
+        _ request: DebugMemoryRequest,
+        to controller: DebuggerController,
+        ifSessionActive isSessionActive: @escaping @Sendable () -> Bool
+    ) async throws {
         if let observationID = request.observationID,
            suspendedSetIDs.remove(observationID) != nil {
             await withCheckedContinuation { continuation in
@@ -676,8 +763,12 @@ private actor ControlledAdapterMemoryIO {
            failingApplyIDs.remove(observationID) != nil {
             throw AdapterMITestError.forcedMemoryApply
         }
-        try await controller.setMemoryRequest(request)
-        applied.append(request)
+        if try await controller.setMemoryRequest(
+            request,
+            ifSessionActive: isSessionActive
+        ) {
+            applied.append(request)
+        }
     }
 
     func read(
