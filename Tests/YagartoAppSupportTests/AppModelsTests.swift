@@ -91,12 +91,14 @@ final class AppModelsTests: XCTestCase {
         var state = MemoryWindowControlState()
         let pending = try state.beginSubmission("0x9000")
 
-        XCTAssertThrowsError(try state.beginSubmission("invalid"))
+        state.edit("invalid")
+        XCTAssertThrowsError(try state.beginSubmission(state.editableAddressText))
+        state.rollbackDisplayedToConfirmed()
         state.completeSuccess(token: pending.token, normalized: pending.normalizedAddress)
         state.completeFailure(token: pending.token)
 
-        XCTAssertEqual(state.editableAddressText, "0x00009000")
-        XCTAssertEqual(state.displayedBaseAddress, 0x9000)
+        XCTAssertEqual(state.editableAddressText, "invalid")
+        XCTAssertEqual(state.displayedBaseAddress, MemoryWindowLayout.defaultAddress)
         XCTAssertEqual(state.confirmedBaseAddress, MemoryWindowLayout.defaultAddress)
     }
 

@@ -294,6 +294,11 @@ public struct MemoryWindowControlState: Equatable, Sendable {
         displayedBaseAddress = confirmedBaseAddress
     }
 
+    public mutating func rollbackDisplayedToConfirmed() {
+        displayedAddressText = confirmedAddressText
+        displayedBaseAddress = confirmedBaseAddress
+    }
+
     public mutating func reset() {
         submissionGeneration &+= 1
         editRevision &+= 1

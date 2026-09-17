@@ -25,6 +25,7 @@ final class AccessibilityIdentifierContractTests: XCTestCase {
             ".onSubmit { submitMemoryAddress(memoryWindowControl.editableAddressText) }",
             "await model.setMemoryWindowAddress(candidate)",
             "memoryWindowControl.step(byRows: rowCount)",
+            "memoryWindowControl.rollbackDisplayedToConfirmed()",
             "model.invalidateMemoryWindowAddressOperation()",
             "model.reportMemoryWindowError(error)",
             "MemoryHexTable(blocks: model.memory, baseAddress: memoryWindowControl.displayedBaseAddress)"

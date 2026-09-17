@@ -385,6 +385,7 @@ struct WorkbenchView: View {
     }
 
     private func rejectMemoryAddressSubmission(_ error: Error) {
+        memoryWindowControl.rollbackDisplayedToConfirmed()
         memoryAddressTask?.cancel()
         memoryAddressTask = nil
         model.invalidateMemoryWindowAddressOperation()
