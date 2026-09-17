@@ -246,37 +246,38 @@ public struct MemoryWindowControlState: Equatable, Sendable {
     public private(set) var confirmedBaseAddress = MemoryWindowLayout.defaultAddress
     private var displayedAddressText = MemoryWindowLayout.defaultAddressText
     private var confirmedAddressText = MemoryWindowLayout.defaultAddressText
-    private var generation: UInt64 = 0
+    private var submissionGeneration: UInt64 = 0
+    private var editRevision: UInt64 = 0
+    private var pendingEditRevision: UInt64 = 0
 
     public init() {}
 
     public mutating func edit(_ rawAddress: String) {
-        generation &+= 1
+        editRevision &+= 1
         editableAddressText = rawAddress
     }
 
     public mutating func beginSubmission(_ candidate: String) throws -> Submission {
-        generation &+= 1
+        submissionGeneration &+= 1
         let normalized = try MemoryWindowAddress.normalized(candidate)
-        let address = try MemoryWindowAddress.value(normalized)
-        editableAddressText = normalized
-        displayedAddressText = normalized
-        displayedBaseAddress = address
-        return Submission(token: generation, normalizedAddress: normalized)
+        return try startSubmission(normalized)
     }
 
     public mutating func step(byRows rowCount: Int) throws -> Submission {
+        submissionGeneration &+= 1
         let normalized = try MemoryWindowAddress.stepped(displayedAddressText, byRows: rowCount)
-        return try beginSubmission(normalized)
+        return try startSubmission(normalized)
     }
 
     public mutating func completeSuccess(token: UInt64, normalized: String) {
-        guard token == generation,
+        guard token == submissionGeneration,
               let canonical = try? MemoryWindowAddress.normalized(normalized),
               canonical == displayedAddressText,
               let address = try? MemoryWindowAddress.value(canonical) else { return }
-        generation &+= 1
-        editableAddressText = canonical
+        submissionGeneration &+= 1
+        if editRevision == pendingEditRevision {
+            editableAddressText = canonical
+        }
         displayedAddressText = canonical
         displayedBaseAddress = address
         confirmedAddressText = canonical
@@ -284,20 +285,33 @@ public struct MemoryWindowControlState: Equatable, Sendable {
     }
 
     public mutating func completeFailure(token: UInt64) {
-        guard token == generation else { return }
-        generation &+= 1
-        editableAddressText = confirmedAddressText
+        guard token == submissionGeneration else { return }
+        submissionGeneration &+= 1
+        if editRevision == pendingEditRevision {
+            editableAddressText = confirmedAddressText
+        }
         displayedAddressText = confirmedAddressText
         displayedBaseAddress = confirmedBaseAddress
     }
 
     public mutating func reset() {
-        generation &+= 1
+        submissionGeneration &+= 1
+        editRevision &+= 1
+        pendingEditRevision = editRevision
         editableAddressText = MemoryWindowLayout.defaultAddressText
         displayedAddressText = MemoryWindowLayout.defaultAddressText
         displayedBaseAddress = MemoryWindowLayout.defaultAddress
         confirmedAddressText = MemoryWindowLayout.defaultAddressText
         confirmedBaseAddress = MemoryWindowLayout.defaultAddress
+    }
+
+    private mutating func startSubmission(_ normalized: String) throws -> Submission {
+        let address = try MemoryWindowAddress.value(normalized)
+        pendingEditRevision = editRevision
+        editableAddressText = normalized
+        displayedAddressText = normalized
+        displayedBaseAddress = address
+        return Submission(token: submissionGeneration, normalizedAddress: normalized)
     }
 }
 

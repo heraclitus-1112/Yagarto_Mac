@@ -68,7 +68,7 @@ final class AppModelsTests: XCTestCase {
         XCTAssertEqual(state.confirmedBaseAddress, 0x9000)
     }
 
-    func testMemoryWindowControlEditInvalidatesPendingCompletion() throws {
+    func testMemoryWindowControlEditPreservesTextWhilePendingCompletionUpdatesBaseline() throws {
         var state = MemoryWindowControlState()
         let pending = try state.beginSubmission("0x9000")
 
@@ -77,7 +77,14 @@ final class AppModelsTests: XCTestCase {
 
         XCTAssertEqual(state.editableAddressText, "0xA000")
         XCTAssertEqual(state.displayedBaseAddress, 0x9000)
-        XCTAssertEqual(state.confirmedBaseAddress, MemoryWindowLayout.defaultAddress)
+        XCTAssertEqual(state.confirmedBaseAddress, 0x9000)
+
+        let newer = try state.beginSubmission(state.editableAddressText)
+        state.completeFailure(token: newer.token)
+
+        XCTAssertEqual(state.editableAddressText, "0x00009000")
+        XCTAssertEqual(state.displayedBaseAddress, 0x9000)
+        XCTAssertEqual(state.confirmedBaseAddress, 0x9000)
     }
 
     func testMemoryWindowControlInvalidSubmissionInvalidatesPendingCompletion() throws {
@@ -86,10 +93,26 @@ final class AppModelsTests: XCTestCase {
 
         XCTAssertThrowsError(try state.beginSubmission("invalid"))
         state.completeSuccess(token: pending.token, normalized: pending.normalizedAddress)
+        state.completeFailure(token: pending.token)
 
         XCTAssertEqual(state.editableAddressText, "0x00009000")
         XCTAssertEqual(state.displayedBaseAddress, 0x9000)
         XCTAssertEqual(state.confirmedBaseAddress, MemoryWindowLayout.defaultAddress)
+    }
+
+    func testMemoryWindowControlNewSubmissionFullySupersedesOlderCompletion() throws {
+        var state = MemoryWindowControlState()
+        let older = try state.beginSubmission("0x9000")
+        let newer = try state.beginSubmission("0xA000")
+
+        state.completeSuccess(token: older.token, normalized: older.normalizedAddress)
+
+        XCTAssertEqual(state.editableAddressText, "0x0000A000")
+        XCTAssertEqual(state.displayedBaseAddress, 0xA000)
+        XCTAssertEqual(state.confirmedBaseAddress, MemoryWindowLayout.defaultAddress)
+
+        state.completeSuccess(token: newer.token, normalized: newer.normalizedAddress)
+        XCTAssertEqual(state.confirmedBaseAddress, 0xA000)
     }
 
     func testMemoryWindowControlResetInvalidatesOldSubmissionAndRestoresDefault() throws {

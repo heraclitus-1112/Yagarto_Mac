@@ -1117,6 +1117,105 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertEqual(configuredRequests.last, .yagartoWindow)
     }
 
+    func testFailedMemoryConfigurationRestoresLastSuccessfulRequest() async throws {
+        let fixture = try ViewModelFixture()
+        let debug = FakeDebugService()
+        let model = AppViewModel(
+            documentService: FakeDocumentService(document: fixture.document),
+            buildService: FakeBuildService(result: fixture.buildResult),
+            debugService: debug
+        )
+        await model.open(fixture.document.sourceURL)
+        await model.build()
+        let resultA = await model.setMemoryWindowAddress("0xA000")
+        await debug.failMemoryConfiguration(for: "0x0000B000")
+
+        let resultB = await model.setMemoryWindowAddress("0xB000")
+
+        XCTAssertEqual(resultA, "0x0000A000")
+        XCTAssertNil(resultB)
+        var configuredRequests = await debug.configuredRequests()
+        XCTAssertEqual(configuredRequests.last?.address, "0x0000A000")
+
+        await model.start(.debug)
+        configuredRequests = await debug.configuredRequests()
+        XCTAssertEqual(configuredRequests.last?.address, "0x0000A000")
+    }
+
+    func testInvalidSubmissionRetiresPendingSuccessfulMemoryConfigurationWithoutClearingError() async throws {
+        let fixture = try ViewModelFixture()
+        let debug = FakeDebugService()
+        await debug.suspendMemoryConfiguration(for: "0x0000A000")
+        let model = AppViewModel(
+            documentService: FakeDocumentService(document: fixture.document),
+            buildService: FakeBuildService(result: fixture.buildResult),
+            debugService: debug
+        )
+        await model.open(fixture.document.sourceURL)
+        await model.build()
+
+        let configuringA = Task { await model.setMemoryWindowAddress("0xA000") }
+        await debug.waitUntilMemoryConfigurationStarted("0x0000A000")
+        model.invalidateMemoryWindowAddressOperation()
+        model.reportMemoryWindowError(MemoryTableFormattingError.invalidAddress("invalid-B"))
+        await debug.finishMemoryConfiguration("0x0000A000")
+        let resultA = await configuringA.value
+
+        XCTAssertNil(resultA)
+        XCTAssertEqual(model.errorMessage, "无法解析内存地址：invalid-B。")
+        let configuredRequests = await debug.configuredRequests()
+        XCTAssertEqual(configuredRequests.last, .yagartoWindow)
+    }
+
+    func testInvalidSubmissionRetiresPendingFailedMemoryConfigurationWithoutClearingError() async throws {
+        let fixture = try ViewModelFixture()
+        let debug = FakeDebugService()
+        await debug.suspendMemoryConfiguration(for: "0x0000A000")
+        let model = AppViewModel(
+            documentService: FakeDocumentService(document: fixture.document),
+            buildService: FakeBuildService(result: fixture.buildResult),
+            debugService: debug
+        )
+        await model.open(fixture.document.sourceURL)
+        await model.build()
+
+        let configuringA = Task { await model.setMemoryWindowAddress("0xA000") }
+        await debug.waitUntilMemoryConfigurationStarted("0x0000A000")
+        model.invalidateMemoryWindowAddressOperation()
+        model.reportMemoryWindowError(MemoryTableFormattingError.invalidAddress("invalid-B"))
+        await debug.failPendingMemoryConfiguration("0x0000A000")
+        let resultA = await configuringA.value
+
+        XCTAssertNil(resultA)
+        XCTAssertEqual(model.errorMessage, "无法解析内存地址：invalid-B。")
+        let configuredRequests = await debug.configuredRequests()
+        XCTAssertEqual(configuredRequests.last, .yagartoWindow)
+    }
+
+    func testNewerMemoryConfigurationFullySupersedesOlderCompletion() async throws {
+        let fixture = try ViewModelFixture()
+        let debug = FakeDebugService()
+        await debug.suspendMemoryConfiguration(for: "0x0000A000")
+        let model = AppViewModel(
+            documentService: FakeDocumentService(document: fixture.document),
+            buildService: FakeBuildService(result: fixture.buildResult),
+            debugService: debug
+        )
+        await model.open(fixture.document.sourceURL)
+        await model.build()
+
+        let configuringA = Task { await model.setMemoryWindowAddress("0xA000") }
+        await debug.waitUntilMemoryConfigurationStarted("0x0000A000")
+        let resultB = await model.setMemoryWindowAddress("0xB000")
+        await debug.finishMemoryConfiguration("0x0000A000")
+        let resultA = await configuringA.value
+
+        XCTAssertNil(resultA)
+        XCTAssertEqual(resultB, "0x0000B000")
+        let configuredRequests = await debug.configuredRequests()
+        XCTAssertEqual(configuredRequests.last?.address, "0x0000B000")
+    }
+
     func testSuccessfulMemoryWindowSubmissionClearsLocalMemoryWindowError() async throws {
         let fixture = try ViewModelFixture()
         let debug = FakeDebugService()
@@ -2328,6 +2427,9 @@ private actor FakeDebugService: DebugServicing {
     }
     func finishMemoryConfiguration(_ address: String) {
         popPendingMemoryConfiguration(address)?.resume()
+    }
+    func failPendingMemoryConfiguration(_ address: String) {
+        popPendingMemoryConfiguration(address)?.resume(throwing: FakeFailure.memory)
     }
     func setMemoryResult(_ blocks: [MIMemoryBlock], for address: String) {
         memoryResults[address] = blocks

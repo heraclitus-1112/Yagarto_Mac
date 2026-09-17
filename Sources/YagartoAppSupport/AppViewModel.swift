@@ -307,7 +307,10 @@ public final class AppViewModel {
         do {
             try await debugService.setMemoryRequest(request)
         } catch {
-            guard isCurrentMemoryOperation(generation, state: operationState) else { return nil }
+            guard isCurrentMemoryOperation(generation, state: operationState) else {
+                await reconcileDesiredMemoryRequest()
+                return nil
+            }
             let configurationError = error
             desiredMemoryRequest = confirmedMemoryRequest
             await reconcileDesiredMemoryRequest()
@@ -321,8 +324,8 @@ public final class AppViewModel {
             await reconcileDesiredMemoryRequest()
             return nil
         }
-        confirmedMemoryRequest = request
         guard state == .stopped else {
+            confirmedMemoryRequest = request
             memory = []
             clearMemoryError()
             return normalized
@@ -330,12 +333,20 @@ public final class AppViewModel {
 
         do {
             let blocks = try await debugService.readMemory(request)
-            guard isCurrentMemoryOperation(generation, state: .stopped) else { return nil }
+            guard isCurrentMemoryOperation(generation, state: .stopped) else {
+                await reconcileDesiredMemoryRequest()
+                return nil
+            }
+            confirmedMemoryRequest = request
             memory = blocks
             clearMemoryError()
             return normalized
         } catch {
-            guard isCurrentMemoryOperation(generation, state: .stopped) else { return nil }
+            guard isCurrentMemoryOperation(generation, state: .stopped) else {
+                await reconcileDesiredMemoryRequest()
+                return nil
+            }
+            confirmedMemoryRequest = request
             memory = []
             presentMemoryError(error, generation: generation)
             return normalized
@@ -371,6 +382,11 @@ public final class AppViewModel {
 
     public func reportMemoryWindowError(_ error: Error) {
         presentMemoryError(error, generation: memoryOperationGeneration)
+    }
+
+    public func invalidateMemoryWindowAddressOperation() {
+        invalidateMemoryOperations()
+        desiredMemoryRequest = confirmedMemoryRequest
     }
 
     public func close() async {
