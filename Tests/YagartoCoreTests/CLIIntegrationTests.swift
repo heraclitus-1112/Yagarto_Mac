@@ -727,6 +727,29 @@ final class CLIIntegrationTests: XCTestCase {
         let plan = try JSONDecoder().decode(DebugLaunchPlan.self, from: Data(result.stdout.utf8))
         XCTAssertEqual(plan.backend, .qemuARM926Compatible)
         XCTAssertEqual(plan.warnings, ["ARM926 是 ARM7TDMI 兼容超集，非精确模型"])
+        XCTAssertFalse(plan.initCommands.contains(where: { $0.hasPrefix("tbreak ") }))
+        XCTAssertFalse(plan.initCommands.contains("continue"))
+
+        let runResult = try runCLI(
+            [
+                "run", "firmware.elf",
+                "--profile", "arm7tdmi",
+                "--dry-run",
+                "--format", "json"
+            ],
+            in: directory.url,
+            environment: ["PATH": "\(tools.path):/usr/bin:/bin"]
+        )
+
+        XCTAssertEqual(runResult.status, 0, runResult.stderr)
+        XCTAssertEqual(runResult.stderr, "")
+        let runPlan = try JSONDecoder().decode(
+            DebugLaunchPlan.self,
+            from: Data(runResult.stdout.utf8)
+        )
+        XCTAssertEqual(runPlan.backend, .qemuARM926Compatible)
+        XCTAssertEqual(runPlan.initCommands.last, "continue")
+        XCTAssertFalse(runPlan.initCommands.contains(where: { $0.hasPrefix("tbreak ") }))
     }
 
     func testInteractiveRunAndDebugRejectJSONBeforeLaunchingGDB() throws {

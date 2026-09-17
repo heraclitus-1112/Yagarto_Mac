@@ -83,7 +83,22 @@ final class DebugPlannerTests: XCTestCase {
             plan.initCommands[1],
             "target remote | exec '/tools/qemu system-arm' '-M' 'integratorcp' '-cpu' 'arm926' '-kernel' '/tmp/调试 项目/.yagarto/build/arm7tdmi/演示 固件.elf' '-S' '-gdb' 'stdio' '-nographic' '-monitor' 'none' '-serial' 'none'"
         )
-        XCTAssertEqual(Array(plan.initCommands.suffix(2)), ["tbreak start", "continue"])
+        XCTAssertEqual(plan.initCommands.count, 2)
+        XCTAssertFalse(plan.initCommands.contains(where: { $0.hasPrefix("tbreak ") }))
+        XCTAssertFalse(plan.initCommands.contains("continue"))
+    }
+
+    func testARM7QEMURunContinuesAfterConnectingToPausedTarget() throws {
+        let plan = try planner(qemu: "/tools/qemu system-arm").plan(
+            mode: .run,
+            configuration: .default,
+            elf: elf,
+            projectDirectory: project
+        )
+
+        XCTAssertEqual(plan.backend, .qemuARM926Compatible)
+        XCTAssertEqual(plan.initCommands.last, "continue")
+        XCTAssertFalse(plan.initCommands.contains(where: { $0.hasPrefix("tbreak ") }))
     }
 
     func testARM7WithoutSimulatorOrQEMUIsActionableMissingBackendError() {

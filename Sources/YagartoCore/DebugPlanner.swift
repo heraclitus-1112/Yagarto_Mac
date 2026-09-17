@@ -58,12 +58,15 @@ public struct DebugPlanner {
                     "-serial", "none"
                 ]
             )
+            var commands = [fileCommand, "target remote | exec \(pipe)"]
+            if mode == .run {
+                commands.append("continue")
+            }
             return try makePlan(
                 profile: configuration.profile,
                 backend: .qemuARM926Compatible,
                 gdb: requiredTool(.gdb),
-                commands: [fileCommand, "target remote | exec \(pipe)"]
-                    + runCommands(mode: mode, entry: entry, simulator: false),
+                commands: commands,
                 warnings: ["ARM926 是 ARM7TDMI 兼容超集，非精确模型"],
                 elf: elf,
                 project: project
