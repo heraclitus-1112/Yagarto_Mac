@@ -58,7 +58,7 @@ public struct DebugPlanner {
                     "-serial", "none"
                 ]
             )
-            var commands = [fileCommand, "target remote | exec \(pipe)"]
+            var commands = [fileCommand, "set mi-async on", "target remote | exec \(pipe)"]
             if mode == .run {
                 commands.append("continue")
             }
@@ -92,7 +92,7 @@ public struct DebugPlanner {
                 profile: configuration.profile,
                 backend: .qemuMPS2AN386,
                 gdb: requiredTool(.gdb),
-                commands: [fileCommand, "target remote | exec \(pipe)"]
+                commands: [fileCommand, "set mi-async on", "target remote | exec \(pipe)"]
                     + runCommands(mode: mode, entry: entry, simulator: false),
                 warnings: [],
                 elf: elf,
@@ -113,6 +113,7 @@ public struct DebugPlanner {
             )
             var commands = [
                 fileCommand,
+                "set mi-async on",
                 "target extended-remote | exec \(pipe)",
                 "monitor reset halt"
             ]

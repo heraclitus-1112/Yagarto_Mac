@@ -4,7 +4,7 @@
 
 **Goal:** 让 ARM7 QEMU 回退调试稳定停在 ELF 入口并可立即单步，同时保证完整安装流程在首次打开 App 前安装并验收 GDB simulator。
 
-**Architecture:** `DebugPlanner` 根据 ARM7 后端和模式分别生成启动命令：GDB simulator 保留 `tbreak/run`，QEMU `debug` 只连接已由 `-S` 暂停的目标，QEMU `run` 才继续。真实 E2E 通过 `GDBMISession` 驱动普通 ARM GDB 与带 PID 标记的 QEMU wrapper，验证入口、单步和进程回收；文档契约测试锁定安装顺序。
+**Architecture:** `DebugPlanner` 根据 ARM7 后端和模式分别生成启动命令：GDB simulator 保留 `tbreak/run`，QEMU/OpenOCD 显式启用 `mi-async`，QEMU `debug` 只连接已由 `-S` 暂停的目标，QEMU `run` 才继续。真实 E2E 通过 `DebuggerController` 驱动普通 ARM GDB 与带 PID 标记的 QEMU wrapper，验证入口、单步、运行中停止和进程回收；文档契约测试锁定安装顺序。
 
 **Tech Stack:** Swift 6.3、XCTest、GDB/MI、QEMU `integratorcp`/ARM926、Markdown、zsh。
 
@@ -13,7 +13,9 @@
 ## 文件结构
 
 - `Sources/YagartoCore/DebugPlanner.swift`：生成区分 simulator/QEMU 与 debug/run 的 ARM7 启动命令。
+- `Sources/YagartoCore/DebuggerController.swift`：停止 QEMU 时先中断目标，再发送 `monitor quit` 并关闭 GDB。
 - `Tests/YagartoCoreTests/DebugPlannerTests.swift`：锁定四种启动语义，不允许 QEMU debug 重新续跑。
+- `Tests/YagartoCoreTests/DebuggerControllerTests.swift`：锁定 QEMU stop 的 MI interrupt 与 monitor quit 顺序。
 - `Tests/YagartoCoreTests/CLIIntegrationTests.swift`：锁定 CLI dry-run 对 QEMU debug/run 的实际计划输出。
 - `Tests/YagartoCoreTests/ARM7QEMUFallbackE2ETests.swift`：真实构建 ARM7 ELF，验证 QEMU 入口停止、单步和进程清理。
 - `Tests/YagartoCoreTests/InstallGuideContractTests.swift`：验证 simulator、doctor、安装/打开 App 的顺序与 PATH 段唯一性。
@@ -115,6 +117,8 @@ git commit -m "fix: keep ARM7 QEMU debug stopped at entry"
 
 **Files:**
 - Create: `Tests/YagartoCoreTests/ARM7QEMUFallbackE2ETests.swift`
+- Modify: `Tests/YagartoCoreTests/DebuggerControllerTests.swift`
+- Modify: `Sources/YagartoCore/DebuggerController.swift`
 
 - [ ] **Step 1: 写可跳过的真实工具测试**
 
@@ -148,7 +152,27 @@ _ = try await session.send("-exec-step-instruction")
 
 等待下一次 `*stopped`，断言地址比入口增加 4，并读取寄存器确认 `r0 == 1`。
 
-- [ ] **Step 4: 验证有界清理**
+- [ ] **Step 4: 写 QEMU 停止命令失败测试**
+
+用 `ControllerGDBFixture` 启动 `.qemuARM926Compatible` 会话、继续到 running 后调用 stop，断言命令记录依次包含：
+
+```text
+-exec-interrupt --all
+-interpreter-exec console "monitor quit"
+-gdb-exit
+```
+
+旧实现只发送 `-gdb-exit`，因此测试必须失败。
+
+- [ ] **Step 5: 实现 QEMU 专属有界停止**
+
+先让 QEMU 与 OpenOCD 计划在连接前包含 `set mi-async on`。随后在 `DebuggerController.stop()` 中对 `.qemuARM926Compatible` 与 `.qemuMPS2AN386`：
+
+1. 若状态为 running，发送 `-exec-interrupt --all` 并在 1 秒内等待 stopped。
+2. 进入 terminating、废弃事件任务后发送 `-interpreter-exec console "monitor quit"`；允许远端关闭导致该命令返回错误。
+3. 最后调用既有 `session.shutdown` 回收 GDB 进程组。
+
+- [ ] **Step 6: 验证真实有界清理**
 
 调用：
 
@@ -158,7 +182,7 @@ await session.shutdown(timeout: .seconds(2))
 
 轮询 wrapper PID 最多 2 秒，断言 `kill(pid, 0)` 返回 `ESRCH`；测试 defer 中仍执行 shutdown，防止失败路径残留进程。
 
-- [ ] **Step 5: 运行并提交**
+- [ ] **Step 7: 运行并提交**
 
 Run:
 
@@ -172,7 +196,7 @@ Expected: 测试通过，`pgrep` 没有测试残留。
 Commit:
 
 ```bash
-git add Tests/YagartoCoreTests/ARM7QEMUFallbackE2ETests.swift
+git add Sources/YagartoCore/DebuggerController.swift Tests/YagartoCoreTests/DebuggerControllerTests.swift Tests/YagartoCoreTests/ARM7QEMUFallbackE2ETests.swift
 git commit -m "test: exercise real ARM7 QEMU fallback"
 ```
 

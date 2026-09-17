@@ -11,6 +11,7 @@
 
 ARM7 QEMU 仍使用 `-S -gdb stdio` 启动，并通过 GDB 管道管理生命周期。QEMU 使用 ELF `-kernel` 加载时，`-S` 会让 CPU 保持暂停，程序计数器位于 ELF 入口。因此：
 
+- QEMU 与 OpenOCD 远程后端在连接前执行 `set mi-async on`，使 continue 立即返回 `^running`，从而允许 UI 在程序运行时发送暂停或停止命令。
 - `debug` 模式连接后不再发送 `tbreak <entry>` 或 `continue`，直接保留停止状态；App 随后同步用户断点并允许单步。
 - `run` 模式连接后仍发送 `continue`，保持一键运行语义。
 - GDB simulator 模式继续使用 `target sim`、`load`、`tbreak <entry>`、`run`，因为 simulator 的启动协议不同。
@@ -20,7 +21,7 @@ ARM7 QEMU 仍使用 `-S -gdb stdio` 启动，并通过 GDB 管道管理生命周
 
 ## 进程生命周期
 
-增加真实 QEMU 回归覆盖：使用临时 ARM7 ELF 和普通 `arm-none-eabi-gdb` 启动回退后端，确认初始 PC 位于入口、一次 `stepi` 前进到下一条指令，并通过现有有界停止路径退出。测试记录专属 QEMU 包装进程的 PID，停止完成后确认该进程已经消失，防止失败重试留下后台 QEMU。
+增加真实 QEMU 回归覆盖：使用临时 ARM7 ELF 和普通 `arm-none-eabi-gdb` 启动回退后端，确认初始 PC 位于入口、一次 `stepi` 前进到下一条指令。停止正在运行的 QEMU 时，控制器先发送 MI interrupt 并等待目标停下，再通过 GDB 的 `monitor quit` 关闭独立 QEMU 进程，最后关闭 GDB；不能只终止 GDB 进程组，因为 QEMU 会成为独立进程组并被 `launchd` 接管。测试记录专属 QEMU 包装进程的 PID，停止完成后确认该进程已经消失，防止失败重试留下后台 QEMU。
 
 若本机缺少普通 ARM GDB、QEMU 或 ARM 汇编工具，该项系统集成测试明确跳过；规划层和生命周期单元测试仍必须执行。
 
@@ -39,7 +40,7 @@ ARM7 QEMU 仍使用 `-S -gdb stdio` 启动，并通过 GDB 管道管理生命周
 
 ## 测试与验收
 
-- 规划测试先失败，证明旧计划仍包含 `tbreak start` 与 `continue`；修复后断言 ARM7 QEMU `debug` 计划只负责加载 ELF 和连接 QEMU，而 `run` 计划仍包含 `continue`。
+- 规划测试先失败，证明旧计划仍包含 `tbreak start` 与 `continue`，且远程 GDB 未启用异步 MI；修复后断言 ARM7 QEMU `debug` 计划只负责加载 ELF 和连接 QEMU，`run` 计划仍包含 `continue`，所有远程后端均包含 `set mi-async on`。
 - CLI dry-run 测试同时锁定 text/JSON 输出，防止以后重新引入入口续跑。
 - 文档契约测试确认 simulator 和 `doctor` 章节位于安装/打开 App 之前，且不存在重复 PATH 配置块。
 - 真实 QEMU 测试确认入口停止、单步成功、停止后无专属 GDB/QEMU 残留。

@@ -356,6 +356,27 @@ final class DebuggerControllerTests: XCTestCase {
         XCTAssertFalse(try fixture.commands().contains("-exec-interrupt --all"))
     }
 
+    func testRunningQEMUStopInterruptsTargetAndRequestsMonitorQuit() async throws {
+        let fixture = try ControllerGDBFixture()
+        let controller = DebuggerController(plan: fixture.plan(
+            profile: .arm7tdmi,
+            backend: .qemuARM926Compatible
+        ))
+        try await controller.launch()
+        _ = try await waitForSnapshot(controller)
+        try await controller.run()
+        try await waitForState(.running, controller: controller)
+
+        try await controller.stop()
+
+        let commands = try fixture.commands()
+        XCTAssertTrue(commands.contains("-exec-interrupt --all"))
+        XCTAssertTrue(commands.contains(#"-interpreter-exec console "monitor quit""#))
+        XCTAssertTrue(commands.contains("-gdb-exit"))
+        let state = await controller.currentState
+        XCTAssertEqual(state, .ready)
+    }
+
     func testOptionalPaneFailureKeepsStoppedSnapshotAndDiagnostic() async throws {
         let fixture = try ControllerGDBFixture(failMemory: true)
         let controller = DebuggerController(plan: fixture.plan(profile: .arm7tdmi))

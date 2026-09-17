@@ -203,12 +203,18 @@ public actor DebuggerController {
         defer { resetMemoryRequest(ifUnchanged: requestRevision) }
         stoppedContext = nil
         let stoppedSession = session
+        let stoppedBackend = plan?.backend
         var interruptFailure: (any Error)?
-        if machine.state == .running,
-           plan?.backend == .gdbSimulator,
-           let stoppedSession {
+        if machine.state == .running, let stoppedSession {
             do {
+                switch stoppedBackend {
+                case .gdbSimulator:
                 try await interruptSimulator(stoppedSession)
+                case .qemuARM926Compatible, .qemuMPS2AN386:
+                    try await interruptRemoteTarget(stoppedSession)
+                case .openOCDSTM32F4Discovery, .none:
+                    break
+                }
             } catch {
                 interruptFailure = error
             }
@@ -218,7 +224,10 @@ public actor DebuggerController {
             generation = UUID()
             if let stoppedSession, session === stoppedSession { session = nil }
             await cancelAndAwaitBackgroundTasks()
-            if let stoppedSession { await stoppedSession.shutdown(timeout: .zero) }
+            if let stoppedSession {
+                await terminateQEMUIfNeeded(stoppedSession, backend: stoppedBackend)
+                await stoppedSession.shutdown(timeout: .zero)
+            }
             return
         }
         try transition(.terminationStarted)
@@ -226,6 +235,7 @@ public actor DebuggerController {
         session = nil
         await cancelAndAwaitBackgroundTasks()
         if let stoppedSession {
+            await terminateQEMUIfNeeded(stoppedSession, backend: stoppedBackend)
             await stoppedSession.shutdown(
                 timeout: interruptFailure == nil ? .seconds(2) : .zero
             )
@@ -538,6 +548,28 @@ public actor DebuggerController {
             }
             throw error
         }
+        try await waitForInterruptCompletion(
+            activeSession,
+            generation: interruptGeneration,
+            operation: "等待 ARM7 仿真器暂停"
+        )
+    }
+
+    private func interruptRemoteTarget(_ activeSession: GDBMISession) async throws {
+        let interruptGeneration = generation
+        _ = try await activeSession.send("-exec-interrupt --all")
+        try await waitForInterruptCompletion(
+            activeSession,
+            generation: interruptGeneration,
+            operation: "等待 QEMU 暂停"
+        )
+    }
+
+    private func waitForInterruptCompletion(
+        _ activeSession: GDBMISession,
+        generation interruptGeneration: UUID,
+        operation: String
+    ) async throws {
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: .seconds(1))
         while clock.now < deadline {
@@ -548,10 +580,21 @@ public actor DebuggerController {
             case .running:
                 try await Task.sleep(for: .milliseconds(10))
             case .idle, .building, .launching:
-                throw DebuggerControllerError.commandTimedOut("等待 ARM7 仿真器暂停")
+                throw DebuggerControllerError.commandTimedOut(operation)
             }
         }
-        throw DebuggerControllerError.commandTimedOut("等待 ARM7 仿真器暂停")
+        throw DebuggerControllerError.commandTimedOut(operation)
+    }
+
+    private func terminateQEMUIfNeeded(
+        _ activeSession: GDBMISession,
+        backend: DebugBackend?
+    ) async {
+        guard backend == .qemuARM926Compatible || backend == .qemuMPS2AN386 else { return }
+        _ = try? await sendSnapshotCommand(
+            #"-interpreter-exec console "monitor quit""#,
+            to: activeSession
+        )
     }
 
     private static func registerDisplayNames(for profile: ProfileID) -> [String] {

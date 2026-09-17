@@ -78,12 +78,11 @@ final class DebugPlannerTests: XCTestCase {
         XCTAssertEqual(plan.backend, .qemuARM926Compatible)
         XCTAssertEqual(plan.gdbExecutable, "/tools/arm-none-eabi-gdb")
         XCTAssertEqual(plan.warnings, ["ARM926 是 ARM7TDMI 兼容超集，非精确模型"])
-        XCTAssertEqual(plan.initCommands[0], "file \"/tmp/调试 项目/.yagarto/build/arm7tdmi/演示 固件.elf\"")
-        XCTAssertEqual(
-            plan.initCommands[1],
+        XCTAssertEqual(plan.initCommands, [
+            "file \"/tmp/调试 项目/.yagarto/build/arm7tdmi/演示 固件.elf\"",
+            "set mi-async on",
             "target remote | exec '/tools/qemu system-arm' '-M' 'integratorcp' '-cpu' 'arm926' '-kernel' '/tmp/调试 项目/.yagarto/build/arm7tdmi/演示 固件.elf' '-S' '-gdb' 'stdio' '-nographic' '-monitor' 'none' '-serial' 'none'"
-        )
-        XCTAssertEqual(plan.initCommands.count, 2)
+        ])
         XCTAssertFalse(plan.initCommands.contains(where: { $0.hasPrefix("tbreak ") }))
         XCTAssertFalse(plan.initCommands.contains("continue"))
     }
@@ -128,8 +127,9 @@ final class DebugPlannerTests: XCTestCase {
         )
 
         XCTAssertEqual(plan.backend, .qemuMPS2AN386)
+        XCTAssertEqual(plan.initCommands[1], "set mi-async on")
         XCTAssertEqual(
-            plan.initCommands[1],
+            plan.initCommands[2],
             "target remote | exec '/tools/qemu'\\''s arm' '-M' 'mps2-an386' '-kernel' '/tmp/调试 项目/固件'\\''s.elf' '-S' '-gdb' 'stdio' '-nographic' '-monitor' 'none' '-serial' 'none'"
         )
         XCTAssertEqual(Array(plan.initCommands.suffix(2)), ["tbreak user_main", "continue"])
@@ -169,8 +169,9 @@ final class DebugPlannerTests: XCTestCase {
 
         XCTAssertEqual(plan.backend, .openOCDSTM32F4Discovery)
         XCTAssertEqual(plan.initCommands[0], "file \"/tmp/调试 项目/.yagarto/build/arm7tdmi/演示 固件.elf\"")
+        XCTAssertEqual(plan.initCommands[1], "set mi-async on")
         XCTAssertEqual(
-            plan.initCommands[1],
+            plan.initCommands[2],
             "target extended-remote | exec '/tools/openocd' '-f' '/opt/Open OCD/scripts/board/stm32f4discovery.cfg' '-c' 'gdb_port pipe; tcl_port disabled; telnet_port disabled; log_output /dev/stderr'"
         )
         XCTAssertEqual(Array(plan.initCommands.suffix(3)), [
@@ -213,8 +214,9 @@ final class DebugPlannerTests: XCTestCase {
             projectDirectory: root.url
         )
 
+        XCTAssertEqual(plan.initCommands[1], "set mi-async on")
         XCTAssertEqual(
-            plan.initCommands[1],
+            plan.initCommands[2],
             "target extended-remote | exec '/tools/openocd' '-f' '/board.cfg' '-c' 'gdb_port pipe; tcl_port disabled; telnet_port disabled; log_output /dev/stderr'"
         )
         XCTAssertFalse(
