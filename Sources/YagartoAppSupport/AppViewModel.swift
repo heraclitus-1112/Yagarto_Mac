@@ -66,6 +66,7 @@ public final class AppViewModel {
     }
 
     public var state: DebuggerState { machine.state }
+    public var documentInstanceID: UUID? { documentIdentifier }
 
     public var currentExecutionLine: Int? {
         guard state == .stopped,

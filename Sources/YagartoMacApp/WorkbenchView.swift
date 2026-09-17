@@ -50,7 +50,7 @@ struct WorkbenchView: View {
             }
             resetMemoryWindow()
         }
-        .onChange(of: model.document?.sourceURL) { _, _ in
+        .onChange(of: model.documentInstanceID) { _, _ in
             resetMemoryWindow()
         }
         .onChange(of: model.state) { oldState, newState in

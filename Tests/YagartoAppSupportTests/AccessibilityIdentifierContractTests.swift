@@ -45,6 +45,8 @@ final class AccessibilityIdentifierContractTests: XCTestCase {
         XCTAssertTrue(workbench.contains(".accessibilityLabel(\"内存起始地址\")"))
         XCTAssertTrue(workbench.contains(".accessibilityHint(\"输入十六进制地址后按回车提交\")"))
         XCTAssertTrue(workbench.contains(".accessibilityLabel(\"内存地址步进，每次 16 字节\")"))
+        XCTAssertTrue(workbench.contains(".onChange(of: model.documentInstanceID)"))
+        XCTAssertFalse(workbench.contains(".onChange(of: model.document?.sourceURL)"))
     }
 
     func testStatusIdentifiersAreProducedAndQueriedIndependently() throws {

@@ -6,6 +6,31 @@ import XCTest
 
 @MainActor
 final class AppViewModelTests: XCTestCase {
+    func testDocumentInstanceIDChangesOnlyWhenSamePathDocumentIsReinstalled() async throws {
+        let fixture = try ViewModelFixture()
+        let model = AppViewModel(
+            documentService: FakeDocumentService(document: fixture.document),
+            buildService: FakeBuildService(result: fixture.buildResult),
+            debugService: FakeDebugService()
+        )
+
+        XCTAssertNil(model.documentInstanceID)
+        await model.open(fixture.document.sourceURL)
+        let firstInstanceID = try XCTUnwrap(model.documentInstanceID)
+
+        model.edit("MOV r0, #1\n")
+        XCTAssertEqual(model.documentInstanceID, firstInstanceID)
+        await model.save()
+        XCTAssertEqual(model.documentInstanceID, firstInstanceID)
+        model.changeProfile(to: .cortexM4)
+        XCTAssertEqual(model.documentInstanceID, firstInstanceID)
+
+        await model.open(fixture.document.sourceURL)
+
+        XCTAssertEqual(model.document?.sourceURL, fixture.document.sourceURL)
+        XCTAssertNotEqual(model.documentInstanceID, firstInstanceID)
+    }
+
     func testLatestOpenWinsWhenEarlierOpenCompletesLast() async throws {
         let fixture = try ViewModelFixture()
         let other = fixture.document(named: "other", text: "MOV r7, #7\n")
