@@ -377,6 +377,60 @@ final class DebuggerControllerTests: XCTestCase {
         XCTAssertEqual(state, .ready)
     }
 
+    func testQEMUStopBoundsHungMIInterruptAndStillCleansBackend() async throws {
+        let fixture = try ControllerGDBFixture(hangMIInterrupt: true)
+        let controller = DebuggerController(plan: fixture.plan(
+            profile: .arm7tdmi,
+            backend: .qemuARM926Compatible
+        ))
+        try await controller.launch()
+        _ = try await waitForSnapshot(controller)
+        try await controller.run()
+        try await waitForState(.running, controller: controller)
+        let processIDs = try fixture.processIDs()
+        let started = ContinuousClock.now
+
+        do {
+            try await controller.stop()
+            XCTFail("QEMU interrupt 超时必须作为受控错误返回")
+        } catch let error as DebuggerControllerError {
+            XCTAssertEqual(error, .commandTimedOut("-exec-interrupt --all"))
+        }
+
+        XCTAssertLessThan(started.duration(to: .now), .seconds(2))
+        let commands = try fixture.commands()
+        XCTAssertTrue(commands.contains(#"-interpreter-exec console "monitor quit""#))
+        for processID in processIDs {
+            XCTAssertEqual(Darwin.kill(processID, 0), -1, "pid \(processID) still exists")
+        }
+        let state = await controller.currentState
+        XCTAssertEqual(state, .ready)
+    }
+
+    func testPauseImmediatelyFollowedByStopSharesOneQEMUInterrupt() async throws {
+        let fixture = try ControllerGDBFixture(miInterruptStopDelayMilliseconds: 100)
+        let controller = DebuggerController(plan: fixture.plan(
+            profile: .arm7tdmi,
+            backend: .qemuARM926Compatible
+        ))
+        try await controller.launch()
+        _ = try await waitForSnapshot(controller)
+        try await controller.run()
+        try await waitForState(.running, controller: controller)
+
+        let pause = Task { try await controller.pause() }
+        try await waitForCommand("-exec-interrupt --all", fixture: fixture)
+        let stop = Task { try await controller.stop() }
+        try await pause.value
+        try await stop.value
+
+        let commands = try fixture.commands()
+        XCTAssertEqual(commands.filter { $0 == "-exec-interrupt --all" }.count, 1)
+        XCTAssertTrue(commands.contains(#"-interpreter-exec console "monitor quit""#))
+        let state = await controller.currentState
+        XCTAssertEqual(state, .ready)
+    }
+
     func testOptionalPaneFailureKeepsStoppedSnapshotAndDiagnostic() async throws {
         let fixture = try ControllerGDBFixture(failMemory: true)
         let controller = DebuggerController(plan: fixture.plan(profile: .arm7tdmi))
@@ -887,6 +941,8 @@ private final class ControllerGDBFixture {
     let signalStopAfter: Int
     let delayGDBExit: Bool
     let hangFirstMemory: Bool
+    let hangMIInterrupt: Bool
+    let miInterruptStopDelayMilliseconds: Int
     let label: String
     let pidLog: URL
     let childPIDFile: URL
@@ -904,6 +960,8 @@ private final class ControllerGDBFixture {
         signalStopAfter: Int = 1,
         delayGDBExit: Bool = false,
         hangFirstMemory: Bool = false,
+        hangMIInterrupt: Bool = false,
+        miInterruptStopDelayMilliseconds: Int = 0,
         label: String = "课程"
     ) throws {
         self.failMemory = failMemory
@@ -916,6 +974,8 @@ private final class ControllerGDBFixture {
         self.signalStopAfter = signalStopAfter
         self.delayGDBExit = delayGDBExit
         self.hangFirstMemory = hangFirstMemory
+        self.hangMIInterrupt = hangMIInterrupt
+        self.miInterruptStopDelayMilliseconds = miInterruptStopDelayMilliseconds
         self.label = label
         directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -962,6 +1022,8 @@ private final class ControllerGDBFixture {
                 "--signal-stop-after", String(signalStopAfter),
                 "--delay-gdb-exit", delayGDBExit ? "yes" : "no",
                 "--hang-first-memory", hangFirstMemory ? "yes" : "no",
+                "--hang-mi-interrupt", hangMIInterrupt ? "yes" : "no",
+                "--mi-interrupt-stop-delay-ms", String(miInterruptStopDelayMilliseconds),
                 "--label", label,
                 "--pid-log", pidLog.path,
                 "--child-pid-file", childPIDFile.path,
@@ -1034,6 +1096,8 @@ signal_interrupt = sys.argv[sys.argv.index("--signal-interrupt") + 1] == "yes"
 signal_stop_after = int(sys.argv[sys.argv.index("--signal-stop-after") + 1])
 delay_gdb_exit = sys.argv[sys.argv.index("--delay-gdb-exit") + 1] == "yes"
 hang_first_memory = sys.argv[sys.argv.index("--hang-first-memory") + 1] == "yes"
+hang_mi_interrupt = sys.argv[sys.argv.index("--hang-mi-interrupt") + 1] == "yes"
+mi_interrupt_stop_delay = int(sys.argv[sys.argv.index("--mi-interrupt-stop-delay-ms") + 1]) / 1000.0
 label = sys.argv[sys.argv.index("--label") + 1]
 pid_log = sys.argv[sys.argv.index("--pid-log") + 1]
 child_pid_file = sys.argv[sys.argv.index("--child-pid-file") + 1]
@@ -1141,11 +1205,22 @@ for raw in sys.stdin:
         running = True
         threading.Thread(target=lambda: (time.sleep(0.15), out("*running,thread-id=\"all\"")), daemon=True).start()
     elif command == "-exec-interrupt --all":
-        if signal_interrupt:
+        if hang_mi_interrupt:
+            pass
+        elif signal_interrupt:
             out(token + '^error,msg="simulator MI interrupt unsupported"')
         else:
             out(token + "^done")
-            out('*stopped,reason="signal-received",frame={addr="0x1000",func="main"}')
+            if mi_interrupt_stop_delay > 0:
+                threading.Thread(
+                    target=lambda: (
+                        time.sleep(mi_interrupt_stop_delay),
+                        out('*stopped,reason="signal-received",frame={addr="0x1000",func="main"}')
+                    ),
+                    daemon=True
+                ).start()
+            else:
+                out('*stopped,reason="signal-received",frame={addr="0x1000",func="main"}')
     elif command.startswith("-break-insert"):
         out(token + '^done,bkpt={number="7",addr="0x1000"}')
     elif command == "-gdb-exit":

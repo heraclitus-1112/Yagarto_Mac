@@ -4,7 +4,7 @@
 
 **Goal:** 让 ARM7 QEMU 回退调试稳定停在 ELF 入口并可立即单步，同时保证完整安装流程在首次打开 App 前安装并验收 GDB simulator。
 
-**Architecture:** `DebugPlanner` 根据 ARM7 后端和模式分别生成启动命令：GDB simulator 保留 `tbreak/run`，QEMU/OpenOCD 显式启用 `mi-async`，QEMU `debug` 只连接已由 `-S` 暂停的目标，QEMU `run` 才继续。真实 E2E 通过 `DebuggerController` 驱动普通 ARM GDB 与带 PID 标记的 QEMU wrapper，验证入口、单步、运行中停止和进程回收；文档契约测试锁定安装顺序。
+**Architecture:** `DebugPlanner` 根据 ARM7 后端和模式分别生成启动命令：GDB simulator 保留 `tbreak/run`，QEMU/OpenOCD 显式启用 `mi-async`，QEMU `debug` 只连接已由 `-S` 暂停的目标，QEMU `run` 才继续。`DebuggerController` 以有界、可合并的远程中断任务处理并发暂停/停止。真实 E2E 通过普通 ARM GDB 与分别带 PID 标记的 GDB/QEMU wrapper 验证入口、单步、运行中停止和失败路径进程回收；文档契约测试锁定安装顺序。
 
 **Tech Stack:** Swift 6.3、XCTest、GDB/MI、QEMU `integratorcp`/ARM926、Markdown、zsh。
 
@@ -168,9 +168,11 @@ _ = try await session.send("-exec-step-instruction")
 
 先让 QEMU 与 OpenOCD 计划在连接前包含 `set mi-async on`。随后在 `DebuggerController.stop()` 中对 `.qemuARM926Compatible` 与 `.qemuMPS2AN386`：
 
-1. 若状态为 running，发送 `-exec-interrupt --all` 并在 1 秒内等待 stopped。
+1. 若状态为 running，以 1 秒总期限发送 `-exec-interrupt --all` 并等待 stopped；暂停与停止并发时共享同一个中断任务。
 2. 进入 terminating、废弃事件任务后发送 `-interpreter-exec console "monitor quit"`；允许远端关闭导致该命令返回错误。
 3. 最后调用既有 `session.shutdown` 回收 GDB 进程组。
+
+MI interrupt 和 `monitor quit` 都必须单独有界；即使中断卡死或失败，仍继续执行后端清理，避免停止按钮永久等待。
 
 - [ ] **Step 6: 验证真实有界清理**
 
@@ -180,7 +182,7 @@ _ = try await session.send("-exec-step-instruction")
 await session.shutdown(timeout: .seconds(2))
 ```
 
-轮询 wrapper PID 最多 2 秒，断言 `kill(pid, 0)` 返回 `ESRCH`；测试 defer 中仍执行 shutdown，防止失败路径残留进程。
+GDB 与 QEMU wrapper 分别写入测试专属 PID。主体流程结束后无条件执行幂等 shutdown；对仍存活的精确 PID，先用 `proc_pidpath` 核验可执行文件身份，再执行 TERM/KILL 兜底。最终断言两个 PID 均返回 `ESRCH`，防止任何失败路径残留进程或误杀无关进程。
 
 - [ ] **Step 7: 运行并提交**
 

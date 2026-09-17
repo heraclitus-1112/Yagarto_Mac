@@ -50,23 +50,36 @@ final class ARM7QEMUFallbackE2ETests: XCTestCase {
         )
         _ = try BuildExecutor().execute(buildPlan)
 
-        let pidFile = project.appendingPathComponent("qemu.pid")
-        let wrapper = project.appendingPathComponent("qemu-wrapper")
+        let qemuPIDFile = project.appendingPathComponent("qemu.pid")
+        let qemuWrapper = project.appendingPathComponent("qemu-wrapper")
         let realQEMU = try XCTUnwrap(tools[.qemuSystemARM])
         try Data("""
         #!/bin/sh
-        printf '%s\\n' "$$" > \(shellQuote(pidFile.path))
+        printf '%s\\n' "$$" > \(shellQuote(qemuPIDFile.path))
         exec \(shellQuote(realQEMU)) "$@"
-        """.utf8).write(to: wrapper)
+        """.utf8).write(to: qemuWrapper)
         try FileManager.default.setAttributes(
             [.posixPermissions: 0o755],
-            ofItemAtPath: wrapper.path
+            ofItemAtPath: qemuWrapper.path
+        )
+
+        let gdbPIDFile = project.appendingPathComponent("gdb.pid")
+        let gdbWrapper = project.appendingPathComponent("gdb-wrapper")
+        let realGDB = try XCTUnwrap(tools[.gdb])
+        try Data("""
+        #!/bin/sh
+        printf '%s\\n' "$$" > \(shellQuote(gdbPIDFile.path))
+        exec \(shellQuote(realGDB)) "$@"
+        """.utf8).write(to: gdbWrapper)
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o755],
+            ofItemAtPath: gdbWrapper.path
         )
 
         let debugPlan = try DebugPlanner(
             toolPaths: [
-                .gdb: try XCTUnwrap(tools[.gdb]),
-                .qemuSystemARM: wrapper.path
+                .gdb: gdbWrapper.path,
+                .qemuSystemARM: qemuWrapper.path
             ]
         ).plan(
             mode: .debug,
@@ -80,8 +93,13 @@ final class ARM7QEMUFallbackE2ETests: XCTestCase {
             plan: debugPlan,
             snapshotCommandTimeout: .seconds(2)
         )
+        var operationError: (any Error)?
+        var gdbPID: pid_t?
+        var qemuPID: pid_t?
         do {
             try await controller.launch()
+            gdbPID = try await waitForPID(in: gdbPIDFile, processName: "GDB")
+            qemuPID = try await waitForPID(in: qemuPIDFile, processName: "QEMU")
             let initial = try await waitForSnapshot(controller)
             let initialPC = try XCTUnwrap(initial.location?.address?.numeric)
             XCTAssertEqual(initialPC, 0x8000)
@@ -97,12 +115,44 @@ final class ARM7QEMUFallbackE2ETests: XCTestCase {
             let finalState = await controller.currentState
             XCTAssertEqual(finalState, .ready)
         } catch {
-            try? await controller.stop()
-            throw error
+            operationError = error
         }
 
-        let qemuPID = try await waitForPID(in: pidFile)
-        try await waitForProcessExit(qemuPID)
+        // Always execute a second, idempotent controller cleanup. If the main
+        // scenario failed before reading the wrappers' marker files, recover
+        // their exact PIDs before applying the identity-checked fallback.
+        try? await controller.stop()
+        gdbPID = gdbPID ?? readPIDIfPresent(in: gdbPIDFile)
+        qemuPID = qemuPID ?? readPIDIfPresent(in: qemuPIDFile)
+
+        if let gdbPID {
+            do {
+                try await terminateExactProcessIfNeeded(
+                    gdbPID,
+                    expectedExecutable: realGDB,
+                    processName: "GDB"
+                )
+            } catch {
+                if operationError == nil { operationError = error }
+            }
+        }
+        if let qemuPID {
+            do {
+                try await terminateExactProcessIfNeeded(
+                    qemuPID,
+                    expectedExecutable: realQEMU,
+                    processName: "QEMU"
+                )
+            } catch {
+                if operationError == nil { operationError = error }
+            }
+        }
+
+        XCTAssertNotNil(gdbPID, "GDB wrapper 未写入 PID")
+        XCTAssertNotNil(qemuPID, "QEMU wrapper 未写入 PID")
+        if let gdbPID { XCTAssertFalse(isProcessAlive(gdbPID), "GDB 进程 \(gdbPID) 未被回收") }
+        if let qemuPID { XCTAssertFalse(isProcessAlive(qemuPID), "QEMU 进程 \(qemuPID) 未被回收") }
+        if let operationError { throw operationError }
     }
 
     private func waitForSnapshot(
@@ -138,7 +188,7 @@ final class ARM7QEMUFallbackE2ETests: XCTestCase {
         throw TestFailure.timeout("等待调试状态 \(expected.rawValue) 超时")
     }
 
-    private func waitForPID(in file: URL) async throws -> pid_t {
+    private func waitForPID(in file: URL, processName: String) async throws -> pid_t {
         let clock = ContinuousClock()
         let deadline = clock.now.advanced(by: .seconds(2))
         while clock.now < deadline {
@@ -148,20 +198,64 @@ final class ARM7QEMUFallbackE2ETests: XCTestCase {
             }
             try await Task.sleep(for: .milliseconds(20))
         }
-        throw TestFailure.timeout("QEMU wrapper 未写入 PID")
+        throw TestFailure.timeout("\(processName) wrapper 未写入 PID")
     }
 
-    private func waitForProcessExit(_ processID: pid_t) async throws {
-        let clock = ContinuousClock()
-        let deadline = clock.now.advanced(by: .seconds(2))
-        while clock.now < deadline {
-            errno = 0
-            if kill(processID, 0) == -1, errno == ESRCH {
-                return
-            }
-            try await Task.sleep(for: .milliseconds(20))
+    private func readPIDIfPresent(in file: URL) -> pid_t? {
+        guard let text = try? String(contentsOf: file, encoding: .utf8) else { return nil }
+        return Int32(text.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    private func terminateExactProcessIfNeeded(
+        _ processID: pid_t,
+        expectedExecutable: String,
+        processName: String
+    ) async throws {
+        guard isProcessAlive(processID) else { return }
+        let expected = URL(fileURLWithPath: expectedExecutable)
+            .resolvingSymlinksInPath().standardizedFileURL.path
+        let actual = try executablePath(for: processID)
+        guard actual == expected else {
+            throw TestFailure.unsafeProcessIdentity(
+                "拒绝清理 PID \(processID)：预期 \(processName) 为 \(expected)，实际为 \(actual)"
+            )
         }
-        throw TestFailure.timeout("QEMU 进程 \(processID) 未被回收")
+
+        _ = kill(processID, SIGTERM)
+        if await waitForProcessExit(processID, timeout: .milliseconds(300)) { return }
+        _ = kill(processID, SIGKILL)
+        guard await waitForProcessExit(processID, timeout: .seconds(2)) else {
+            throw TestFailure.timeout("\(processName) 进程 \(processID) 未被回收")
+        }
+    }
+
+    private func executablePath(for processID: pid_t) throws -> String {
+        var buffer = [CChar](repeating: 0, count: Int(MAXPATHLEN) * 4)
+        let count = proc_pidpath(processID, &buffer, UInt32(buffer.count))
+        guard count > 0 else {
+            throw TestFailure.unsafeProcessIdentity("无法核验 PID \(processID) 的可执行文件")
+        }
+        let bytes = buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }
+        return URL(fileURLWithPath: String(decoding: bytes, as: UTF8.self))
+            .resolvingSymlinksInPath().standardizedFileURL.path
+    }
+
+    private func waitForProcessExit(
+        _ processID: pid_t,
+        timeout: Duration
+    ) async -> Bool {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        while clock.now < deadline {
+            if !isProcessAlive(processID) { return true }
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        return !isProcessAlive(processID)
+    }
+
+    private func isProcessAlive(_ processID: pid_t) -> Bool {
+        errno = 0
+        return kill(processID, 0) == 0 || errno != ESRCH
     }
 
     private func shellQuote(_ value: String) -> String {
@@ -171,4 +265,5 @@ final class ARM7QEMUFallbackE2ETests: XCTestCase {
 
 private enum TestFailure: Error {
     case timeout(String)
+    case unsafeProcessIdentity(String)
 }

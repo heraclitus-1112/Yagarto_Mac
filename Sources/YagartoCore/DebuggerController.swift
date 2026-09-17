@@ -8,6 +8,11 @@ public actor DebuggerController {
         let task: Task<Void, Never>
     }
 
+    private struct TrackedRemoteInterrupt {
+        let id: UUID
+        let task: Task<Void, any Error>
+    }
+
     private struct StoppedContext {
         let record: MIAsyncRecord
         let session: GDBMISession
@@ -27,6 +32,7 @@ public actor DebuggerController {
     private var snapshotTasks: [UUID: TrackedTask] = [:]
     private var currentSnapshotTaskID: UUID?
     private var recoveryTask: TrackedTask?
+    private var remoteInterruptTask: TrackedRemoteInterrupt?
     private var console: [DebugConsoleEntry] = []
     private var memoryRequest = DebugMemoryRequest.yagartoWindow
     private var memoryRequestRevision: UInt64 = 0
@@ -184,7 +190,7 @@ public actor DebuggerController {
         if plan?.backend == .gdbSimulator {
             try await interruptSimulator(activeSession)
         } else {
-            _ = try await activeSession.send("-exec-interrupt --all")
+            try await interruptRemoteTarget(activeSession)
         }
     }
 
@@ -518,9 +524,21 @@ public actor DebuggerController {
         _ command: String,
         to session: GDBMISession
     ) async throws -> MIResultRecord {
+        try await sendCommand(
+            command,
+            to: session,
+            timeout: snapshotCommandTimeout
+        )
+    }
+
+    private func sendCommand(
+        _ command: String,
+        to session: GDBMISession,
+        timeout duration: Duration
+    ) async throws -> MIResultRecord {
         let request = Task { try await session.send(command) }
         let timeout = Task {
-            try await Task.sleep(for: snapshotCommandTimeout)
+            try await Task.sleep(for: duration)
             request.cancel()
         }
         defer { timeout.cancel() }
@@ -538,6 +556,7 @@ public actor DebuggerController {
 
     private func interruptSimulator(_ activeSession: GDBMISession) async throws {
         let interruptGeneration = generation
+        let deadline = ContinuousClock.now.advanced(by: .seconds(1))
         do {
             try await activeSession.interruptProcessGroup()
         } catch {
@@ -551,27 +570,75 @@ public actor DebuggerController {
         try await waitForInterruptCompletion(
             activeSession,
             generation: interruptGeneration,
+            deadline: deadline,
             operation: "等待 ARM7 仿真器暂停"
         )
     }
 
     private func interruptRemoteTarget(_ activeSession: GDBMISession) async throws {
+        if let existing = remoteInterruptTask {
+            try await existing.task.value
+            return
+        }
+
         let interruptGeneration = generation
-        _ = try await activeSession.send("-exec-interrupt --all")
+        let identifier = UUID()
+        let task = Task { [weak self] in
+            guard let self else { throw CancellationError() }
+            try await self.performRemoteInterrupt(
+                activeSession,
+                generation: interruptGeneration
+            )
+        }
+        remoteInterruptTask = TrackedRemoteInterrupt(id: identifier, task: task)
+        do {
+            try await task.value
+            clearRemoteInterrupt(identifier)
+        } catch {
+            clearRemoteInterrupt(identifier)
+            throw error
+        }
+    }
+
+    private func performRemoteInterrupt(
+        _ activeSession: GDBMISession,
+        generation interruptGeneration: UUID
+    ) async throws {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(1))
+        do {
+            _ = try await sendCommand(
+                "-exec-interrupt --all",
+                to: activeSession,
+                timeout: .seconds(1)
+            )
+        } catch {
+            if !isCurrent(interruptGeneration, session: activeSession)
+                || machine.state == .terminating
+                || machine.state == .ready {
+                return
+            }
+            throw error
+        }
         try await waitForInterruptCompletion(
             activeSession,
             generation: interruptGeneration,
+            deadline: deadline,
             operation: "等待 QEMU 暂停"
         )
+    }
+
+    private func clearRemoteInterrupt(_ identifier: UUID) {
+        guard remoteInterruptTask?.id == identifier else { return }
+        remoteInterruptTask = nil
     }
 
     private func waitForInterruptCompletion(
         _ activeSession: GDBMISession,
         generation interruptGeneration: UUID,
+        deadline: ContinuousClock.Instant,
         operation: String
     ) async throws {
         let clock = ContinuousClock()
-        let deadline = clock.now.advanced(by: .seconds(1))
         while clock.now < deadline {
             guard isCurrent(interruptGeneration, session: activeSession) else { return }
             switch machine.state {
@@ -591,9 +658,10 @@ public actor DebuggerController {
         backend: DebugBackend?
     ) async {
         guard backend == .qemuARM926Compatible || backend == .qemuMPS2AN386 else { return }
-        _ = try? await sendSnapshotCommand(
+        _ = try? await sendCommand(
             #"-interpreter-exec console "monitor quit""#,
-            to: activeSession
+            to: activeSession,
+            timeout: .milliseconds(500)
         )
     }
 
