@@ -8,7 +8,7 @@ import YagartoCore
 
 @MainActor
 final class MemoryHexTableTests: XCTestCase {
-    func testNativeTableExposesColumnsRowCellsGeometryAndSelectableText() throws {
+    func testNativeTableExposesSixWordColumnsCourseContentsAndSelectableGeometry() throws {
         let controller = MemoryNativeTableController()
         controller.update(rows: try formattedRows())
 
@@ -16,37 +16,46 @@ final class MemoryHexTableTests: XCTestCase {
             let table = controller.tableView
             XCTAssertEqual(table.accessibilityIdentifier(), "memory-table")
             XCTAssertEqual(table.accessibilityRole(), .table)
-            XCTAssertEqual(table.tableColumns.count, 18)
-            XCTAssertTrue(controller.scrollView.hasHorizontalScroller)
-            XCTAssertTrue(controller.scrollView.hasVerticalScroller)
-
-            let expectedHeaderIdentifiers = [
-                "memory-table-header-address"
-            ] + (0..<16).map {
-                "memory-table-header-byte-\($0)"
-            } + [
-                "memory-table-header-ascii"
-            ]
+            XCTAssertEqual(table.tableColumns.count, 6)
+            XCTAssertEqual(
+                table.tableColumns.map(\.identifier.rawValue),
+                ["memory-address-column"]
+                    + (0..<4).map { "memory-word-column-\($0)" }
+                    + ["memory-ascii-column"]
+            )
+            XCTAssertEqual(
+                table.tableColumns.map { $0.headerCell.stringValue },
+                ["Address", "0", "4", "8", "C", "ASCII"]
+            )
             XCTAssertEqual(
                 table.tableColumns.map { $0.headerCell.accessibilityIdentifier() },
-                expectedHeaderIdentifiers
+                ["memory-table-header-address"]
+                    + (0..<4).map { "memory-table-header-word-\($0)" }
+                    + ["memory-table-header-ascii"]
             )
+            XCTAssertTrue(controller.scrollView.hasHorizontalScroller)
+            XCTAssertTrue(controller.scrollView.hasVerticalScroller)
 
             let rowView = try XCTUnwrap(table.rowView(atRow: 0, makeIfNecessary: true))
             XCTAssertEqual(rowView.accessibilityIdentifier(), "memory-table-row-0")
             XCTAssertEqual(rowView.accessibilityRole(), .row)
 
-            let addressCell = try cell(in: table, column: 0, row: 0)
-            let firstByteCell = try cell(in: table, column: 1, row: 0)
-            let emptyByteCell = try cell(in: table, column: 5, row: 0)
-            let asciiCell = try cell(in: table, column: 17, row: 0)
-            XCTAssertEqual(addressCell.accessibilityIdentifier(), "memory-table-row-0-address")
-            XCTAssertEqual(firstByteCell.accessibilityIdentifier(), "memory-table-row-0-byte-0")
-            XCTAssertEqual(emptyByteCell.textField?.stringValue, " ")
-            XCTAssertEqual(emptyByteCell.accessibilityValue() as? String, "空")
-            XCTAssertEqual(asciiCell.accessibilityIdentifier(), "memory-table-row-0-ascii")
+            let cells = try (0..<6).map { try cell(in: table, column: $0, row: 0) }
+            XCTAssertEqual(
+                cells.map { $0.accessibilityIdentifier() },
+                ["memory-table-row-0-address"]
+                    + (0..<4).map { "memory-table-row-0-word-\($0)" }
+                    + ["memory-table-row-0-ascii"]
+            )
+            XCTAssertEqual(
+                cells.map { $0.textField?.stringValue },
+                [
+                    "0x00008000", "0xFFEEFDFC", "0x00000001",
+                    "0x00000002", "0x00000003", "................"
+                ]
+            )
 
-            for cellView in [addressCell, firstByteCell, asciiCell] {
+            for cellView in cells {
                 XCTAssertEqual(cellView.accessibilityRole(), .cell)
                 XCTAssertTrue(try XCTUnwrap(cellView.textField).isSelectable)
                 assertNonZeroAccessibilityFrame(cellView)
@@ -55,14 +64,12 @@ final class MemoryHexTableTests: XCTestCase {
             assertNonZeroAccessibilityFrame(rowView)
             assertNonZeroAccessibilityFrame(try XCTUnwrap(table.headerView))
 
-            // XCTest exposes the native table from the scroll view, but does not
-            // return realized NSTableRowView/NSTableCellView objects as its AX children.
             let nativeAX = accessibilitySnapshot(from: controller.scrollView)
             XCTAssertTrue(nativeAX.identifiers.contains("memory-table"))
         }
     }
 
-    func testEquivalentRowsDoNotReloadOrReplaceNativeRowAndCell() throws {
+    func testEquivalentRowsPreserveNativeIdentityWhileChangedBaseOrRowsReload() throws {
         let rows = try formattedRows()
         let controller = MemoryNativeTableController()
         controller.update(rows: rows)
@@ -78,87 +85,67 @@ final class MemoryHexTableTests: XCTestCase {
 
             XCTAssertEqual(controller.reloadCount, reloadCount)
             XCTAssertIdentical(controller.tableView, table)
-            XCTAssertIdentical(
-                table.rowView(atRow: 0, makeIfNecessary: true),
-                firstRow
-            )
+            XCTAssertIdentical(table.rowView(atRow: 0, makeIfNecessary: true), firstRow)
             XCTAssertIdentical(
                 table.view(atColumn: 0, row: 0, makeIfNecessary: true),
                 firstCell
             )
+
+            controller.update(rows: try formattedRows(contents: "01000000"))
+            XCTAssertEqual(controller.reloadCount, reloadCount + 1)
+
+            controller.update(rows: try formattedRows(
+                baseAddress: 0x9000,
+                contents: "01000000"
+            ))
+            XCTAssertEqual(controller.reloadCount, reloadCount + 2)
         }
     }
 
-    func testSystemTableAccessibilityProxiesExposeRowCellAndHeaderMetadata() throws {
+    func testParameterizedAccessibilityCellPathDecoratesAllSixSystemProxies() throws {
         let controller = MemoryNativeTableController()
-        controller.update(rows: try formattedRows())
+        controller.update(rows: try formattedRows(contents: "010203"))
 
         try withWindow(contentView: controller.scrollView) {
             let table = controller.tableView
-            let rowValues = try rawAccessibilityObjects(
-                from: table,
-                selectorName: "accessibilityRows"
-            )
-            let rowValue = try XCTUnwrap(rowValues.first)
-            let row = try accessibilityObject(from: rowValue, description: "row")
-            XCTAssertEqual(accessibilityRole(of: row), .row)
-            XCTAssertNil(accessibilityString("AXIdentifier", of: row))
-            assertNonZeroAccessibilityFrame(row)
-
-            let columnIndices = [0, 1, 5, 17]
-            let cells = try columnIndices.map { column in
-                let value = try XCTUnwrap(table.accessibilityCell(forColumn: column, row: 0))
-                return try accessibilityObject(
-                    from: value,
+            XCTAssertEqual(try cell(in: table, column: 1, row: 0).textField?.stringValue, " ")
+            XCTAssertEqual(try cell(in: table, column: 2, row: 0).textField?.stringValue, " ")
+            let cells = try (0..<6).map { column in
+                try accessibilityObject(
+                    from: XCTUnwrap(table.accessibilityCell(forColumn: column, row: 0)),
                     description: "cell column \(column)"
                 )
             }
-            XCTAssertEqual(cells.map(accessibilityRole), Array(repeating: .cell, count: 4))
-            XCTAssertEqual(
-                cells.map { accessibilityString("AXIdentifier", of: $0) },
-                Array(repeating: nil, count: 4)
-            )
+            XCTAssertEqual(cells.map(accessibilityRole), Array(repeating: .cell, count: 6))
             XCTAssertEqual(cells.map { accessibilityString("AXDescription", of: $0) }, [
-                "地址",
-                "+0",
-                "+4",
-                "ASCII"
+                "Address", "0", "4", "8", "C", "ASCII"
             ])
-            XCTAssertEqual(
-                cells.map { accessibilityString("AXValue", of: $0) },
-                Array(repeating: nil, count: 4)
-            )
             cells.forEach { assertNonZeroAccessibilityFrame($0) }
 
-            assertAccessibilityOverrides(
-                in: controller,
-                identifier: "memory-table-row-0",
-                expected: ["AXIdentifier": "memory-table-row-0", "AXDescription": "内存行"]
-            )
             assertAccessibilityOverrides(
                 in: controller,
                 identifier: "memory-table-row-0-address",
                 expected: [
                     "AXIdentifier": "memory-table-row-0-address",
-                    "AXDescription": "地址",
+                    "AXDescription": "Address",
                     "AXValue": "0x00008000"
                 ]
             )
             assertAccessibilityOverrides(
                 in: controller,
-                identifier: "memory-table-row-0-byte-0",
+                identifier: "memory-table-row-0-word-0",
                 expected: [
-                    "AXIdentifier": "memory-table-row-0-byte-0",
-                    "AXDescription": "+0",
-                    "AXValue": "FC"
+                    "AXIdentifier": "memory-table-row-0-word-0",
+                    "AXDescription": "0",
+                    "AXValue": "数据不完整"
                 ]
             )
             assertAccessibilityOverrides(
                 in: controller,
-                identifier: "memory-table-row-0-byte-4",
+                identifier: "memory-table-row-0-word-1",
                 expected: [
-                    "AXIdentifier": "memory-table-row-0-byte-4",
-                    "AXDescription": "+4",
+                    "AXIdentifier": "memory-table-row-0-word-1",
+                    "AXDescription": "4",
                     "AXValue": "空"
                 ]
             )
@@ -168,43 +155,19 @@ final class MemoryHexTableTests: XCTestCase {
                 expected: [
                     "AXIdentifier": "memory-table-row-0-ascii",
                     "AXDescription": "ASCII",
-                    "AXValue": "....            "
+                    "AXValue": "...             "
                 ]
             )
-
-            let header = try accessibilityObject(
-                from: XCTUnwrap(accessibilityAttribute("AXHeader", of: table)),
-                description: "header container"
-            )
-            let headerValues = try rawAccessibilityObjects(
-                from: header,
-                attribute: "AXChildren"
-            )
-            let headers = try headerValues.enumerated().map { index, value in
-                try accessibilityObject(from: value, description: "header \(index)")
-            }
-            XCTAssertEqual(headers.map { accessibilityString("AXIdentifier", of: $0) }, [
-                "memory-table-header-address"
-            ] + (0..<16).map {
-                "memory-table-header-byte-\($0)"
-            } + [
-                "memory-table-header-ascii"
-            ])
-            headers.forEach { assertNonZeroAccessibilityFrame($0) }
-            let headerRecords = controller.accessibilityOverrideRecords
-                .filter { $0.key.hasPrefix("memory-table-header-") }
-            XCTAssertEqual(headerRecords.count, 18)
-            XCTAssertTrue(
-                headerRecords.values
-                    .flatMap { $0 }
-                    .allSatisfy(\.succeeded)
-            )
+            let cellRecords = controller.accessibilityOverrideRecords
+                .filter { $0.key.hasPrefix("memory-table-row-0-") }
+            XCTAssertEqual(cellRecords.count, 6)
+            XCTAssertTrue(cellRecords.values.flatMap { $0 }.allSatisfy(\.succeeded))
         }
     }
 
-    func testRowAccessibilityChildrenPathDecoratesAllSystemCellProxies() throws {
+    func testRowAccessibilityChildrenPathDecoratesExactlySixSystemCellProxies() throws {
         let controller = MemoryNativeTableController()
-        controller.update(rows: try formattedRows())
+        controller.update(rows: try formattedRows(contents: "010203"))
         XCTAssertTrue(controller.accessibilityOverrideRecords.isEmpty)
 
         try withWindow(contentView: controller.scrollView) {
@@ -216,10 +179,15 @@ final class MemoryHexTableTests: XCTestCase {
                 from: XCTUnwrap(rows.first),
                 description: "row"
             )
-            let cellValues = try rawAccessibilityObjects(
-                from: row,
-                attribute: "AXChildren"
+            XCTAssertEqual(accessibilityRole(of: row), .row)
+            assertNonZeroAccessibilityFrame(row)
+            assertAccessibilityOverrides(
+                in: controller,
+                identifier: "memory-table-row-0",
+                expected: ["AXIdentifier": "memory-table-row-0", "AXDescription": "内存行"]
             )
+
+            let cellValues = try rawAccessibilityObjects(from: row, attribute: "AXChildren")
             let cells = try cellValues.enumerated().map { column, value in
                 try accessibilityObject(
                     from: value,
@@ -227,105 +195,200 @@ final class MemoryHexTableTests: XCTestCase {
                 )
             }
 
-            XCTAssertEqual(cells.count, 18)
-            XCTAssertEqual(cells.map(accessibilityRole), Array(repeating: .cell, count: 18))
+            XCTAssertEqual(cells.count, 6)
+            XCTAssertEqual(cells.map(accessibilityRole), Array(repeating: .cell, count: 6))
             cells.forEach { assertNonZeroAccessibilityFrame($0) }
 
             let cellRecords = controller.accessibilityOverrideRecords
                 .filter { $0.key.hasPrefix("memory-table-row-0-") }
-            XCTAssertEqual(cellRecords.count, 18)
+            XCTAssertEqual(cellRecords.count, 6)
             XCTAssertTrue(cellRecords.values.flatMap { $0 }.allSatisfy(\.succeeded))
             assertAccessibilityOverrides(
                 in: controller,
-                identifier: "memory-table-row-0-byte-4",
+                identifier: "memory-table-row-0-word-0",
                 expected: [
-                    "AXIdentifier": "memory-table-row-0-byte-4",
-                    "AXDescription": "+4",
+                    "AXIdentifier": "memory-table-row-0-word-0",
+                    "AXDescription": "0",
+                    "AXValue": "数据不完整"
+                ]
+            )
+            assertAccessibilityOverrides(
+                in: controller,
+                identifier: "memory-table-row-0-word-1",
+                expected: [
+                    "AXIdentifier": "memory-table-row-0-word-1",
+                    "AXDescription": "4",
                     "AXValue": "空"
                 ]
             )
         }
     }
 
-    func testEmptyContentsResolveToEmptyState() {
-        XCTAssertEqual(
-            MemoryHexTableContent(blocks: [block(begin: "0x8000", contents: "")]),
-            .empty
-        )
+    func testHeaderAccessibilityProxyDecoratesExactlySixItems() throws {
+        let controller = MemoryNativeTableController()
+        controller.update(rows: try formattedRows())
+
+        try withWindow(contentView: controller.scrollView) {
+            let header = try accessibilityObject(
+                from: XCTUnwrap(accessibilityAttribute("AXHeader", of: controller.tableView)),
+                description: "header container"
+            )
+            let headerValues = try rawAccessibilityObjects(from: header, attribute: "AXChildren")
+            let headers = try headerValues.enumerated().map { index, value in
+                try accessibilityObject(from: value, description: "header \(index)")
+            }
+
+            XCTAssertEqual(headers.count, 6)
+            XCTAssertEqual(headers.map { accessibilityString("AXDescription", of: $0) }, [
+                "Address", "0", "4", "8", "C", "ASCII"
+            ])
+            headers.forEach { assertNonZeroAccessibilityFrame($0) }
+
+            let headerRecords = controller.accessibilityOverrideRecords
+                .filter { $0.key.hasPrefix("memory-table-header-") }
+            XCTAssertEqual(headerRecords.count, 6)
+            XCTAssertTrue(headerRecords.values.flatMap { $0 }.allSatisfy(\.succeeded))
+            XCTAssertEqual(
+                Set(headerRecords.keys),
+                Set(["memory-table-header-address"]
+                    + (0..<4).map { "memory-table-header-word-\($0)" }
+                    + ["memory-table-header-ascii"])
+            )
+        }
     }
 
-    func testMalformedContentsResolveToErrorState() {
-        let content = MemoryHexTableContent(
+    func testEmptyBlocksAndContentsResolveToSevenRowSkeletonAtDefaultBase() throws {
+        for blocks in [[], [block(begin: "0x8000", contents: "")]] {
+            let content = MemoryHexTableContent(blocks: blocks)
+            guard case .rows(let rows) = content else {
+                return XCTFail("Expected empty data to produce the fixed word-table skeleton")
+            }
+
+            XCTAssertEqual(rows.count, 7)
+            XCTAssertEqual(rows.map(\.addressText), [
+                "0x00008000", "0x00008010", "0x00008020", "0x00008030",
+                "0x00008040", "0x00008050", "0x00008060"
+            ])
+            XCTAssertTrue(rows.allSatisfy {
+                $0.wordTexts == Array(repeating: "", count: 4)
+                    && $0.wordAccessibilityValues == Array(repeating: "空", count: 4)
+                    && $0.asciiText == String(repeating: " ", count: 16)
+            })
+        }
+    }
+
+    func testCustomBaseAddressCreatesSevenRowsBeginningAtThatAddress() {
+        let content = MemoryHexTableContent(blocks: [], baseAddress: 0x9000)
+        guard case .rows(let rows) = content else {
+            return XCTFail("Expected custom base address to produce rows")
+        }
+        XCTAssertEqual(rows.first?.addressText, "0x00009000")
+        XCTAssertEqual(rows.last?.addressText, "0x00009060")
+    }
+
+    func testMalformedContentsAndOverflowingBaseResolveToErrorState() {
+        let malformed = MemoryHexTableContent(
             blocks: [block(begin: "0x8000", contents: "GG")]
         )
-
-        guard case .error(let message) = content else {
+        guard case .error(let malformedMessage) = malformed else {
             return XCTFail("Expected malformed contents to produce an error state")
         }
-        XCTAssertEqual(message, "内存块 0x8000 包含无效的十六进制数据。")
+        XCTAssertEqual(malformedMessage, "内存块 0x8000 包含无效的十六进制数据。")
+
+        let overflowing = MemoryHexTableContent(
+            blocks: [],
+            baseAddress: UInt64.max - UInt64(MemoryWindowLayout.byteCount - 2)
+        )
+        guard case .error(let overflowMessage) = overflowing else {
+            return XCTFail("Expected overflowing base to produce an error state")
+        }
+        XCTAssertEqual(
+            overflowMessage,
+            "内存块 \(UInt64.max - UInt64(MemoryWindowLayout.byteCount - 2)) 的地址范围超出 UInt64。"
+        )
     }
 
-    func testPublicWrapperHostsPopulatedNativeTableWithIdentifiersAndContents() throws {
+    func testPublicWrapperHostsPopulatedNativeWordTableWithCourseContents() throws {
         try withHostedMemoryHexTable(blocks: [
-            block(begin: "0x8000", contents: "fcfdeeff")
+            block(
+                begin: "0x8000",
+                contents: "fcfdeeff010000000200000003000000"
+            )
         ]) { hosting in
             let table = try XCTUnwrap(findView(
                 ofType: NSTableView.self,
                 identifier: "memory-table",
                 in: hosting
             ))
-            XCTAssertEqual(table.numberOfRows, 1)
-            XCTAssertEqual(table.tableColumns.count, 18)
+            XCTAssertEqual(table.numberOfRows, 7)
+            XCTAssertEqual(table.tableColumns.count, 6)
+            XCTAssertEqual(
+                table.tableColumns.map { $0.headerCell.stringValue },
+                ["Address", "0", "4", "8", "C", "ASCII"]
+            )
             XCTAssertEqual(
                 table.tableColumns.map { $0.headerCell.accessibilityIdentifier() },
                 ["memory-table-header-address"]
-                    + (0..<16).map { "memory-table-header-byte-\($0)" }
+                    + (0..<4).map { "memory-table-header-word-\($0)" }
                     + ["memory-table-header-ascii"]
             )
-
-            let rowView = try XCTUnwrap(table.rowView(atRow: 0, makeIfNecessary: true))
-            XCTAssertEqual(rowView.accessibilityIdentifier(), "memory-table-row-0")
-
-            let cells = try (0..<18).map { try cell(in: table, column: $0, row: 0) }
+            let cells = try (0..<6).map { try cell(in: table, column: $0, row: 0) }
             XCTAssertEqual(
                 cells.map { $0.accessibilityIdentifier() },
                 ["memory-table-row-0-address"]
-                    + (0..<16).map { "memory-table-row-0-byte-\($0)" }
+                    + (0..<4).map { "memory-table-row-0-word-\($0)" }
                     + ["memory-table-row-0-ascii"]
             )
             XCTAssertEqual(
                 cells.map { $0.textField?.stringValue },
-                ["0x00008000"]
-                    + ["FC", "FD", "EE", "FF"]
-                    + Array(repeating: " ", count: 12)
-                    + ["....            "]
+                [
+                    "0x00008000", "0xFFEEFDFC", "0x00000001",
+                    "0x00000002", "0x00000003", "................"
+                ]
             )
         }
     }
 
-    func testPublicWrapperHostsEmptyInputAndContentsAsNativeSecondaryPrompt() throws {
-        let emptyInputs: [[MIMemoryBlock]] = [
-            [],
-            [block(begin: "0x8000", contents: "")]
-        ]
-
-        for blocks in emptyInputs {
+    func testPublicWrapperHostsEmptyDataAsSevenRowsWithoutEmptyStatusView() throws {
+        for blocks in [[], [block(begin: "0x8000", contents: "")]] {
             try withHostedMemoryHexTable(blocks: blocks) { hosting in
-                let emptyLabel = try XCTUnwrap(findView(
+                let table = try XCTUnwrap(findView(
+                    ofType: NSTableView.self,
+                    identifier: "memory-table",
+                    in: hosting
+                ))
+                XCTAssertEqual(table.numberOfRows, 7)
+                XCTAssertNil(findView(
                     ofType: NSTextField.self,
                     identifier: "memory-table-empty",
                     in: hosting
                 ))
 
-                XCTAssertEqual(emptyLabel.stringValue, "输入地址和长度，然后在程序暂停时读取内存。")
-                XCTAssertEqual(emptyLabel.textColor, .secondaryLabelColor)
-                XCTAssertNotNil(findView(
-                    ofType: NSView.self,
-                    identifier: "memory-table",
-                    in: hosting
-                ))
-                XCTAssertNil(findView(ofType: NSTableView.self, in: hosting))
+                let firstCells = try (0..<6).map { try cell(in: table, column: $0, row: 0) }
+                XCTAssertEqual(firstCells.map { $0.textField?.stringValue }, [
+                    "0x00008000", " ", " ", " ", " ", String(repeating: " ", count: 16)
+                ])
+                let lastAddress = try cell(in: table, column: 0, row: 6)
+                XCTAssertEqual(lastAddress.textField?.stringValue, "0x00008060")
             }
+        }
+    }
+
+    func testPublicWrapperUsesCustomBaseAddress() throws {
+        try withHostedMemoryHexTable(blocks: [], baseAddress: 0x9000) { hosting in
+            let table = try XCTUnwrap(findView(
+                ofType: NSTableView.self,
+                identifier: "memory-table",
+                in: hosting
+            ))
+            XCTAssertEqual(
+                try cell(in: table, column: 0, row: 0).textField?.stringValue,
+                "0x00009000"
+            )
+            XCTAssertEqual(
+                try cell(in: table, column: 0, row: 6).textField?.stringValue,
+                "0x00009060"
+            )
         }
     }
 
@@ -356,10 +419,14 @@ final class MemoryHexTableTests: XCTestCase {
         }
     }
 
-    private func formattedRows() throws -> [MemoryTableRow] {
-        try MemoryTableFormatter.rows(from: [
-            block(begin: "0x8000", contents: "fcfdeeff")
-        ])
+    private func formattedRows(
+        baseAddress: UInt64 = MemoryWindowLayout.defaultAddress,
+        contents: String = "fcfdeeff010000000200000003000000"
+    ) throws -> [MemoryWordTableRow] {
+        try MemoryWordTableFormatter.rows(
+            from: [block(begin: "0x\(String(baseAddress, radix: 16))", contents: contents)],
+            baseAddress: baseAddress
+        )
     }
 
     private func block(begin: String, contents: String) -> MIMemoryBlock {
@@ -408,9 +475,13 @@ final class MemoryHexTableTests: XCTestCase {
 
     private func withHostedMemoryHexTable(
         blocks: [MIMemoryBlock],
+        baseAddress: UInt64 = MemoryWindowLayout.defaultAddress,
         operation: (NSView) throws -> Void
     ) throws {
-        let hosting = NSHostingView(rootView: MemoryHexTable(blocks: blocks).frame(
+        let hosting = NSHostingView(rootView: MemoryHexTable(
+            blocks: blocks,
+            baseAddress: baseAddress
+        ).frame(
             width: 800,
             height: 320
         ))

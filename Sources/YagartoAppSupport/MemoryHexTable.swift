@@ -6,19 +6,18 @@ import SwiftUI
 import YagartoCore
 
 enum MemoryHexTableContent: Equatable {
-    case empty
-    case rows([MemoryTableRow])
+    case rows([MemoryWordTableRow])
     case error(String)
 
-    init(blocks: [MIMemoryBlock]) {
-        guard !blocks.isEmpty else {
-            self = .empty
-            return
-        }
-
+    init(
+        blocks: [MIMemoryBlock],
+        baseAddress: UInt64 = MemoryWindowLayout.defaultAddress
+    ) {
         do {
-            let rows = try MemoryTableFormatter.rows(from: blocks)
-            self = rows.isEmpty ? .empty : .rows(rows)
+            self = .rows(try MemoryWordTableFormatter.rows(
+                from: blocks,
+                baseAddress: baseAddress
+            ))
         } catch {
             self = .error(error.localizedDescription)
         }
@@ -28,15 +27,16 @@ enum MemoryHexTableContent: Equatable {
 public struct MemoryHexTable: View {
     private let content: MemoryHexTableContent
 
-    public init(blocks: [MIMemoryBlock]) {
-        content = MemoryHexTableContent(blocks: blocks)
+    public init(
+        blocks: [MIMemoryBlock],
+        baseAddress: UInt64 = MemoryWindowLayout.defaultAddress
+    ) {
+        content = MemoryHexTableContent(blocks: blocks, baseAddress: baseAddress)
     }
 
     @ViewBuilder
     public var body: some View {
         switch content {
-        case .empty:
-            NativeMemoryStatus(content: .empty)
         case .rows(let rows):
             NativeMemoryTable(rows: rows)
         case .error(let message):
@@ -46,7 +46,6 @@ public struct MemoryHexTable: View {
 }
 
 private enum NativeMemoryStatusContent {
-    case empty
     case error(String)
 }
 
@@ -120,11 +119,6 @@ private final class MemoryNativeStatusView: NSView {
 
     func update(content: NativeMemoryStatusContent) {
         switch content {
-        case .empty:
-            warningIcon.isHidden = true
-            statusLabel.stringValue = "输入地址和长度，然后在程序暂停时读取内存。"
-            statusLabel.textColor = .secondaryLabelColor
-            statusLabel.setAccessibilityIdentifier("memory-table-empty")
         case .error(let message):
             warningIcon.isHidden = false
             warningIcon.contentTintColor = .systemOrange
@@ -138,7 +132,7 @@ private final class MemoryNativeStatusView: NSView {
 }
 
 private struct NativeMemoryTable: NSViewRepresentable {
-    let rows: [MemoryTableRow]
+    let rows: [MemoryWordTableRow]
 
     func makeCoordinator() -> MemoryNativeTableController {
         MemoryNativeTableController()
@@ -324,15 +318,15 @@ final class MemoryNativeTableController: NSObject, NSTableViewDataSource, NSTabl
     MemoryNativeTableAccessibilityProviding {
     private enum Column: Equatable {
         case address
-        case byte(Int)
+        case word(Int)
         case ascii
 
         var title: String {
             switch self {
             case .address:
-                return "地址"
-            case .byte(let index):
-                return "+\(String(index, radix: 16, uppercase: true))"
+                return "Address"
+            case .word(let index):
+                return String(index * 4, radix: 16, uppercase: true)
             case .ascii:
                 return "ASCII"
             }
@@ -342,8 +336,8 @@ final class MemoryNativeTableController: NSObject, NSTableViewDataSource, NSTabl
             switch self {
             case .address:
                 return NSUserInterfaceItemIdentifier("memory-address-column")
-            case .byte(let index):
-                return NSUserInterfaceItemIdentifier("memory-byte-column-\(index)")
+            case .word(let index):
+                return NSUserInterfaceItemIdentifier("memory-word-column-\(index)")
             case .ascii:
                 return NSUserInterfaceItemIdentifier("memory-ascii-column")
             }
@@ -353,8 +347,8 @@ final class MemoryNativeTableController: NSObject, NSTableViewDataSource, NSTabl
             switch self {
             case .address:
                 return "memory-table-header-address"
-            case .byte(let index):
-                return "memory-table-header-byte-\(index)"
+            case .word(let index):
+                return "memory-table-header-word-\(index)"
             case .ascii:
                 return "memory-table-header-ascii"
             }
@@ -364,8 +358,8 @@ final class MemoryNativeTableController: NSObject, NSTableViewDataSource, NSTabl
             switch self {
             case .address:
                 return 112
-            case .byte:
-                return 38
+            case .word:
+                return 112
             case .ascii:
                 return 152
             }
@@ -379,11 +373,11 @@ final class MemoryNativeTableController: NSObject, NSTableViewDataSource, NSTabl
         (tableView as? MemoryNativeTableView)?.accessibilityOverrideRecords ?? [:]
     }
 
-    private var rows: [MemoryTableRow] = []
+    private var rows: [MemoryWordTableRow] = []
     private let columns: [Column] = [
         .address
-    ] + (0..<16).map {
-        .byte($0)
+    ] + (0..<MemoryWindowLayout.wordsPerRow).map {
+        .word($0)
     } + [
         .ascii
     ]
@@ -397,7 +391,7 @@ final class MemoryNativeTableController: NSObject, NSTableViewDataSource, NSTabl
         configureScrollView()
     }
 
-    func update(rows: [MemoryTableRow]) {
+    func update(rows: [MemoryWordTableRow]) {
         guard rows != self.rows else { return }
         self.rows = rows
         (tableView as? MemoryNativeTableView)?.resetAccessibilityOverrideRecords()
@@ -495,14 +489,17 @@ final class MemoryNativeTableController: NSObject, NSTableViewDataSource, NSTabl
 
     private func cellPresentation(
         for column: Column,
-        row: MemoryTableRow
+        row: MemoryWordTableRow
     ) -> (text: String, accessibilityValue: String) {
         switch column {
         case .address:
             return (row.addressText, row.addressText)
-        case .byte(let index):
-            let text = row.byteTexts[index]
-            return text.isEmpty ? (" ", "空") : (text, text)
+        case .word(let index):
+            let text = row.wordTexts[index]
+            return (
+                text.isEmpty ? " " : text,
+                row.wordAccessibilityValues[index]
+            )
         case .ascii:
             return (row.asciiText, row.asciiText)
         }
@@ -513,8 +510,8 @@ final class MemoryNativeTableController: NSObject, NSTableViewDataSource, NSTabl
         switch column {
         case .address:
             return "\(prefix)-address"
-        case .byte(let index):
-            return "\(prefix)-byte-\(index)"
+        case .word(let index):
+            return "\(prefix)-word-\(index)"
         case .ascii:
             return "\(prefix)-ascii"
         }
