@@ -352,15 +352,15 @@ final class CoreServiceIntegrationTests: XCTestCase {
             overrides: [.gdb: fixture.script.path],
             environment: ProcessInfo.processInfo.environment,
             gdbSimulatorPath: fixture.script.path,
-            memoryRequestApplicator: { controller, request, isSessionActive in
+            memoryRequestApplicator: { controller, request, validity in
                 try await gate.apply(
                     request,
                     to: controller,
-                    ifSessionActive: isSessionActive
+                    validity: validity
                 )
             },
-            memoryReader: { controller, request in
-                try await gate.read(request, from: controller)
+            memoryReader: { controller, request, validity in
+                try await gate.read(request, from: controller, validity: validity)
             }
         )
         try await adapter.prepare(adapterBuild(for: fixture.directory))
@@ -397,15 +397,15 @@ final class CoreServiceIntegrationTests: XCTestCase {
             overrides: [.gdb: fixture.script.path],
             environment: ProcessInfo.processInfo.environment,
             gdbSimulatorPath: fixture.script.path,
-            memoryRequestApplicator: { controller, request, isSessionActive in
+            memoryRequestApplicator: { controller, request, validity in
                 try await gate.apply(
                     request,
                     to: controller,
-                    ifSessionActive: isSessionActive
+                    validity: validity
                 )
             },
-            memoryReader: { controller, request in
-                try await gate.read(request, from: controller)
+            memoryReader: { controller, request, validity in
+                try await gate.read(request, from: controller, validity: validity)
             }
         )
         try await adapter.prepare(adapterBuild(for: fixture.directory))
@@ -441,15 +441,15 @@ final class CoreServiceIntegrationTests: XCTestCase {
             overrides: [.gdb: fixture.script.path],
             environment: ProcessInfo.processInfo.environment,
             gdbSimulatorPath: fixture.script.path,
-            memoryRequestApplicator: { controller, request, isSessionActive in
+            memoryRequestApplicator: { controller, request, validity in
                 try await gate.apply(
                     request,
                     to: controller,
-                    ifSessionActive: isSessionActive
+                    validity: validity
                 )
             },
-            memoryReader: { controller, request in
-                try await gate.read(request, from: controller)
+            memoryReader: { controller, request, validity in
+                try await gate.read(request, from: controller, validity: validity)
             }
         )
         try await adapter.prepare(adapterBuild(for: fixture.directory))
@@ -486,15 +486,15 @@ final class CoreServiceIntegrationTests: XCTestCase {
             overrides: [.gdb: fixture.script.path],
             environment: ProcessInfo.processInfo.environment,
             gdbSimulatorPath: fixture.script.path,
-            memoryRequestApplicator: { controller, request, isSessionActive in
+            memoryRequestApplicator: { controller, request, validity in
                 try await gate.apply(
                     request,
                     to: controller,
-                    ifSessionActive: isSessionActive
+                    validity: validity
                 )
             },
-            memoryReader: { controller, request in
-                try await gate.read(request, from: controller)
+            memoryReader: { controller, request, validity in
+                try await gate.read(request, from: controller, validity: validity)
             }
         )
         try await adapter.prepare(adapterBuild(for: fixture.directory))
@@ -586,6 +586,80 @@ final class CoreServiceIntegrationTests: XCTestCase {
 
         let applied = await gate.appliedRequests()
         XCTAssertTrue(applied.isEmpty)
+    }
+
+    func testStopCancelsDirectReadAlreadyWaitingBeforeControllerSideEffects() async throws {
+        let fixture = try AdapterMIFixture()
+        let gate = ControlledAdapterMemoryIO()
+        let adapter = memoryControlledAdapter(fixture: fixture, gate: gate)
+        try await adapter.prepare(adapterBuild(for: fixture.directory))
+        _ = try await adapter.launch(mode: .debug, breakpoints: [])
+        await gate.clearAppliedRequests()
+        let request = DebugMemoryRequest(
+            address: "0xB000",
+            byteCount: 112,
+            observationID: UUID()
+        )
+        let observationID = try XCTUnwrap(request.observationID)
+        await gate.suspendRead(observationID)
+
+        let reading = Task { try await adapter.readMemory(request) }
+        await gate.waitUntilReadStarted(observationID)
+        try await adapter.stop()
+        await gate.resumeRead(observationID)
+        do {
+            _ = try await reading.value
+            XCTFail("expected the retired-session direct read to be cancelled")
+        } catch is CancellationError {
+            // Cancellation is the retired-session contract.
+        }
+
+        let applied = await gate.appliedRequests()
+        XCTAssertTrue(applied.isEmpty)
+        XCTAssertFalse(
+            try fixture.commands().contains("-data-read-memory-bytes 0xB000 112")
+        )
+    }
+
+    func testSessionReplacementCancelsOldDirectReadBeforeControllerSideEffects() async throws {
+        let fixture = try AdapterMIFixture()
+        let gate = ControlledAdapterMemoryIO()
+        let adapter = memoryControlledAdapter(fixture: fixture, gate: gate)
+        try await adapter.prepare(adapterBuild(for: fixture.directory))
+        _ = try await adapter.launch(mode: .debug, breakpoints: [])
+        await gate.clearAppliedRequests()
+        let request = DebugMemoryRequest(
+            address: "0xB000",
+            byteCount: 112,
+            observationID: UUID()
+        )
+        let observationID = try XCTUnwrap(request.observationID)
+        await gate.suspendRead(observationID)
+
+        let reading = Task { try await adapter.readMemory(request) }
+        await gate.waitUntilReadStarted(observationID)
+        let replacementEvents = await adapter.events()
+        _ = try await adapter.launch(mode: .debug, breakpoints: [])
+        _ = try await firstSnapshot(from: replacementEvents)
+        await gate.resumeRead(observationID)
+        do {
+            _ = try await reading.value
+            XCTFail("expected the retired-session direct read to be cancelled")
+        } catch is CancellationError {
+            // The replacement session remains active and owns the pending request.
+        }
+
+        let applied = await gate.appliedRequests()
+        XCTAssertEqual(applied, [request])
+        let validityIdentifiers = await gate.validityIdentifiers()
+        XCTAssertEqual(Set(validityIdentifiers).count, 2)
+        XCTAssertEqual(
+            try fixture.commands().filter {
+                $0 == "-data-read-memory-bytes 0xB000 112"
+            }.count,
+            1
+        )
+        try await adapter.stop()
     }
 
     func testStopCancelsReadFailureReconciliationAlreadyWaitingToApply() async throws {
@@ -698,15 +772,15 @@ private func memoryControlledAdapter(
         overrides: [.gdb: fixture.script.path],
         environment: ProcessInfo.processInfo.environment,
         gdbSimulatorPath: fixture.script.path,
-        memoryRequestApplicator: { controller, request, isSessionActive in
+        memoryRequestApplicator: { controller, request, validity in
             try await gate.apply(
                 request,
                 to: controller,
-                ifSessionActive: isSessionActive
+                validity: validity
             )
         },
-        memoryReader: { controller, request in
-            try await gate.read(request, from: controller)
+        memoryReader: { controller, request, validity in
+            try await gate.read(request, from: controller, validity: validity)
         }
     )
 }
@@ -746,12 +820,14 @@ private actor ControlledAdapterMemoryIO {
     private var failingReadBeforeApplyIDs: Set<UUID> = []
     private var failingReadIDs: Set<UUID> = []
     private var applied: [DebugMemoryRequest] = []
+    private var seenValidityIdentifiers: [ObjectIdentifier] = []
 
     func apply(
         _ request: DebugMemoryRequest,
         to controller: DebuggerController,
-        ifSessionActive isSessionActive: @escaping @Sendable () -> Bool
+        validity: DebugSessionValidity
     ) async throws {
+        seenValidityIdentifiers.append(ObjectIdentifier(validity))
         if let observationID = request.observationID,
            suspendedSetIDs.remove(observationID) != nil {
             await withCheckedContinuation { continuation in
@@ -765,7 +841,7 @@ private actor ControlledAdapterMemoryIO {
         }
         if try await controller.setMemoryRequest(
             request,
-            ifSessionActive: isSessionActive
+            validity: validity
         ) {
             applied.append(request)
         }
@@ -773,8 +849,10 @@ private actor ControlledAdapterMemoryIO {
 
     func read(
         _ request: DebugMemoryRequest,
-        from controller: DebuggerController
+        from controller: DebuggerController,
+        validity: DebugSessionValidity
     ) async throws -> [MIMemoryBlock] {
+        seenValidityIdentifiers.append(ObjectIdentifier(validity))
         if let observationID = request.observationID,
            suspendedReadIDs.remove(observationID) != nil {
             await withCheckedContinuation { continuation in
@@ -786,7 +864,7 @@ private actor ControlledAdapterMemoryIO {
            failingReadBeforeApplyIDs.remove(observationID) != nil {
             throw AdapterMITestError.forcedMemoryRead
         }
-        let blocks = try await controller.readMemory(request)
+        let blocks = try await controller.readMemory(request, validity: validity)
         applied.append(request)
         if let observationID = request.observationID,
            failingReadIDs.remove(observationID) != nil {
@@ -821,8 +899,12 @@ private actor ControlledAdapterMemoryIO {
         readContinuations.removeValue(forKey: observationID)?.resume()
     }
 
-    func clearAppliedRequests() { applied = [] }
+    func clearAppliedRequests() {
+        applied = []
+        seenValidityIdentifiers = []
+    }
     func appliedRequests() -> [DebugMemoryRequest] { applied }
+    func validityIdentifiers() -> [ObjectIdentifier] { seenValidityIdentifiers }
 }
 
 private func adapterBuild(for directory: URL) -> AppBuildResult {

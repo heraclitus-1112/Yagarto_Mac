@@ -235,34 +235,56 @@ public actor DebuggerController {
     }
 
     public func setMemoryRequest(_ request: DebugMemoryRequest) throws {
-        _ = try setMemoryRequest(request, ifSessionActive: { true })
+        try validate(request)
+        commitMemoryRequest(request)
     }
 
     @discardableResult
     package func setMemoryRequest(
         _ request: DebugMemoryRequest,
-        ifSessionActive isSessionActive: @Sendable () -> Bool
+        validity: DebugSessionValidity
     ) throws -> Bool {
         try validate(request)
-        guard isSessionActive() else { return false }
+        return validity.performIfActive { commitMemoryRequest(request) }
+    }
+
+    public func readMemory(_ request: DebugMemoryRequest) async throws -> [MIMemoryBlock] {
+        try requireState(.stopped, operation: "readMemory")
+        try setMemoryRequest(request)
+        return try await readCommittedMemory(request)
+    }
+
+    package func readMemory(
+        _ request: DebugMemoryRequest,
+        validity: DebugSessionValidity
+    ) async throws -> [MIMemoryBlock] {
+        try validate(request)
+        let committed = try validity.performIfActive {
+            try requireState(.stopped, operation: "readMemory")
+            commitMemoryRequest(request)
+        }
+        guard committed else { throw CancellationError() }
+        return try await readCommittedMemory(request)
+    }
+
+    private func commitMemoryRequest(_ request: DebugMemoryRequest) {
         memoryRequest = request
         memoryRequestRevision &+= 1
         guard machine.state == .stopped,
               let stoppedContext,
               isCurrent(stoppedContext.generation, session: stoppedContext.session) else {
-            return true
+            return
         }
         dispatchSnapshot(
             stopped: stoppedContext.record,
             session: stoppedContext.session,
             generation: stoppedContext.generation
         )
-        return true
     }
 
-    public func readMemory(_ request: DebugMemoryRequest) async throws -> [MIMemoryBlock] {
-        try requireState(.stopped, operation: "readMemory")
-        try setMemoryRequest(request)
+    private func readCommittedMemory(
+        _ request: DebugMemoryRequest
+    ) async throws -> [MIMemoryBlock] {
         let record = try await requiredSession().send(
             "-data-read-memory-bytes \(request.address) \(request.byteCount)"
         )

@@ -1,11 +1,57 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import Darwin
+import Dispatch
 import Foundation
 import XCTest
 @testable import YagartoCore
 
 final class DebuggerControllerTests: XCTestCase {
+    func testSessionValidityLetsCommitFinishBeforeConcurrentInvalidation() async {
+        let validity = DebugSessionValidity()
+        let commitEntered = DispatchSemaphore(value: 0)
+        let releaseCommit = DispatchSemaphore(value: 0)
+        let invalidationStarted = DispatchSemaphore(value: 0)
+        let invalidationFinished = DispatchSemaphore(value: 0)
+        let sideEffects = LockedTestCounter()
+
+        let commit = Task.detached {
+            validity.performIfActive {
+                commitEntered.signal()
+                releaseCommit.wait()
+                sideEffects.increment()
+            }
+        }
+        XCTAssertEqual(commitEntered.wait(timeout: .now() + 1), .success)
+        let invalidation = Task.detached {
+            validity.invalidate { invalidationStarted.signal() }
+            invalidationFinished.signal()
+        }
+        XCTAssertEqual(invalidationStarted.wait(timeout: .now() + 1), .success)
+
+        XCTAssertEqual(
+            invalidationFinished.wait(timeout: .now() + 0.05),
+            .timedOut,
+            "invalidation must wait for the in-flight atomic commit"
+        )
+        releaseCommit.signal()
+        let committed = await commit.value
+        XCTAssertTrue(committed)
+        await invalidation.value
+        XCTAssertEqual(sideEffects.value, 1)
+    }
+
+    func testSessionValidityRejectsCommitAfterInvalidationWins() async {
+        let validity = DebugSessionValidity()
+        let sideEffects = LockedTestCounter()
+
+        await Task.detached { validity.invalidate() }.value
+        let committed = validity.performIfActive { sideEffects.increment() }
+
+        XCTAssertFalse(committed)
+        XCTAssertEqual(sideEffects.value, 0)
+    }
+
     func testYagartoMemoryWindowUsesFixedDisplayRange() {
         XCTAssertEqual(
             DebugMemoryRequest.yagartoWindow,
@@ -183,6 +229,46 @@ final class DebuggerControllerTests: XCTestCase {
         XCTAssertEqual(direct.first?.begin.numeric, 0x9000)
         XCTAssertEqual(final.memory.first?.begin.numeric, 0x9000)
         XCTAssertEqual(final.memoryRequest, request)
+        try await controller.stop()
+    }
+
+    func testInvalidSessionValidityCancelsDirectReadWithoutChangingSnapshotRequest() async throws {
+        let fixture = try ControllerGDBFixture()
+        let controller = DebuggerController(plan: fixture.plan(
+            profile: .arm7tdmi,
+            backend: .qemuMPS2AN386
+        ))
+        try await controller.launch()
+        _ = try await waitForSnapshot(controller)
+        let validity = DebugSessionValidity()
+        validity.invalidate()
+        let request = DebugMemoryRequest(
+            address: "0xB000",
+            byteCount: 112,
+            observationID: UUID()
+        )
+
+        do {
+            _ = try await controller.readMemory(request, validity: validity)
+            XCTFail("expected invalid session read to be cancelled")
+        } catch is CancellationError {
+            // The invalid token must prevent every controller-side effect.
+        }
+
+        let events = await controller.events()
+        try await controller.run()
+        try await waitForState(.running, controller: controller)
+        try await controller.pause()
+        let nextSnapshot = try await firstSnapshot(from: events)
+        XCTAssertEqual(nextSnapshot.memoryRequest, .yagartoWindow)
+        let commands = try fixture.commands()
+        XCTAssertEqual(
+            commands.filter {
+                $0 == "-data-read-memory-bytes 0x8000 112"
+            }.count,
+            2
+        )
+        XCTAssertFalse(commands.contains("-data-read-memory-bytes 0xB000 112"))
         try await controller.stop()
     }
 
@@ -726,6 +812,23 @@ final class DebuggerControllerTests: XCTestCase {
         }
     }
 
+}
+
+private final class LockedTestCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+
+    var value: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return count
+    }
+
+    func increment() {
+        lock.lock()
+        count += 1
+        lock.unlock()
+    }
 }
 
 private enum ControllerTestError: Error {
