@@ -1088,6 +1088,54 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertNil(model.errorMessage)
     }
 
+    func testFailedNewerMemoryConfigurationRestoresConfirmedRequestAfterOlderCompletion() async throws {
+        let fixture = try ViewModelFixture()
+        let debug = FakeDebugService()
+        await debug.suspendMemoryConfiguration(for: "0x0000A000")
+        await debug.failMemoryConfiguration(for: "0x0000B000")
+        let model = AppViewModel(
+            documentService: FakeDocumentService(document: fixture.document),
+            buildService: FakeBuildService(result: fixture.buildResult),
+            debugService: debug
+        )
+        await model.open(fixture.document.sourceURL)
+        await model.build()
+
+        let configuringA = Task { await model.setMemoryWindowAddress("0xA000") }
+        await debug.waitUntilMemoryConfigurationStarted("0x0000A000")
+        let resultB = await model.setMemoryWindowAddress("0xB000")
+        await debug.finishMemoryConfiguration("0x0000A000")
+        let resultA = await configuringA.value
+
+        XCTAssertNil(resultB)
+        XCTAssertNil(resultA)
+        var configuredRequests = await debug.configuredRequests()
+        XCTAssertEqual(configuredRequests.last, .yagartoWindow)
+
+        await model.start(.debug)
+        configuredRequests = await debug.configuredRequests()
+        XCTAssertEqual(configuredRequests.last, .yagartoWindow)
+    }
+
+    func testSuccessfulMemoryWindowSubmissionClearsLocalMemoryWindowError() async throws {
+        let fixture = try ViewModelFixture()
+        let debug = FakeDebugService()
+        let model = AppViewModel(
+            documentService: FakeDocumentService(document: fixture.document),
+            buildService: FakeBuildService(result: fixture.buildResult),
+            debugService: debug
+        )
+        await model.open(fixture.document.sourceURL)
+        await model.build()
+        model.reportMemoryWindowError(MemoryTableFormattingError.invalidAddress("invalid"))
+        XCTAssertNotNil(model.errorMessage)
+
+        let normalized = await model.setMemoryWindowAddress("0x9000")
+
+        XCTAssertEqual(normalized, "0x00009000")
+        XCTAssertNil(model.errorMessage)
+    }
+
     func testLaunchFailureResetsDesiredMemoryRequestBeforeNextStart() async throws {
         let fixture = try ViewModelFixture()
         let debug = FakeDebugService()
@@ -1104,6 +1152,31 @@ final class AppViewModelTests: XCTestCase {
         await model.start(.debug)
         XCTAssertEqual(model.state, .ready)
         await debug.clearLaunchFailure()
+        await model.start(.debug)
+
+        let configuredRequests = await debug.configuredRequests()
+        XCTAssertEqual(configuredRequests.last, .yagartoWindow)
+    }
+
+    func testReadyEventBeforeLaunchThrowResetsDesiredMemoryRequestBeforeNextStart() async throws {
+        let fixture = try ViewModelFixture()
+        let debug = FakeDebugService()
+        let model = AppViewModel(
+            documentService: FakeDocumentService(document: fixture.document),
+            buildService: FakeBuildService(result: fixture.buildResult),
+            debugService: debug
+        )
+        await model.open(fixture.document.sourceURL)
+        await model.build()
+        _ = await model.setMemoryWindowAddress("0x9000")
+        await debug.failNextLaunchAfterReadyEvent()
+
+        let failedStart = Task { await model.start(.debug) }
+        await debug.waitUntilReadyLaunchFailureStarted()
+        await waitUntil { model.state == .ready }
+        await debug.finishReadyLaunchFailure()
+        await failedStart.value
+
         await model.start(.debug)
 
         let configuredRequests = await debug.configuredRequests()
@@ -2084,6 +2157,7 @@ private actor FakeDebugService: DebugServicing {
     private var configuredMemoryRequests: [DebugMemoryRequest] = []
     private var readMemoryRequests: [DebugMemoryRequest] = []
     private var suspendedMemoryConfigurations: Set<String> = []
+    private var failingMemoryConfigurations: Set<String> = []
     private var pendingMemoryConfigurations: [String: [CheckedContinuation<Void, any Error>]] = [:]
     private var memoryConfigurationStartCounts: [String: Int] = [:]
     private var memoryConfigurationStartWaiters: [String: [CheckedContinuation<Void, Never>]] = [:]
@@ -2104,6 +2178,10 @@ private actor FakeDebugService: DebugServicing {
     private var launchCount = 0
     private var stepSnapshot: DebugSnapshot?
     private var launchFailureSnapshot: DebugSnapshot?
+    private var shouldFailLaunchAfterReadyEvent = false
+    private var readyLaunchFailureStarted = false
+    private var readyLaunchFailureWaiters: [CheckedContinuation<Void, Never>] = []
+    private var pendingReadyLaunchFailure: CheckedContinuation<Void, Never>?
 
     init() {
         let pair = AsyncStream<DebuggerEvent>.makeStream()
@@ -2122,6 +2200,17 @@ private actor FakeDebugService: DebugServicing {
         if let launchFailureSnapshot {
             continuation.yield(.snapshot(launchFailureSnapshot))
             await Task.yield()
+            throw FakeFailure.launch
+        }
+        if shouldFailLaunchAfterReadyEvent {
+            shouldFailLaunchAfterReadyEvent = false
+            continuation.yield(.stateChanged(.ready))
+            await withCheckedContinuation { continuation in
+                pendingReadyLaunchFailure = continuation
+                readyLaunchFailureStarted = true
+                readyLaunchFailureWaiters.forEach { $0.resume() }
+                readyLaunchFailureWaiters.removeAll()
+            }
             throw FakeFailure.launch
         }
         if emitStoppedOnLaunch { continuation.yield(.stateChanged(.stopped)) }
@@ -2173,6 +2262,7 @@ private actor FakeDebugService: DebugServicing {
         } else {
             markMemoryConfigurationStarted(request.address)
         }
+        if failingMemoryConfigurations.remove(request.address) != nil { throw FakeFailure.memory }
     }
     func readMemory(_ request: DebugMemoryRequest) async throws -> [MIMemoryBlock] {
         readMemoryRequests.append(request)
@@ -2227,6 +2317,9 @@ private actor FakeDebugService: DebugServicing {
     func suspendMemoryConfiguration(for address: String) {
         suspendedMemoryConfigurations.insert(address)
     }
+    func failMemoryConfiguration(for address: String) {
+        failingMemoryConfigurations.insert(address)
+    }
     func waitUntilMemoryConfigurationStarted(_ address: String) async {
         if memoryConfigurationStartCounts[address, default: 0] > 0 { return }
         await withCheckedContinuation {
@@ -2272,6 +2365,16 @@ private actor FakeDebugService: DebugServicing {
         launchFailureSnapshot = snapshotBeforeFailure
     }
     func clearLaunchFailure() { launchFailureSnapshot = nil }
+    func failNextLaunchAfterReadyEvent() { shouldFailLaunchAfterReadyEvent = true }
+    func waitUntilReadyLaunchFailureStarted() async {
+        if readyLaunchFailureStarted { return }
+        await withCheckedContinuation { readyLaunchFailureWaiters.append($0) }
+    }
+    func finishReadyLaunchFailure() {
+        pendingReadyLaunchFailure?.resume()
+        pendingReadyLaunchFailure = nil
+        readyLaunchFailureStarted = false
+    }
 
     private func markMemoryReadStarted(_ address: String) {
         memoryReadStartCounts[address, default: 0] += 1

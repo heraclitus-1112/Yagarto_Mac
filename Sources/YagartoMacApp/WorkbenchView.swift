@@ -355,7 +355,7 @@ struct WorkbenchView: View {
             let submission = try memoryWindowControl.beginSubmission(candidate)
             startMemoryAddressSubmission(submission)
         } catch {
-            model.reportOperationError(error)
+            model.reportMemoryWindowError(error)
         }
     }
 
@@ -380,7 +380,7 @@ struct WorkbenchView: View {
             let submission = try memoryWindowControl.step(byRows: rowCount)
             startMemoryAddressSubmission(submission)
         } catch {
-            model.reportOperationError(error)
+            model.reportMemoryWindowError(error)
         }
     }
 

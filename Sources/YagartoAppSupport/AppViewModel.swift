@@ -48,6 +48,7 @@ public final class AppViewModel {
     private var openGeneration: UInt64 = 0
     private var memoryOperationGeneration: UInt64 = 0
     private var desiredMemoryRequest = DebugMemoryRequest.yagartoWindow
+    private var confirmedMemoryRequest = DebugMemoryRequest.yagartoWindow
     private var memoryErrorGeneration: UInt64?
 
     public init(
@@ -302,19 +303,25 @@ public final class AppViewModel {
             return nil
         }
 
-        let previousRequest = desiredMemoryRequest
         desiredMemoryRequest = request
         do {
             try await debugService.setMemoryRequest(request)
         } catch {
             guard isCurrentMemoryOperation(generation, state: operationState) else { return nil }
-            desiredMemoryRequest = previousRequest
+            let configurationError = error
+            desiredMemoryRequest = confirmedMemoryRequest
+            await reconcileDesiredMemoryRequest()
+            guard isCurrentMemoryOperation(generation, state: operationState) else { return nil }
             memory = []
-            presentMemoryError(error, generation: generation)
+            presentMemoryError(configurationError, generation: generation)
             return nil
         }
 
-        guard isCurrentMemoryOperation(generation, state: operationState) else { return nil }
+        guard isCurrentMemoryOperation(generation, state: operationState) else {
+            await reconcileDesiredMemoryRequest()
+            return nil
+        }
+        confirmedMemoryRequest = request
         guard state == .stopped else {
             memory = []
             clearMemoryError()
@@ -360,6 +367,10 @@ public final class AppViewModel {
 
     public func reportOperationError(_ error: Error) {
         present(error)
+    }
+
+    public func reportMemoryWindowError(_ error: Error) {
+        presentMemoryError(error, generation: memoryOperationGeneration)
     }
 
     public func close() async {
@@ -440,6 +451,7 @@ public final class AppViewModel {
                 retireStart()
                 breakpointIdentifiers = [:]
                 debugSessionGeneration &+= 1
+                resetDesiredMemoryRequest()
                 clearRuntimePresentation()
             }
         }
@@ -546,6 +558,19 @@ public final class AppViewModel {
 
     private func resetDesiredMemoryRequest() {
         desiredMemoryRequest = .yagartoWindow
+        confirmedMemoryRequest = .yagartoWindow
+    }
+
+    private func reconcileDesiredMemoryRequest() async {
+        while true {
+            let request = desiredMemoryRequest
+            do {
+                try await debugService.setMemoryRequest(request)
+            } catch {
+                return
+            }
+            if request == desiredMemoryRequest { return }
+        }
     }
 
     private func isCurrentMemoryOperation(
@@ -633,12 +658,12 @@ public final class AppViewModel {
         } catch {
             guard isCurrentStart(generation, session: session, document: document) else { return }
             if state == .launching {
-                resetDesiredMemoryRequest()
-                try? machine.apply(.launchFailed)
+                transitionFromDebugger(to: .ready)
+            } else {
+                breakpointIdentifiers = [:]
+                debugSessionGeneration &+= 1
+                clearRuntimePresentation()
             }
-            breakpointIdentifiers = [:]
-            debugSessionGeneration &+= 1
-            clearRuntimePresentation()
             present(error)
         }
     }

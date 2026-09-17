@@ -68,6 +68,30 @@ final class AppModelsTests: XCTestCase {
         XCTAssertEqual(state.confirmedBaseAddress, 0x9000)
     }
 
+    func testMemoryWindowControlEditInvalidatesPendingCompletion() throws {
+        var state = MemoryWindowControlState()
+        let pending = try state.beginSubmission("0x9000")
+
+        state.edit("0xA000")
+        state.completeSuccess(token: pending.token, normalized: pending.normalizedAddress)
+
+        XCTAssertEqual(state.editableAddressText, "0xA000")
+        XCTAssertEqual(state.displayedBaseAddress, 0x9000)
+        XCTAssertEqual(state.confirmedBaseAddress, MemoryWindowLayout.defaultAddress)
+    }
+
+    func testMemoryWindowControlInvalidSubmissionInvalidatesPendingCompletion() throws {
+        var state = MemoryWindowControlState()
+        let pending = try state.beginSubmission("0x9000")
+
+        XCTAssertThrowsError(try state.beginSubmission("invalid"))
+        state.completeSuccess(token: pending.token, normalized: pending.normalizedAddress)
+
+        XCTAssertEqual(state.editableAddressText, "0x00009000")
+        XCTAssertEqual(state.displayedBaseAddress, 0x9000)
+        XCTAssertEqual(state.confirmedBaseAddress, MemoryWindowLayout.defaultAddress)
+    }
+
     func testMemoryWindowControlResetInvalidatesOldSubmissionAndRestoresDefault() throws {
         var state = MemoryWindowControlState()
         let submission = try state.beginSubmission("0x9000")

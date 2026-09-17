@@ -251,13 +251,14 @@ public struct MemoryWindowControlState: Equatable, Sendable {
     public init() {}
 
     public mutating func edit(_ rawAddress: String) {
+        generation &+= 1
         editableAddressText = rawAddress
     }
 
     public mutating func beginSubmission(_ candidate: String) throws -> Submission {
+        generation &+= 1
         let normalized = try MemoryWindowAddress.normalized(candidate)
         let address = try MemoryWindowAddress.value(normalized)
-        generation &+= 1
         editableAddressText = normalized
         displayedAddressText = normalized
         displayedBaseAddress = address
