@@ -13,8 +13,11 @@ struct WorkbenchView: View {
     let defaultProjectProfile: ProfileID?
     let importInputsOverride: [URL]?
 
-    @State private var memoryAddress = "$sp"
-    @State private var memoryLength = "64"
+    @State private var memoryAddress = MemoryWindowLayout.defaultAddressText
+    @State private var committedMemoryAddress = MemoryWindowLayout.defaultAddress
+    @State private var committedMemoryAddressText = MemoryWindowLayout.defaultAddressText
+    @State private var memoryAddressRequestGeneration: UInt64 = 0
+    @State private var memoryAddressTask: Task<Void, Never>?
     @State private var presentedProjectSheet: ProjectSheet?
     @AppStorage("lastProjectParentPath") private var lastProjectParentPath = ""
     @AppStorage("lastProjectProfile") private var lastProjectProfile = ProfileID.arm7tdmi.rawValue
@@ -44,6 +47,15 @@ struct WorkbenchView: View {
         .onChange(of: model.document?.configuration.profile) { _, profile in
             if defaultProjectProfile == nil, let profile {
                 lastProjectProfile = profile.rawValue
+            }
+            resetMemoryWindow()
+        }
+        .onChange(of: model.document?.sourceURL) { _, _ in
+            resetMemoryWindow()
+        }
+        .onChange(of: model.state) { oldState, newState in
+            if newState == .ready, oldState == .launching || oldState == .terminating {
+                resetMemoryWindow()
             }
         }
     }
@@ -302,19 +314,77 @@ struct WorkbenchView: View {
 
     private var memoryPane: some View {
         VStack(spacing: 8) {
-            HStack {
-                TextField("地址，如 0x20001000 或 $sp", text: $memoryAddress)
+            HStack(spacing: 8) {
+                Text("Address")
+                    .fixedSize()
+                TextField(MemoryWindowLayout.defaultAddressText, text: $memoryAddress)
                     .font(.system(.body, design: .monospaced))
+                    .frame(minWidth: 130, idealWidth: 160, maxWidth: 220)
+                    .onSubmit { submitMemoryAddress(memoryAddress) }
+                    .accessibilityLabel("内存起始地址")
+                    .accessibilityHint("输入十六进制地址后按回车提交")
                     .accessibilityIdentifier("memory-address")
-                TextField("长度", text: $memoryLength)
-                    .frame(width: 80)
-                    .accessibilityIdentifier("memory-length")
-                Button("读取") { Task { await model.readMemory(address: memoryAddress, length: memoryLength) } }
-                    .disabled(model.state != .stopped)
-                    .accessibilityIdentifier("memory-read")
+                Stepper(
+                    "16 bytes",
+                    onIncrement: { stepMemoryAddress(byRows: 1) },
+                    onDecrement: { stepMemoryAddress(byRows: -1) }
+                )
+                .fixedSize()
+                .accessibilityLabel("内存地址步进，每次 16 字节")
+                .accessibilityHint("增加或减少一行内存地址")
+                .accessibilityIdentifier("memory-address-stepper")
+                Spacer(minLength: 12)
+                Text("Target is LITTLE endian")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .layoutPriority(1)
+                    .accessibilityIdentifier("memory-endianness")
             }
-            MemoryHexTable(blocks: model.memory)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            MemoryHexTable(blocks: model.memory, baseAddress: committedMemoryAddress)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+    }
+
+    private func submitMemoryAddress(_ candidate: String) {
+        memoryAddressRequestGeneration &+= 1
+        let generation = memoryAddressRequestGeneration
+        memoryAddressTask?.cancel()
+        memoryAddressTask = Task { @MainActor in
+            guard !Task.isCancelled else { return }
+            let normalized = await model.setMemoryWindowAddress(candidate)
+            guard !Task.isCancelled, generation == memoryAddressRequestGeneration else { return }
+            guard let normalized,
+                  let address = try? MemoryWindowAddress.value(normalized) else {
+                memoryAddress = committedMemoryAddressText
+                memoryAddressTask = nil
+                return
+            }
+            memoryAddress = normalized
+            committedMemoryAddress = address
+            committedMemoryAddressText = normalized
+            memoryAddressTask = nil
+        }
+    }
+
+    private func stepMemoryAddress(byRows rowCount: Int) {
+        let candidate: String
+        do {
+            candidate = try MemoryWindowAddress.stepped(committedMemoryAddressText, byRows: rowCount)
+        } catch {
+            candidate = rowCount < 0 ? "-0x10" : "0x10000000000000000"
+        }
+        submitMemoryAddress(candidate)
+    }
+
+    private func resetMemoryWindow() {
+        memoryAddressRequestGeneration &+= 1
+        memoryAddressTask?.cancel()
+        memoryAddressTask = nil
+        memoryAddress = MemoryWindowLayout.defaultAddressText
+        committedMemoryAddress = MemoryWindowLayout.defaultAddress
+        committedMemoryAddressText = MemoryWindowLayout.defaultAddressText
     }
 
     private var disassemblyPane: some View {

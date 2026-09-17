@@ -5,6 +5,48 @@ import XCTest
 @testable import YagartoAppSupport
 
 final class AccessibilityIdentifierContractTests: XCTestCase {
+    func testMemoryWindowUsesAutomaticAddressControls() throws {
+        let repository = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let workbench = try String(
+            contentsOf: repository.appendingPathComponent("Sources/YagartoMacApp/WorkbenchView.swift"),
+            encoding: .utf8
+        )
+
+        let requiredContracts = [
+            "@State private var memoryAddress = MemoryWindowLayout.defaultAddressText",
+            "@State private var committedMemoryAddress = MemoryWindowLayout.defaultAddress",
+            "Text(\"Address\")",
+            ".accessibilityIdentifier(\"memory-address\")",
+            ".accessibilityIdentifier(\"memory-address-stepper\")",
+            "Text(\"Target is LITTLE endian\")",
+            ".accessibilityIdentifier(\"memory-endianness\")",
+            ".onSubmit { submitMemoryAddress(memoryAddress) }",
+            "await model.setMemoryWindowAddress(candidate)",
+            "MemoryWindowAddress.stepped(committedMemoryAddressText, byRows: rowCount)",
+            "MemoryHexTable(blocks: model.memory, baseAddress: committedMemoryAddress)"
+        ]
+        for contract in requiredContracts {
+            XCTAssertTrue(workbench.contains(contract), "内存窗口缺少契约：\(contract)")
+        }
+
+        let removedContracts = [
+            "@State private var memoryLength",
+            ".accessibilityIdentifier(\"memory-length\")",
+            ".accessibilityIdentifier(\"memory-read\")",
+            "Button(\"读取\")"
+        ]
+        for contract in removedContracts {
+            XCTAssertFalse(workbench.contains(contract), "内存窗口仍包含旧契约：\(contract)")
+        }
+
+        XCTAssertTrue(workbench.contains(".accessibilityLabel(\"内存起始地址\")"))
+        XCTAssertTrue(workbench.contains(".accessibilityHint(\"输入十六进制地址后按回车提交\")"))
+        XCTAssertTrue(workbench.contains(".accessibilityLabel(\"内存地址步进，每次 16 字节\")"))
+    }
+
     func testStatusIdentifiersAreProducedAndQueriedIndependently() throws {
         let repository = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
