@@ -13,10 +13,7 @@ struct WorkbenchView: View {
     let defaultProjectProfile: ProfileID?
     let importInputsOverride: [URL]?
 
-    @State private var memoryAddress = MemoryWindowLayout.defaultAddressText
-    @State private var committedMemoryAddress = MemoryWindowLayout.defaultAddress
-    @State private var committedMemoryAddressText = MemoryWindowLayout.defaultAddressText
-    @State private var memoryAddressRequestGeneration: UInt64 = 0
+    @State private var memoryWindowControl = MemoryWindowControlState()
     @State private var memoryAddressTask: Task<Void, Never>?
     @State private var presentedProjectSheet: ProjectSheet?
     @AppStorage("lastProjectParentPath") private var lastProjectParentPath = ""
@@ -317,10 +314,16 @@ struct WorkbenchView: View {
             HStack(spacing: 8) {
                 Text("Address")
                     .fixedSize()
-                TextField(MemoryWindowLayout.defaultAddressText, text: $memoryAddress)
+                TextField(
+                    MemoryWindowLayout.defaultAddressText,
+                    text: Binding(
+                        get: { memoryWindowControl.editableAddressText },
+                        set: { memoryWindowControl.edit($0) }
+                    )
+                )
                     .font(.system(.body, design: .monospaced))
                     .frame(minWidth: 130, idealWidth: 160, maxWidth: 220)
-                    .onSubmit { submitMemoryAddress(memoryAddress) }
+                    .onSubmit { submitMemoryAddress(memoryWindowControl.editableAddressText) }
                     .accessibilityLabel("内存起始地址")
                     .accessibilityHint("输入十六进制地址后按回车提交")
                     .accessibilityIdentifier("memory-address")
@@ -342,49 +345,49 @@ struct WorkbenchView: View {
                     .accessibilityIdentifier("memory-endianness")
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            MemoryHexTable(blocks: model.memory, baseAddress: committedMemoryAddress)
+            MemoryHexTable(blocks: model.memory, baseAddress: memoryWindowControl.displayedBaseAddress)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 
     private func submitMemoryAddress(_ candidate: String) {
-        memoryAddressRequestGeneration &+= 1
-        let generation = memoryAddressRequestGeneration
+        do {
+            let submission = try memoryWindowControl.beginSubmission(candidate)
+            startMemoryAddressSubmission(submission)
+        } catch {
+            model.reportOperationError(error)
+        }
+    }
+
+    private func startMemoryAddressSubmission(_ submission: MemoryWindowControlState.Submission) {
         memoryAddressTask?.cancel()
+        let candidate = submission.normalizedAddress
         memoryAddressTask = Task { @MainActor in
             guard !Task.isCancelled else { return }
             let normalized = await model.setMemoryWindowAddress(candidate)
-            guard !Task.isCancelled, generation == memoryAddressRequestGeneration else { return }
-            guard let normalized,
-                  let address = try? MemoryWindowAddress.value(normalized) else {
-                memoryAddress = committedMemoryAddressText
-                memoryAddressTask = nil
-                return
+            guard !Task.isCancelled else { return }
+            if let normalized {
+                memoryWindowControl.completeSuccess(token: submission.token, normalized: normalized)
+            } else {
+                memoryWindowControl.completeFailure(token: submission.token)
             }
-            memoryAddress = normalized
-            committedMemoryAddress = address
-            committedMemoryAddressText = normalized
             memoryAddressTask = nil
         }
     }
 
     private func stepMemoryAddress(byRows rowCount: Int) {
-        let candidate: String
         do {
-            candidate = try MemoryWindowAddress.stepped(committedMemoryAddressText, byRows: rowCount)
+            let submission = try memoryWindowControl.step(byRows: rowCount)
+            startMemoryAddressSubmission(submission)
         } catch {
-            candidate = rowCount < 0 ? "-0x10" : "0x10000000000000000"
+            model.reportOperationError(error)
         }
-        submitMemoryAddress(candidate)
     }
 
     private func resetMemoryWindow() {
-        memoryAddressRequestGeneration &+= 1
         memoryAddressTask?.cancel()
         memoryAddressTask = nil
-        memoryAddress = MemoryWindowLayout.defaultAddressText
-        committedMemoryAddress = MemoryWindowLayout.defaultAddress
-        committedMemoryAddressText = MemoryWindowLayout.defaultAddressText
+        memoryWindowControl.reset()
     }
 
     private var disassemblyPane: some View {

@@ -5,6 +5,102 @@ import XCTest
 @testable import YagartoAppSupport
 
 final class AppModelsTests: XCTestCase {
+    func testMemoryWindowControlManualEditSubmissionAndSuccess() throws {
+        var state = MemoryWindowControlState()
+
+        state.edit("0x9000")
+        let submission = try state.beginSubmission(state.editableAddressText)
+
+        XCTAssertEqual(submission.normalizedAddress, "0x00009000")
+        XCTAssertEqual(state.editableAddressText, "0x00009000")
+        XCTAssertEqual(state.displayedBaseAddress, 0x9000)
+        XCTAssertEqual(state.confirmedBaseAddress, MemoryWindowLayout.defaultAddress)
+
+        state.completeSuccess(token: submission.token, normalized: submission.normalizedAddress)
+
+        XCTAssertEqual(state.confirmedBaseAddress, 0x9000)
+        XCTAssertEqual(state.displayedBaseAddress, 0x9000)
+        XCTAssertEqual(state.editableAddressText, "0x00009000")
+    }
+
+    func testMemoryWindowControlConsecutiveStepsUsePendingDisplayedBase() throws {
+        var state = MemoryWindowControlState()
+
+        let first = try state.step(byRows: 1)
+        let second = try state.step(byRows: 1)
+
+        XCTAssertEqual(first.normalizedAddress, "0x00008010")
+        XCTAssertEqual(second.normalizedAddress, "0x00008020")
+        XCTAssertNotEqual(first.token, second.token)
+        XCTAssertEqual(state.displayedBaseAddress, 0x8020)
+        XCTAssertEqual(state.confirmedBaseAddress, 0x8000)
+
+        state.completeSuccess(token: first.token, normalized: first.normalizedAddress)
+        XCTAssertEqual(state.confirmedBaseAddress, 0x8000)
+        XCTAssertEqual(state.displayedBaseAddress, 0x8020)
+
+        state.completeSuccess(token: second.token, normalized: second.normalizedAddress)
+        XCTAssertEqual(state.confirmedBaseAddress, 0x8020)
+    }
+
+    func testMemoryWindowControlCurrentFailureRollsBackConfirmedAddress() throws {
+        var state = MemoryWindowControlState()
+        let submission = try state.beginSubmission("0x9000")
+
+        state.completeFailure(token: submission.token)
+
+        XCTAssertEqual(state.editableAddressText, MemoryWindowLayout.defaultAddressText)
+        XCTAssertEqual(state.displayedBaseAddress, MemoryWindowLayout.defaultAddress)
+        XCTAssertEqual(state.confirmedBaseAddress, MemoryWindowLayout.defaultAddress)
+    }
+
+    func testMemoryWindowControlIgnoresMismatchedSuccessAddress() throws {
+        var state = MemoryWindowControlState()
+        let submission = try state.beginSubmission("0x9000")
+
+        state.completeSuccess(token: submission.token, normalized: "0xA000")
+
+        XCTAssertEqual(state.editableAddressText, "0x00009000")
+        XCTAssertEqual(state.displayedBaseAddress, 0x9000)
+        XCTAssertEqual(state.confirmedBaseAddress, MemoryWindowLayout.defaultAddress)
+
+        state.completeSuccess(token: submission.token, normalized: submission.normalizedAddress)
+        XCTAssertEqual(state.confirmedBaseAddress, 0x9000)
+    }
+
+    func testMemoryWindowControlResetInvalidatesOldSubmissionAndRestoresDefault() throws {
+        var state = MemoryWindowControlState()
+        let submission = try state.beginSubmission("0x9000")
+
+        state.reset()
+        state.completeSuccess(token: submission.token, normalized: submission.normalizedAddress)
+        state.completeFailure(token: submission.token)
+
+        XCTAssertEqual(state.editableAddressText, MemoryWindowLayout.defaultAddressText)
+        XCTAssertEqual(state.displayedBaseAddress, MemoryWindowLayout.defaultAddress)
+        XCTAssertEqual(state.confirmedBaseAddress, MemoryWindowLayout.defaultAddress)
+    }
+
+    func testMemoryWindowControlRejectsUnderflowAndOverflowWithoutMutation() throws {
+        var lower = MemoryWindowControlState()
+        let zero = try lower.beginSubmission("0x0")
+        lower.completeSuccess(token: zero.token, normalized: zero.normalizedAddress)
+
+        XCTAssertThrowsError(try lower.step(byRows: -1))
+        XCTAssertEqual(lower.editableAddressText, "0x00000000")
+        XCTAssertEqual(lower.displayedBaseAddress, 0)
+        XCTAssertEqual(lower.confirmedBaseAddress, 0)
+
+        var upper = MemoryWindowControlState()
+        let maximum = try upper.beginSubmission("0xFFFFFFFFFFFFFF90")
+        upper.completeSuccess(token: maximum.token, normalized: maximum.normalizedAddress)
+
+        XCTAssertThrowsError(try upper.step(byRows: 1))
+        XCTAssertEqual(upper.editableAddressText, "0xFFFFFFFFFFFFFF90")
+        XCTAssertEqual(upper.displayedBaseAddress, 0xFFFFFFFFFFFFFF90)
+        XCTAssertEqual(upper.confirmedBaseAddress, 0xFFFFFFFFFFFFFF90)
+    }
+
     func testGNUDiagnosticsMapFileLineColumnAndBoundOutput() {
         let project = URL(fileURLWithPath: "/tmp/中文 工程", isDirectory: true)
         let oversizedTail = String(repeating: "x", count: 2_000)

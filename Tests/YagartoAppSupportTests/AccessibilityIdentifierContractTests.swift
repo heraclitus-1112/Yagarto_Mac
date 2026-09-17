@@ -16,17 +16,17 @@ final class AccessibilityIdentifierContractTests: XCTestCase {
         )
 
         let requiredContracts = [
-            "@State private var memoryAddress = MemoryWindowLayout.defaultAddressText",
-            "@State private var committedMemoryAddress = MemoryWindowLayout.defaultAddress",
+            "@State private var memoryWindowControl = MemoryWindowControlState()",
             "Text(\"Address\")",
             ".accessibilityIdentifier(\"memory-address\")",
             ".accessibilityIdentifier(\"memory-address-stepper\")",
             "Text(\"Target is LITTLE endian\")",
             ".accessibilityIdentifier(\"memory-endianness\")",
-            ".onSubmit { submitMemoryAddress(memoryAddress) }",
+            ".onSubmit { submitMemoryAddress(memoryWindowControl.editableAddressText) }",
             "await model.setMemoryWindowAddress(candidate)",
-            "MemoryWindowAddress.stepped(committedMemoryAddressText, byRows: rowCount)",
-            "MemoryHexTable(blocks: model.memory, baseAddress: committedMemoryAddress)"
+            "memoryWindowControl.step(byRows: rowCount)",
+            "model.reportOperationError(error)",
+            "MemoryHexTable(blocks: model.memory, baseAddress: memoryWindowControl.displayedBaseAddress)"
         ]
         for contract in requiredContracts {
             XCTAssertTrue(workbench.contains(contract), "内存窗口缺少契约：\(contract)")
@@ -34,9 +34,14 @@ final class AccessibilityIdentifierContractTests: XCTestCase {
 
         let removedContracts = [
             "@State private var memoryLength",
+            "@State private var memoryAddress =",
+            "@State private var committedMemoryAddress",
+            "@State private var committedMemoryAddressText",
+            "@State private var memoryAddressRequestGeneration",
             ".accessibilityIdentifier(\"memory-length\")",
             ".accessibilityIdentifier(\"memory-read\")",
-            "Button(\"读取\")"
+            "Button(\"读取\")",
+            "candidate = rowCount < 0 ? \"-0x10\" : \"0x10000000000000000\""
         ]
         for contract in removedContracts {
             XCTAssertFalse(workbench.contains(contract), "内存窗口仍包含旧契约：\(contract)")

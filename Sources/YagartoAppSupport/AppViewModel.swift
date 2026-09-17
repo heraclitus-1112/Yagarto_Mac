@@ -286,31 +286,52 @@ public final class AppViewModel {
     public func setMemoryWindowAddress(_ rawAddress: String) async -> String? {
         let generation = beginMemoryOperation()
         let operationState = state
+        let normalized: String
+        let request: DebugMemoryRequest
         do {
-            let normalized = try MemoryWindowAddress.normalized(rawAddress)
-            let request = DebugMemoryRequest(
+            normalized = try MemoryWindowAddress.normalized(rawAddress)
+            request = DebugMemoryRequest(
                 address: normalized,
                 byteCount: MemoryWindowLayout.byteCount,
                 observationID: UUID()
             )
-            desiredMemoryRequest = request
-            try await debugService.setMemoryRequest(request)
+        } catch {
             guard isCurrentMemoryOperation(generation, state: operationState) else { return nil }
-            guard state == .stopped else {
-                memory = []
-                clearMemoryError()
-                return normalized
-            }
+            memory = []
+            presentMemoryError(error, generation: generation)
+            return nil
+        }
+
+        let previousRequest = desiredMemoryRequest
+        desiredMemoryRequest = request
+        do {
+            try await debugService.setMemoryRequest(request)
+        } catch {
+            guard isCurrentMemoryOperation(generation, state: operationState) else { return nil }
+            desiredMemoryRequest = previousRequest
+            memory = []
+            presentMemoryError(error, generation: generation)
+            return nil
+        }
+
+        guard isCurrentMemoryOperation(generation, state: operationState) else { return nil }
+        guard state == .stopped else {
+            memory = []
+            clearMemoryError()
+            return normalized
+        }
+
+        do {
             let blocks = try await debugService.readMemory(request)
             guard isCurrentMemoryOperation(generation, state: .stopped) else { return nil }
             memory = blocks
             clearMemoryError()
             return normalized
         } catch {
-            guard isCurrentMemoryOperation(generation, state: operationState) else { return nil }
+            guard isCurrentMemoryOperation(generation, state: .stopped) else { return nil }
             memory = []
             presentMemoryError(error, generation: generation)
-            return nil
+            return normalized
         }
     }
 
@@ -611,7 +632,10 @@ public final class AppViewModel {
             clearPresentedError()
         } catch {
             guard isCurrentStart(generation, session: session, document: document) else { return }
-            if state == .launching { try? machine.apply(.launchFailed) }
+            if state == .launching {
+                resetDesiredMemoryRequest()
+                try? machine.apply(.launchFailed)
+            }
             breakpointIdentifiers = [:]
             debugSessionGeneration &+= 1
             clearRuntimePresentation()

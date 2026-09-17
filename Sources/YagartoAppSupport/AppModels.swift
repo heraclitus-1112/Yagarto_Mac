@@ -235,6 +235,71 @@ public enum MemoryRequestValidator {
     }
 }
 
+public struct MemoryWindowControlState: Equatable, Sendable {
+    public struct Submission: Equatable, Sendable {
+        public let token: UInt64
+        public let normalizedAddress: String
+    }
+
+    public private(set) var editableAddressText = MemoryWindowLayout.defaultAddressText
+    public private(set) var displayedBaseAddress = MemoryWindowLayout.defaultAddress
+    public private(set) var confirmedBaseAddress = MemoryWindowLayout.defaultAddress
+    private var displayedAddressText = MemoryWindowLayout.defaultAddressText
+    private var confirmedAddressText = MemoryWindowLayout.defaultAddressText
+    private var generation: UInt64 = 0
+
+    public init() {}
+
+    public mutating func edit(_ rawAddress: String) {
+        editableAddressText = rawAddress
+    }
+
+    public mutating func beginSubmission(_ candidate: String) throws -> Submission {
+        let normalized = try MemoryWindowAddress.normalized(candidate)
+        let address = try MemoryWindowAddress.value(normalized)
+        generation &+= 1
+        editableAddressText = normalized
+        displayedAddressText = normalized
+        displayedBaseAddress = address
+        return Submission(token: generation, normalizedAddress: normalized)
+    }
+
+    public mutating func step(byRows rowCount: Int) throws -> Submission {
+        let normalized = try MemoryWindowAddress.stepped(displayedAddressText, byRows: rowCount)
+        return try beginSubmission(normalized)
+    }
+
+    public mutating func completeSuccess(token: UInt64, normalized: String) {
+        guard token == generation,
+              let canonical = try? MemoryWindowAddress.normalized(normalized),
+              canonical == displayedAddressText,
+              let address = try? MemoryWindowAddress.value(canonical) else { return }
+        generation &+= 1
+        editableAddressText = canonical
+        displayedAddressText = canonical
+        displayedBaseAddress = address
+        confirmedAddressText = canonical
+        confirmedBaseAddress = address
+    }
+
+    public mutating func completeFailure(token: UInt64) {
+        guard token == generation else { return }
+        generation &+= 1
+        editableAddressText = confirmedAddressText
+        displayedAddressText = confirmedAddressText
+        displayedBaseAddress = confirmedBaseAddress
+    }
+
+    public mutating func reset() {
+        generation &+= 1
+        editableAddressText = MemoryWindowLayout.defaultAddressText
+        displayedAddressText = MemoryWindowLayout.defaultAddressText
+        displayedBaseAddress = MemoryWindowLayout.defaultAddress
+        confirmedAddressText = MemoryWindowLayout.defaultAddressText
+        confirmedBaseAddress = MemoryWindowLayout.defaultAddress
+    }
+}
+
 public struct RegisterRow: Equatable, Identifiable, Sendable {
     public let name: String
     public let value: String

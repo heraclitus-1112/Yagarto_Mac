@@ -1053,10 +1053,11 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertTrue(readRequests.isEmpty)
     }
 
-    func testCurrentMemoryWindowReadFailureSurfacesChineseErrorAndReturnsNil() async throws {
+    func testCurrentMemoryWindowReadFailureKeepsConfiguredAddressForSnapshotRecovery() async throws {
         let fixture = try ViewModelFixture()
         let debug = FakeDebugService()
         let oldBlock = fixture.memoryBlock(begin: "0x8000", contents: "88")
+        let recoveredBlock = fixture.memoryBlock(begin: "0x9000", contents: "99")
         await debug.failMemoryRead(for: "0x00009000")
         let model = try await stoppedModel(fixture: fixture, debug: debug)
         await debug.emit(.snapshot(fixture.snapshot(
@@ -1068,10 +1069,45 @@ final class AppViewModelTests: XCTestCase {
         await waitUntil { model.memory == [oldBlock] }
 
         let normalized = await model.setMemoryWindowAddress("0x9000")
+        let readRequests = await debug.readRequests()
+        let request = try XCTUnwrap(readRequests.last)
 
-        XCTAssertNil(normalized)
+        XCTAssertEqual(normalized, "0x00009000")
         XCTAssertEqual(model.errorMessage, "测试内存读取失败。")
         XCTAssertTrue(model.memory.isEmpty)
+
+        await debug.emit(.snapshot(fixture.snapshot(
+            line: 2,
+            r0: 2,
+            memory: [recoveredBlock],
+            memoryRequest: request
+        )))
+        await waitUntil { model.memory == [recoveredBlock] }
+
+        XCTAssertEqual(model.memory, [recoveredBlock])
+        XCTAssertNil(model.errorMessage)
+    }
+
+    func testLaunchFailureResetsDesiredMemoryRequestBeforeNextStart() async throws {
+        let fixture = try ViewModelFixture()
+        let debug = FakeDebugService()
+        let model = AppViewModel(
+            documentService: FakeDocumentService(document: fixture.document),
+            buildService: FakeBuildService(result: fixture.buildResult),
+            debugService: debug
+        )
+        await model.open(fixture.document.sourceURL)
+        await model.build()
+        _ = await model.setMemoryWindowAddress("0x9000")
+        await debug.setLaunchFailure(snapshotBeforeFailure: fixture.snapshot(line: 1, r0: 1))
+
+        await model.start(.debug)
+        XCTAssertEqual(model.state, .ready)
+        await debug.clearLaunchFailure()
+        await model.start(.debug)
+
+        let configuredRequests = await debug.configuredRequests()
+        XCTAssertEqual(configuredRequests.last, .yagartoWindow)
     }
 
     func testMatchingSnapshotClearsPreviousMemoryError() async throws {
@@ -1313,7 +1349,7 @@ final class AppViewModelTests: XCTestCase {
         XCTAssertNotNil(requestA.observationID)
         XCTAssertNotNil(requestB.observationID)
         XCTAssertNotEqual(requestA.observationID, requestB.observationID)
-        XCTAssertNil(resultB)
+        XCTAssertEqual(resultB, "0x00009000")
         XCTAssertNil(resultA)
         XCTAssertTrue(model.memory.isEmpty)
         XCTAssertEqual(model.errorMessage, "测试内存读取失败。")
@@ -2235,6 +2271,7 @@ private actor FakeDebugService: DebugServicing {
     func setLaunchFailure(snapshotBeforeFailure: DebugSnapshot) {
         launchFailureSnapshot = snapshotBeforeFailure
     }
+    func clearLaunchFailure() { launchFailureSnapshot = nil }
 
     private func markMemoryReadStarted(_ address: String) {
         memoryReadStartCounts[address, default: 0] += 1
