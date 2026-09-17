@@ -148,38 +148,7 @@ export PATH="$HOME/Developer/Yagarto_Mac/.build/release:$PATH"
 yagarto-mac --version
 ```
 
-## 7. 将 App 安装到“应用程序”
-
-首次安装前确认目标位置还没有同名 App：
-
-```sh
-if [ -e /Applications/YagartoMacApp.app ]; then
-  echo "已存在旧版本，请先退出 App 并将旧版本移到废纸篓。"
-else
-  echo "目标位置可用，可以安装。"
-fi
-```
-
-看到“目标位置可用”后，复制完整 App：
-
-```sh
-sudo ditto "$HOME/Developer/Yagarto_Mac/dist/Release/YagartoMacApp.app" \
-  /Applications/YagartoMacApp.app
-open /Applications/YagartoMacApp.app
-```
-
-如果第一条检查发现已经存在旧版本，请先退出 YAGARTO Mac，在 Finder 的“应用程序”中把旧版本移到废纸篓，再执行复制命令。
-
-当前 App 没有 Developer ID 分发签名，也没有经过 Apple 公证。若 macOS 阻止首次打开：
-
-1. 在 Finder 中打开“应用程序”；
-2. 按住 Control 点击 `YagartoMacApp`，选择“打开”；
-3. 再次确认“打开”；
-4. 如果仍被阻止，进入“系统设置 → 隐私与安全性”，在对应提示旁选择“仍要打开”。
-
-不要全局关闭 Gatekeeper。
-
-## 8. 构建 ARM7 指令级 GDB simulator
+## 7. 构建 ARM7 指令级 GDB simulator（必做）
 
 Homebrew 的普通 `arm-none-eabi-gdb` 用于 QEMU 和 OpenOCD，但现代 GDB 已经移除了 ARM simulator。项目固定从 GNU 官方地址下载 GDB 15.2，并在编译前核对归档 SHA-256。
 
@@ -207,7 +176,9 @@ scripts/bootstrap-gdb-sim.sh --verify-gdb \
 
 App 和 CLI 会自动查找这个默认路径，不需要修改系统 GDB，也不需要手工设置环境变量。
 
-## 9. 用 doctor 做最终验收
+如果构建、自测或别名生成任一步失败，请停在这里排障；不要打开 App 进行 ARM7 调试，也不要把普通 `arm-none-eabi-gdb` 当作 simulator。
+
+## 8. 用 doctor 做安装门槛验收（必做）
 
 执行：
 
@@ -233,6 +204,39 @@ yagarto-mac doctor --format json > "$HOME/Desktop/yagarto-doctor.json"
 ```
 
 “工具已找到”只证明安装和能力探测通过，不代表真实 STM32 开发板已经连接或运行。
+
+上述任一项失败时停止安装流程并先完成排障。特别是 `Simulator GDB target sim` 不支持，或 `arm7tdmi` 没有选择 `gdb-simulator` 时，不要继续首次 ARM7 调试；否则 App 会进入 ARM926/QEMU 兼容回退模式。
+
+## 9. 将 App 安装到“应用程序”并首次打开
+
+首次安装前确认目标位置还没有同名 App：
+
+```sh
+if [ -e /Applications/YagartoMacApp.app ]; then
+  echo "已存在旧版本，请先退出 App 并将旧版本移到废纸篓。"
+else
+  echo "目标位置可用，可以安装。"
+fi
+```
+
+只有第 7 节 simulator 自测和第 8 节 `doctor` 验收均通过后，才复制并首次打开完整 App：
+
+```sh
+sudo ditto "$HOME/Developer/Yagarto_Mac/dist/Release/YagartoMacApp.app" \
+  /Applications/YagartoMacApp.app
+open /Applications/YagartoMacApp.app
+```
+
+如果第一条检查发现已经存在旧版本，请先退出 YAGARTO Mac，在 Finder 的“应用程序”中把旧版本移到废纸篓，再执行复制命令。
+
+当前 App 没有 Developer ID 分发签名，也没有经过 Apple 公证。若 macOS 阻止首次打开：
+
+1. 在 Finder 中打开“应用程序”；
+2. 按住 Control 点击 `YagartoMacApp`，选择“打开”；
+3. 再次确认“打开”；
+4. 如果仍被阻止，进入“系统设置 → 隐私与安全性”，在对应提示旁选择“仍要打开”。
+
+不要全局关闭 Gatekeeper。
 
 ## 10. 在 App 中完成第一个 ARM7 工程
 
@@ -327,7 +331,7 @@ sudo ditto "$HOME/Developer/Yagarto_Mac/dist/Release/YagartoMacApp.app" \
 open /Applications/YagartoMacApp.app
 ```
 
-先移走旧包再复制，避免 `ditto` 合并目录时残留旧版本独有资源。如果更新说明要求重新构建 GDB simulator，再重复第 8 节的构建命令；一般的 App 源码更新不需要重复编译 GDB。
+先移走旧包再复制，避免 `ditto` 合并目录时残留旧版本独有资源。如果更新说明要求重新构建 GDB simulator，再重复第 7 节的构建命令；一般的 App 源码更新不需要重复编译 GDB。
 
 ## 14. 卸载边界
 
@@ -387,7 +391,7 @@ brew reinstall qemu
 
 ### App 被 macOS 阻止
 
-使用第 7 节的“Control 点击 → 打开”或“系统设置 → 隐私与安全性 → 仍要打开”。不要关闭整个系统的 Gatekeeper。
+使用第 9 节的“Control 点击 → 打开”或“系统设置 → 隐私与安全性 → 仍要打开”。不要关闭整个系统的 Gatekeeper。
 
 ### STM32F4 无法连接
 

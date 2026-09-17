@@ -239,7 +239,7 @@ Expected: 当前 App 安装/打开章节位于 simulator 与 doctor 之前，且
 10. 在 App 中完成第一个 ARM7 工程
 ```
 
-在 simulator 与 doctor 章节明确失败即停止；从构建章节删除重复 PATH 段；更新“App 被 macOS 阻止”等交叉引用。
+在 simulator 与 doctor 章节明确失败即停止；保持 Release PATH 配置唯一；更新“App 被 macOS 阻止”等交叉引用。
 
 - [ ] **Step 4: 运行 GREEN 并提交**
 

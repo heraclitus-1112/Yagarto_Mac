@@ -36,7 +36,7 @@ ARM7 QEMU 仍使用 `-S -gdb stdio` 启动，并通过 GDB 管道管理生命周
 5. 只有验收通过后，才把 App 复制到 `/Applications` 并首次打开。
 6. 进行 ARM7、Cortex-M4 和 STM32F4 工具验证。
 
-文档明确 simulator 与 `doctor` 是“完整 ARM7 安装”的必做门槛。若 simulator 构建、自测或 `doctor` 验收失败，用户应停在当前步骤排障，不能继续首次 ARM7 调试。删除重复的 PATH 配置段，并更新交叉引用和常见问题编号。
+文档明确 simulator 与 `doctor` 是“完整 ARM7 安装”的必做门槛。若 simulator 构建、自测或 `doctor` 验收失败，用户应停在当前步骤排障，不能继续首次 ARM7 调试。更新交叉引用和常见问题编号，并用契约测试锁定 Release PATH 配置只出现一次。
 
 ## 测试与验收
 
