@@ -27,6 +27,10 @@ public final class AppViewModel {
     public private(set) var memory: [MIMemoryBlock] = []
     public private(set) var errorMessage: String?
     public private(set) var isProjectOperationInProgress = false
+    public private(set) var recentProjects: [RecentProject] = []
+    public private(set) var environmentCheckState: EnvironmentCheckState = .idle
+    public private(set) var isOnboardingPresented = false
+    public private(set) var firstSuccessProgress = FirstSuccessProgress()
     public var selectedRange: NSRange?
 
     private var machine = DebuggerStateMachine()
@@ -34,8 +38,12 @@ public final class AppViewModel {
     private let buildService: any BuildServicing
     private let debugService: any DebugServicing
     private let projectCreationService: any ProjectCreationServicing
+    private let recentProjectStore: (any RecentProjectStoring)?
+    private let environmentChecker: (any EnvironmentChecking)?
+    private let onboardingPreferenceStore: (any OnboardingPreferenceStoring)?
     private let stopTimeout: Duration
     private var breakpointIdentifiers: [BreakpointKey: String] = [:]
+    private var breakpointsBySource: [String: BreakpointLines] = [:]
     private var breakpointRequestGenerations: [BreakpointKey: UInt64] = [:]
     private var reconcilingBreakpoints: Set<BreakpointKey> = []
     private var debugSessionGeneration: UInt64 = 0
@@ -46,6 +54,8 @@ public final class AppViewModel {
     private var documentIdentifier: UUID?
     private var documentRevision: UInt64 = 0
     private var openGeneration: UInt64 = 0
+    private var sourceSelectionGeneration: UInt64 = 0
+    private var environmentCheckGeneration: UInt64 = 0
     private var memoryOperationGeneration: UInt64 = 0
     private var desiredMemoryRequest = DebugMemoryRequest.yagartoWindow
     private var confirmedMemoryRequest = DebugMemoryRequest.yagartoWindow
@@ -56,12 +66,18 @@ public final class AppViewModel {
         buildService: any BuildServicing,
         debugService: any DebugServicing,
         stopTimeout: Duration = .seconds(2),
-        projectCreationService: any ProjectCreationServicing = CoreProjectCreationService()
+        projectCreationService: any ProjectCreationServicing = CoreProjectCreationService(),
+        recentProjectStore: (any RecentProjectStoring)? = nil,
+        environmentChecker: (any EnvironmentChecking)? = nil,
+        onboardingPreferenceStore: (any OnboardingPreferenceStoring)? = nil
     ) {
         self.documentService = documentService
         self.buildService = buildService
         self.debugService = debugService
         self.projectCreationService = projectCreationService
+        self.recentProjectStore = recentProjectStore
+        self.environmentChecker = environmentChecker
+        self.onboardingPreferenceStore = onboardingPreferenceStore
         self.stopTimeout = stopTimeout
         observeDebuggerEvents()
     }
@@ -103,6 +119,7 @@ public final class AppViewModel {
             let openedDocument = try await documentService.open(url)
             guard generation == openGeneration else { return }
             install(openedDocument)
+            await recordRecentProject(openedDocument.projectDirectory)
         } catch {
             guard generation == openGeneration else { return }
             present(error)
@@ -123,6 +140,7 @@ public final class AppViewModel {
             let openedDocument = try await documentService.open(created.projectDirectory)
             guard generation == openGeneration else { return nil }
             install(openedDocument)
+            await recordRecentProject(openedDocument.projectDirectory)
             return created
         } catch {
             guard generation == openGeneration else { return nil }
@@ -140,13 +158,122 @@ public final class AppViewModel {
         return report
     }
 
+    public func refreshRecentProjects() async {
+        guard let recentProjectStore else {
+            recentProjects = []
+            return
+        }
+        recentProjects = await recentProjectStore.projects()
+    }
+
+    public func openRecentProject(_ project: RecentProject) async {
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(
+            atPath: project.canonicalPath,
+            isDirectory: &isDirectory
+        ), isDirectory.boolValue else {
+            if let recentProjectStore {
+                recentProjects = await recentProjectStore.remove(project.projectURL)
+            }
+            present(DocumentServiceError.sourceMissing(project.canonicalPath))
+            return
+        }
+        await open(project.projectURL)
+    }
+
+    public func clearRecentProjects() async {
+        await recentProjectStore?.clear()
+        recentProjects = []
+    }
+
+    public func prepareOnboarding() async {
+        guard environmentChecker != nil, let onboardingPreferenceStore else { return }
+        let preference = await onboardingPreferenceStore.state()
+        if preference.isCompleted {
+            firstSuccessProgress = FirstSuccessProgress(
+                completed: Set(FirstSuccessMilestone.allCases)
+            )
+        }
+        isOnboardingPresented = !preference.isDismissed && !preference.isCompleted
+        if isOnboardingPresented { await recheckEnvironment() }
+    }
+
+    public func presentOnboarding() async {
+        guard environmentChecker != nil else { return }
+        isOnboardingPresented = true
+        await recheckEnvironment()
+    }
+
+    public func dismissOnboarding() async {
+        isOnboardingPresented = false
+        await onboardingPreferenceStore?.setDismissed(true)
+    }
+
+    public func recheckEnvironment() async {
+        guard let environmentChecker else { return }
+        environmentCheckGeneration &+= 1
+        let generation = environmentCheckGeneration
+        environmentCheckState = .checking
+        let report = await environmentChecker.check()
+        guard generation == environmentCheckGeneration else { return }
+        environmentCheckState = .loaded(EnvironmentSummary(report: report))
+    }
+
+    public func recordFirstSuccess(_ milestone: FirstSuccessMilestone) async {
+        firstSuccessProgress.record(milestone)
+        if firstSuccessProgress.isComplete {
+            await onboardingPreferenceStore?.setCompleted(true)
+        }
+    }
+
+    private func recordRecentProject(_ projectDirectory: URL) async {
+        guard let recentProjectStore else { return }
+        recentProjects = await recentProjectStore.record(projectDirectory)
+    }
+
     public func edit(_ text: String) {
         guard isEnabled(.edit), let document else { return }
         let transform = LineEditTransform.between(oldText: document.text, newText: text)
         breakpoints = breakpoints.applying(transform)
+        breakpointsBySource[canonicalPath(document.sourceURL)] = breakpoints
         self.document = document.editing(text)
         documentRevision &+= 1
         latestBuild = nil
+    }
+
+    public func updateSelection(_ range: NSRange?) {
+        selectedRange = range
+        if let document {
+            self.document = document.updatingActiveSelection(range)
+        }
+    }
+
+    public var canSelectSource: Bool {
+        !isProjectOperationInProgress && (state == .idle || state == .ready || state == .stopped)
+    }
+
+    public func selectSource(_ relativePath: String) async {
+        guard canSelectSource, var document,
+              document.activeSourceRelativePath != relativePath else { return }
+        document = document.updatingActiveSelection(selectedRange)
+        self.document = document
+        breakpointsBySource[canonicalPath(document.sourceURL)] = breakpoints
+        sourceSelectionGeneration &+= 1
+        let generation = sourceSelectionGeneration
+        let identifier = documentIdentifier
+        do {
+            let selected = try await documentService.selectSource(relativePath, in: document)
+            guard generation == sourceSelectionGeneration,
+                  identifier == documentIdentifier else { return }
+            self.document = selected
+            breakpoints = breakpointsBySource[canonicalPath(selected.sourceURL)] ?? BreakpointLines()
+            selectedRange = selected.activeSelection
+            if state == .stopped { scheduleStoppedBreakpointReconciliation() }
+        } catch {
+            guard generation == sourceSelectionGeneration,
+                  identifier == documentIdentifier else { return }
+            present(error)
+        }
     }
 
     public func changeProfile(to profile: ProfileID) {
@@ -166,10 +293,14 @@ public final class AppViewModel {
         guard let document, document.isDirty, let version = currentDocumentVersion else { return }
         let snapshot = document
         do {
-            _ = try await documentService.save(snapshot)
+            let saved = try await documentService.save(snapshot)
             guard matchesDocument(version), let current = self.document else { return }
-            self.document = current.acknowledgingSave(of: snapshot)
+            self.document = current.acknowledgingSave(of: saved)
             clearPresentedError()
+        } catch let partial as WorkspacePartialSaveError {
+            guard matchesDocument(version), let current = self.document else { return }
+            self.document = current.acknowledgingSave(of: partial.document)
+            present(partial.failure)
         } catch {
             guard matchesDocument(version) else { return }
             present(error)
@@ -188,9 +319,15 @@ public final class AppViewModel {
             let buildDocument = currentDocument
             if buildDocument.isDirty {
                 let snapshot = buildDocument
-                _ = try await documentService.save(snapshot)
-                guard matchesDocument(version), let current = document else { return }
-                document = current.acknowledgingSave(of: snapshot)
+                do {
+                    let saved = try await documentService.save(snapshot)
+                    guard matchesDocument(version), let current = document else { return }
+                    document = current.acknowledgingSave(of: saved)
+                } catch let partial as WorkspacePartialSaveError {
+                    guard matchesDocument(version), let current = document else { return }
+                    document = current.acknowledgingSave(of: partial.document)
+                    throw partial.failure
+                }
             }
             let result = try await buildService.build(projectDirectory: buildDocument.projectDirectory)
             guard matchesDocument(version) else { return }
@@ -198,6 +335,7 @@ public final class AppViewModel {
             buildDiagnostics = result.diagnostics
             try machine.apply(.buildSucceeded)
             clearRuntimePresentation()
+            await recordFirstSuccess(.buildSucceeded)
         } catch {
             guard matchesDocument(version) else { return }
             if state == .building { try? machine.apply(.buildFailed) }
@@ -244,8 +382,16 @@ public final class AppViewModel {
     }
 
     public func pause() async { await performDebugCommand { try await debugService.pause() } }
-    public func stepInstruction() async { await performDebugCommand { try await debugService.stepInstruction() } }
-    public func stepOver() async { await performDebugCommand { try await debugService.stepOver() } }
+    public func stepInstruction() async {
+        if await performDebugCommand({ try await debugService.stepInstruction() }) {
+            await recordFirstSuccess(.stepped)
+        }
+    }
+    public func stepOver() async {
+        if await performDebugCommand({ try await debugService.stepOver() }) {
+            await recordFirstSuccess(.stepped)
+        }
+    }
     public func resume() async { await performDebugCommand { try await debugService.resume() } }
 
     public func stop() async {
@@ -357,6 +503,7 @@ public final class AppViewModel {
         guard line > 0, let document else { return }
         let key = BreakpointKey(canonicalPath: canonicalPath(document.sourceURL), line: line)
         breakpoints = breakpoints.toggling(line)
+        breakpointsBySource[key.canonicalPath] = breakpoints
         breakpointRequestGenerations[key, default: 0] &+= 1
         guard state == .stopped else { return }
         await reconcileBreakpoint(
@@ -374,6 +521,21 @@ public final class AppViewModel {
                   projectDirectory: document.projectDirectory
               ) else { return }
         selectedRange = diagnostic.sourceSelection(in: document.text)
+    }
+
+    public func activateDiagnostic(_ diagnostic: BuildDiagnostic) async {
+        guard let document else { return }
+        if let file = diagnostic.file,
+           let target = document.sourceBuffers.first(where: {
+               SourceLocationMatcher.matches(
+                   debuggerFile: file.path,
+                   documentURL: $0.sourceURL,
+                   projectDirectory: document.projectDirectory
+               )
+           }), target.relativePath != document.activeSourceRelativePath {
+            await selectSource(target.relativePath)
+        }
+        selectDiagnostic(diagnostic)
     }
 
     public func reportOperationError(_ error: Error) {
@@ -429,6 +591,7 @@ public final class AppViewModel {
             }
             console.replace(with: newSnapshot.console)
             debugDiagnostics.append(contentsOf: newSnapshot.diagnostics)
+            activateSnapshotSourceIfNeeded(newSnapshot)
         case .consoleAppended(let entry):
             console.append(entry)
         case .diagnostic(let diagnostic):
@@ -459,6 +622,9 @@ public final class AppViewModel {
             try? machine.apply(lifecycle)
             if newState == .stopped {
                 scheduleStoppedBreakpointReconciliation()
+                Task { @MainActor [weak self] in
+                    await self?.recordFirstSuccess(.debugStopped)
+                }
             }
             if newState == .running {
                 clearMemoryPresentation()
@@ -473,12 +639,15 @@ public final class AppViewModel {
         }
     }
 
-    private func performDebugCommand(_ operation: () async throws -> Void) async {
+    @discardableResult
+    private func performDebugCommand(_ operation: () async throws -> Void) async -> Bool {
         do {
             try await operation()
             clearPresentedError()
+            return true
         } catch {
             present(error)
+            return false
         }
     }
 
@@ -516,6 +685,9 @@ public final class AppViewModel {
         debugDiagnostics = []
         clearRuntimePresentation()
         breakpoints = BreakpointLines()
+        breakpointsBySource = Dictionary(uniqueKeysWithValues: openedDocument.sourceBuffers.map {
+            (canonicalPath($0.sourceURL), BreakpointLines())
+        })
         breakpointIdentifiers = [:]
         breakpointRequestGenerations = [:]
         reconcilingBreakpoints = []
@@ -524,6 +696,22 @@ public final class AppViewModel {
         clearPresentedError()
         machine = DebuggerStateMachine()
         selectedRange = nil
+        sourceSelectionGeneration &+= 1
+    }
+
+    private func activateSnapshotSourceIfNeeded(_ snapshot: DebugSnapshot) {
+        guard let document,
+              let debuggerFile = snapshot.location?.fullName ?? snapshot.location?.file,
+              let target = document.sourceBuffers.first(where: {
+                  SourceLocationMatcher.matches(
+                      debuggerFile: debuggerFile,
+                      documentURL: $0.sourceURL,
+                      projectDirectory: document.projectDirectory
+                  )
+              }), target.relativePath != document.activeSourceRelativePath else { return }
+        Task { @MainActor [weak self] in
+            await self?.selectSource(target.relativePath)
+        }
     }
 
     private func beginStopIfNeeded() {
@@ -550,6 +738,11 @@ public final class AppViewModel {
         clearRuntimePresentation()
         stopTask = nil
         if let error { presentGlobalMessage("停止调试器失败：\(error)") }
+        if error == nil {
+            Task { @MainActor [weak self] in
+                await self?.recordFirstSuccess(.returnedToReady)
+            }
+        }
     }
 
     private func clearRuntimePresentation() {
@@ -612,15 +805,27 @@ public final class AppViewModel {
                 document: document
             )
             guard isCurrentStart(generation, session: session, document: document) else { return }
-            let requests = breakpoints.lines.sorted().map {
-                DebugSourceBreakpoint(file: document.sourceURL, line: $0)
-            }
+            let requests = breakpointRequests(in: document)
             let result = try await debugService.launch(mode: mode, breakpoints: requests)
             guard isCurrentStart(generation, session: session, document: document) else { return }
-            let sourcePath = canonicalPath(document.sourceURL)
-            for (line, identifier) in result.breakpointIdentifiers {
+            let resolvedBindings: [DebugBreakpointBinding]
+            if result.breakpointBindings.isEmpty {
+                resolvedBindings = result.breakpointIdentifiers.compactMap { line, identifier in
+                    let matchingRequests = requests.filter { $0.line == line }
+                    guard matchingRequests.count == 1, let request = matchingRequests.first else {
+                        return nil
+                    }
+                    return DebugBreakpointBinding(breakpoint: request, identifier: identifier)
+                }
+            } else {
+                resolvedBindings = result.breakpointBindings
+            }
+            for binding in resolvedBindings {
                 guard isCurrentStart(generation, session: session, document: document) else { return }
-                let key = BreakpointKey(canonicalPath: sourcePath, line: line)
+                let request = binding.breakpoint
+                let line = request.line
+                let identifier = binding.identifier
+                let key = BreakpointKey(canonicalPath: canonicalPath(request.file), line: line)
                 if breakpointIsDesired(key) {
                     breakpointIdentifiers[key] = identifier
                 } else {
@@ -659,11 +864,15 @@ public final class AppViewModel {
                 try machine.apply(.inferiorRunning)
             }
             if state == .stopped {
-                for line in breakpoints.lines.sorted() {
-                    let key = BreakpointKey(canonicalPath: sourcePath, line: line)
+                await recordFirstSuccess(.debugStopped)
+                for request in requests {
+                    let key = BreakpointKey(
+                        canonicalPath: canonicalPath(request.file),
+                        line: request.line
+                    )
                     await reconcileBreakpoint(
                         key,
-                        sourceURL: document.sourceURL,
+                        sourceURL: request.file,
                         session: session
                     )
                     guard isCurrentStart(generation, session: session, document: document) else { return }
@@ -692,7 +901,7 @@ public final class AppViewModel {
         generation == startGeneration
             && session == debugSessionGeneration
             && documentIdentifier != nil
-            && canonicalPath(self.document?.sourceURL) == canonicalPath(document.sourceURL)
+            && canonicalPath(self.document?.projectDirectory) == canonicalPath(document.projectDirectory)
             && state != .ready
             && state != .terminating
     }
@@ -741,14 +950,14 @@ public final class AppViewModel {
 
         while state == .stopped,
               debugSessionGeneration == session,
-              canonicalPath(document?.sourceURL) == key.canonicalPath {
+              documentSourceURL(forCanonicalPath: key.canonicalPath) != nil {
             let desired = breakpointIsDesired(key)
             let remoteIdentifier = breakpointIdentifiers[key]
             if desired, remoteIdentifier == nil {
                 do {
                     let remote = try await debugService.setBreakpoint(file: sourceURL, line: key.line)
                     guard debugSessionGeneration == session,
-                          canonicalPath(document?.sourceURL) == key.canonicalPath else {
+                          documentSourceURL(forCanonicalPath: key.canonicalPath) != nil else {
                         return
                     }
                     if breakpointIsDesired(key) {
@@ -758,7 +967,7 @@ public final class AppViewModel {
                             try await debugService.removeBreakpoint(identifier: remote.id)
                         } catch {
                             guard debugSessionGeneration == session,
-                                  canonicalPath(document?.sourceURL) == key.canonicalPath else { return }
+                                  documentSourceURL(forCanonicalPath: key.canonicalPath) != nil else { return }
                             breakpointIdentifiers[key] = remote.id
                             setBreakpointDesired(true, for: key)
                             appendBreakpointDiagnostic(
@@ -776,7 +985,7 @@ public final class AppViewModel {
                     }
                 } catch {
                     guard debugSessionGeneration == session,
-                          canonicalPath(document?.sourceURL) == key.canonicalPath else { return }
+                          documentSourceURL(forCanonicalPath: key.canonicalPath) != nil else { return }
                     if breakpointIdentifiers[key] == nil, breakpointIsDesired(key) {
                         setBreakpointDesired(false, for: key)
                         appendBreakpointDiagnostic(
@@ -789,7 +998,7 @@ public final class AppViewModel {
                 do {
                     try await debugService.removeBreakpoint(identifier: remoteIdentifier)
                     guard debugSessionGeneration == session,
-                          canonicalPath(document?.sourceURL) == key.canonicalPath else { return }
+                          documentSourceURL(forCanonicalPath: key.canonicalPath) != nil else { return }
                     if breakpointIdentifiers[key] == remoteIdentifier {
                         breakpointIdentifiers[key] = nil
                     }
@@ -802,7 +1011,7 @@ public final class AppViewModel {
                     }
                 } catch {
                     guard debugSessionGeneration == session,
-                          canonicalPath(document?.sourceURL) == key.canonicalPath else { return }
+                          documentSourceURL(forCanonicalPath: key.canonicalPath) != nil else { return }
                     guard breakpointIdentifiers[key] == remoteIdentifier else { continue }
                     if !breakpointIsDesired(key) {
                         setBreakpointDesired(true, for: key)
@@ -820,18 +1029,19 @@ public final class AppViewModel {
 
     private func scheduleStoppedBreakpointReconciliation() {
         guard state == .stopped, startTask == nil, let document else { return }
-        let sourceURL = document.sourceURL
-        let sourcePath = canonicalPath(sourceURL)
         let session = debugSessionGeneration
-        let desiredKeys = breakpoints.lines.map { BreakpointKey(canonicalPath: sourcePath, line: $0) }
-        let knownRemoteKeys = breakpointIdentifiers.keys.filter { $0.canonicalPath == sourcePath }
-        let keys = Set(desiredKeys).union(knownRemoteKeys).sorted { $0.line < $1.line }
+        let desiredKeys = breakpointRequests(in: document).map {
+            BreakpointKey(canonicalPath: canonicalPath($0.file), line: $0.line)
+        }
+        let keys = Set(desiredKeys).union(breakpointIdentifiers.keys).sorted {
+            ($0.canonicalPath, $0.line) < ($1.canonicalPath, $1.line)
+        }
         Task { @MainActor [weak self] in
             guard let self else { return }
             for key in keys {
                 guard self.state == .stopped,
                       self.debugSessionGeneration == session,
-                      self.canonicalPath(self.document?.sourceURL) == sourcePath else { return }
+                      let sourceURL = self.documentSourceURL(forCanonicalPath: key.canonicalPath) else { return }
                 await self.reconcileBreakpoint(
                     key,
                     sourceURL: sourceURL,
@@ -842,15 +1052,33 @@ public final class AppViewModel {
     }
 
     private func breakpointIsDesired(_ key: BreakpointKey) -> Bool {
-        canonicalPath(document?.sourceURL) == key.canonicalPath && breakpoints.lines.contains(key.line)
+        breakpointsBySource[key.canonicalPath]?.lines.contains(key.line) == true
     }
 
     private func setBreakpointDesired(_ desired: Bool, for key: BreakpointKey) {
-        guard canonicalPath(document?.sourceURL) == key.canonicalPath else { return }
-        if breakpoints.lines.contains(key.line) != desired {
-            breakpoints = breakpoints.toggling(key.line)
+        guard documentSourceURL(forCanonicalPath: key.canonicalPath) != nil else { return }
+        var lines = breakpointsBySource[key.canonicalPath] ?? BreakpointLines()
+        if lines.lines.contains(key.line) != desired {
+            lines = lines.toggling(key.line)
+            breakpointsBySource[key.canonicalPath] = lines
+            if canonicalPath(document?.sourceURL) == key.canonicalPath {
+                breakpoints = lines
+            }
             breakpointRequestGenerations[key, default: 0] &+= 1
         }
+    }
+
+    private func breakpointRequests(in document: WorkspaceDocument) -> [DebugSourceBreakpoint] {
+        document.sourceBuffers.flatMap { source in
+            let path = canonicalPath(source.sourceURL)
+            return (breakpointsBySource[path] ?? BreakpointLines()).lines.sorted().map {
+                DebugSourceBreakpoint(file: source.sourceURL, line: $0)
+            }
+        }
+    }
+
+    private func documentSourceURL(forCanonicalPath path: String) -> URL? {
+        document?.sourceBuffers.first { canonicalPath($0.sourceURL) == path }?.sourceURL
     }
 
     private func appendBreakpointDiagnostic(line: Int, message: String) {

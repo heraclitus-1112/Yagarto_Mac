@@ -19,6 +19,8 @@ dist_directory="$project_root/dist/$configuration"
 derived_data="$project_root/DerivedData/YagartoMacApp-$configuration"
 app_path="$dist_directory/YagartoMacApp.app"
 build_log="$derived_data/xcodebuild.log"
+expected_marketing_version=$(plutil -extract CFBundleShortVersionString raw -o - "$project_root/App/Info.plist")
+expected_build_version=$(plutil -extract CFBundleVersion raw -o - "$project_root/App/Info.plist")
 mkdir -p "$dist_directory" "$derived_data"
 
 xcode_status=0
@@ -77,7 +79,8 @@ fi
 
 plutil -lint "$app_path/Contents/Info.plist" >/dev/null
 test "$(plutil -extract CFBundleIdentifier raw -o - "$app_path/Contents/Info.plist")" = "org.yagarto.mac.app"
-test "$(plutil -extract CFBundleShortVersionString raw -o - "$app_path/Contents/Info.plist")" = "0.5.0"
+test "$(plutil -extract CFBundleShortVersionString raw -o - "$app_path/Contents/Info.plist")" = "$expected_marketing_version"
+test "$(plutil -extract CFBundleVersion raw -o - "$app_path/Contents/Info.plist")" = "$expected_build_version"
 test -x "$app_path/Contents/MacOS/YagartoMacApp"
 if [ -f "$root_resource_bundle/arm7tdmi.ld" ]; then
   :

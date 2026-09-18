@@ -35,6 +35,9 @@ struct WorkbenchView: View {
         .sheet(item: $presentedProjectSheet) { sheet in
             projectSheet(sheet)
         }
+        .sheet(isPresented: onboardingPresentation) {
+            EnvironmentOnboardingView(model: model, openExample: openExample)
+        }
         .focusedSceneValue(\.newYagartoProjectAction, model.isEnabled(.newProject) ? {
             requestNewProject()
         } : nil)
@@ -55,6 +58,21 @@ struct WorkbenchView: View {
                 resetMemoryWindow()
             }
         }
+        .task {
+            await model.refreshRecentProjects()
+            await model.prepareOnboarding()
+        }
+    }
+
+    private var onboardingPresentation: Binding<Bool> {
+        Binding(
+            get: { model.isOnboardingPresented },
+            set: { presented in
+                if !presented {
+                    Task { await model.dismissOnboarding() }
+                }
+            }
+        )
     }
 
     private var statusStrip: some View {
@@ -98,6 +116,49 @@ struct WorkbenchView: View {
                     Button("打开示例", action: openExample)
                         .accessibilityIdentifier("open-example")
                 }
+            }
+            if !model.recentProjects.isEmpty {
+                Divider()
+                    .frame(maxWidth: 480)
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("最近工程")
+                        .font(.headline)
+                    ScrollView {
+                        LazyVStack(spacing: 0) {
+                            ForEach(model.recentProjects) { project in
+                                Button {
+                                    RecentProjectAction.open(project, for: model)
+                                } label: {
+                                    HStack {
+                                        Image(systemName: "clock.arrow.circlepath")
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(project.displayName)
+                                            Text(project.canonicalPath)
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                                .lineLimit(1)
+                                        }
+                                        Spacer()
+                                    }
+                                    .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                                    .contentShape(Rectangle())
+                                }
+                                .buttonStyle(.plain)
+                                .disabled(!model.isEnabled(.open))
+                                .accessibilityIdentifier("recent-project-\(project.displayName)")
+                                .accessibilityHint("打开此 YAGARTO 工程")
+                            }
+                        }
+                    }
+                    .frame(maxHeight: 220)
+                    Button("清除最近工程") {
+                        Task { await model.clearRecentProjects() }
+                    }
+                    .accessibilityIdentifier("clear-recent-projects")
+                }
+                .frame(maxWidth: 480)
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("recent-projects")
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -178,27 +239,13 @@ struct WorkbenchView: View {
     private func workbench(_ document: WorkspaceDocument) -> some View {
         VSplitView {
             HSplitView {
-                VStack(spacing: 0) {
-                    HStack {
-                        Text(document.sourceURL.lastPathComponent)
-                            .font(.caption.weight(.semibold))
-                        if document.isDirty { Text("已修改").font(.caption).foregroundStyle(.secondary) }
-                        Spacer()
-                    }
-                    .padding(.horizontal, 10)
-                    .frame(height: 30)
-                    .background(.bar)
-                    AssemblyEditorView(
-                        text: document.text,
-                        breakpoints: model.breakpoints.lines,
-                        currentLine: model.currentExecutionLine,
-                        selectionRequest: model.selectedRange,
-                        isEditable: model.isEnabled(.edit),
-                        onTextChange: { model.edit($0) },
-                        onToggleBreakpoint: { line in Task { await model.toggleBreakpoint(line: line) } }
-                    )
+                if document.sourceBuffers.count > 1 {
+                    sourceSidebar(document)
+                        .frame(minWidth: 180, idealWidth: 220, maxWidth: 280)
                 }
-                .frame(minWidth: 520)
+
+                editorPane(document)
+                    .frame(minWidth: 460)
 
                 registerPane(profile: document.configuration.profile)
                     .frame(minWidth: 230, idealWidth: 280, maxWidth: 360)
@@ -207,6 +254,86 @@ struct WorkbenchView: View {
 
             detailsPane
                 .frame(minHeight: 170, idealHeight: 240)
+        }
+    }
+
+    private func sourceSidebar(_ document: WorkspaceDocument) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("工程文件")
+                .font(.headline)
+                .padding(.horizontal, 10)
+                .frame(height: 34)
+            Divider()
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    ForEach(document.sourceBuffers) { source in
+                        let isActive = source.relativePath == document.activeSourceRelativePath
+                        Button {
+                            Task { await model.selectSource(source.relativePath) }
+                        } label: {
+                            HStack(spacing: 8) {
+                                Image(systemName: isActive ? "chevron.right" : "doc.plaintext")
+                                    .frame(width: 16)
+                                Text(source.relativePath)
+                                    .lineLimit(2)
+                                    .multilineTextAlignment(.leading)
+                                Spacer(minLength: 4)
+                                if source.isDirty {
+                                    Text("已修改")
+                                        .font(.caption2.weight(.semibold))
+                                }
+                            }
+                            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                            .padding(.horizontal, 10)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        .background(isActive ? Color.accentColor.opacity(0.12) : Color.clear)
+                        .disabled(isActive || !model.canSelectSource)
+                        .accessibilityIdentifier("source-row-\(source.relativePath)")
+                        .accessibilityLabel(sourceAccessibilityLabel(source, isActive: isActive))
+                        .accessibilityHint(isActive ? "当前正在显示的源码" : "切换到此源码")
+                        Divider()
+                    }
+                }
+            }
+        }
+        .background(Color(nsColor: .controlBackgroundColor))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("project-sources")
+    }
+
+    private func sourceAccessibilityLabel(
+        _ source: WorkspaceSourceBuffer,
+        isActive: Bool
+    ) -> String {
+        var parts = [source.relativePath]
+        if isActive { parts.append("当前文件") }
+        if source.isDirty { parts.append("已修改") }
+        return parts.joined(separator: "，")
+    }
+
+    private func editorPane(_ document: WorkspaceDocument) -> some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text(document.sourceURL.lastPathComponent)
+                    .font(.caption.weight(.semibold))
+                if document.isDirty { Text("已修改").font(.caption).foregroundStyle(.secondary) }
+                Spacer()
+            }
+            .padding(.horizontal, 10)
+            .frame(height: 30)
+            .background(.bar)
+            AssemblyEditorView(
+                text: document.text,
+                breakpoints: model.breakpoints.lines,
+                currentLine: model.currentExecutionLine,
+                selectionRequest: model.selectedRange,
+                isEditable: model.isEnabled(.edit),
+                onTextChange: { model.edit($0) },
+                onToggleBreakpoint: { line in Task { await model.toggleBreakpoint(line: line) } },
+                onSelectionChange: { model.updateSelection($0) }
+            )
         }
     }
 
@@ -281,7 +408,7 @@ struct WorkbenchView: View {
                 ScrollView {
                     ForEach(model.buildDiagnostics) { diagnostic in
                         Button {
-                            model.selectDiagnostic(diagnostic)
+                            Task { await model.activateDiagnostic(diagnostic) }
                         } label: {
                             Label(
                                 "\(diagnostic.line.map { "第 \($0) 行：" } ?? "")\(diagnostic.message)",
@@ -517,6 +644,16 @@ enum OpenProjectAction {
 }
 
 @MainActor
+enum RecentProjectAction {
+    static func open(_ project: RecentProject, for model: AppViewModel) {
+        Task { @MainActor in
+            guard await ProjectReplacementApproval.confirm(for: model) else { return }
+            await model.openRecentProject(project)
+        }
+    }
+}
+
+@MainActor
 enum ImportProjectAction {
     static func choose() -> [URL]? {
         let panel = NSOpenPanel()
@@ -536,9 +673,9 @@ enum ProjectReplacementApproval {
     static func confirm(for model: AppViewModel) async -> Bool {
         guard model.document?.isDirty == true else { return true }
         let alert = NSAlert()
-        alert.messageText = "源码尚未保存"
-        alert.informativeText = "切换工程前保存修改吗？"
-        alert.addButton(withTitle: "保存")
+        alert.messageText = "工程有未保存修改"
+        alert.informativeText = "切换工程前保存全部修改吗？"
+        alert.addButton(withTitle: "保存全部")
         alert.addButton(withTitle: "不保存")
         alert.addButton(withTitle: "取消")
         switch alert.runModal() {
@@ -550,6 +687,166 @@ enum ProjectReplacementApproval {
         default:
             return false
         }
+    }
+}
+
+@MainActor
+private struct EnvironmentOnboardingView: View {
+    @Bindable var model: AppViewModel
+    let openExample: (() -> Void)?
+
+    private let installCommand = "brew install arm-none-eabi-gcc arm-none-eabi-gdb qemu open-ocd"
+    private let guideURL = URL(
+        string: "https://github.com/heraclitus-1112/Yagarto_Mac/blob/main/docs/install-from-github.zh-CN.md"
+    )!
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("YAGARTO Mac 环境检查")
+                        .font(.title2.weight(.semibold))
+                    Text("只检查本机并提供可复制命令；不会自动安装软件或执行网络脚本。")
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button {
+                    Task { await model.recheckEnvironment() }
+                } label: {
+                    Label("重新检测", systemImage: "arrow.clockwise")
+                        .frame(minHeight: 44)
+                }
+                .accessibilityIdentifier("environment-recheck")
+            }
+
+            GroupBox("环境状态") {
+                environmentStatus
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            HStack {
+                Button {
+                    let pasteboard = NSPasteboard.general
+                    pasteboard.clearContents()
+                    pasteboard.setString(installCommand, forType: .string)
+                } label: {
+                    Label("复制 Homebrew 安装命令", systemImage: "doc.on.doc")
+                        .frame(minHeight: 44)
+                }
+                .accessibilityIdentifier("copy-install-command")
+
+                Button {
+                    NSWorkspace.shared.open(guideURL)
+                } label: {
+                    Label("打开完整安装文档", systemImage: "book")
+                        .frame(minHeight: 44)
+                }
+                .accessibilityIdentifier("environment-install-guide")
+            }
+
+            GroupBox("第一次成功") {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(FirstSuccessMilestone.allCases, id: \.self) { milestone in
+                        let completed = model.firstSuccessProgress.completed.contains(milestone)
+                        Label(
+                            milestone.label + (completed ? "，已完成" : "，未完成"),
+                            systemImage: completed ? "checkmark.circle.fill" : "circle"
+                        )
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            HStack {
+                Button("稍后再说") {
+                    Task { await model.dismissOnboarding() }
+                }
+                .frame(minHeight: 44)
+                .accessibilityIdentifier("onboarding-skip")
+
+                Spacer()
+
+                Button("打开 ARM7 示例并进入工作区") {
+                    openExample?()
+                    Task { await model.dismissOnboarding() }
+                }
+                .frame(minHeight: 44)
+                .disabled(openExample == nil)
+                .accessibilityIdentifier("onboarding-open-example")
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(24)
+        .frame(width: 720)
+        .frame(minHeight: 590)
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("environment-onboarding")
+    }
+
+    @ViewBuilder
+    private var environmentStatus: some View {
+        switch model.environmentCheckState {
+        case .idle:
+            Text("尚未检查")
+        case .checking:
+            HStack {
+                ProgressView()
+                Text("正在检查工具和后端能力…")
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("正在检查工具和后端能力")
+        case .loaded(let summary):
+            VStack(alignment: .leading, spacing: 10) {
+                statusRow(
+                    title: "ARM 构建工具",
+                    readiness: summary.buildToolsAvailable ? .ready : .unavailable,
+                    detail: summary.buildToolsAvailable ? "汇编、链接和反汇编工具已找到" : "缺少一个或多个必需构建工具"
+                )
+                statusRow(
+                    title: "ARM7TDMI",
+                    readiness: summary.arm7,
+                    detail: summary.arm7 == .compatible
+                        ? "ARM926 是兼容超集，不是精确 ARM7TDMI 模型"
+                        : "优先使用支持 target sim 的 GDB simulator"
+                )
+                statusRow(
+                    title: "Cortex-M4",
+                    readiness: summary.cortexM4,
+                    detail: "使用 QEMU mps2-an386，不模拟 STM32F407 全部外设"
+                )
+                statusRow(
+                    title: "STM32F4-Discovery",
+                    readiness: summary.stm32f4Discovery,
+                    detail: "这里只检查 GDB、OpenOCD 与板卡配置，不代表真板已连接"
+                )
+                let missing = summary.report.entries
+                    .filter { $0.required && !$0.available }
+                    .map { $0.tool.rawValue }
+                if !missing.isEmpty {
+                    Text("缺少：\(missing.joined(separator: "、"))")
+                        .font(.callout.weight(.semibold))
+                }
+            }
+        }
+    }
+
+    private func statusRow(
+        title: String,
+        readiness: EnvironmentProfileReadiness,
+        detail: String
+    ) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: readiness == .unavailable ? "xmark.circle" : "checkmark.circle")
+                .frame(width: 20)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("\(title)：\(readiness.label)")
+                    .font(.body.weight(.semibold))
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -571,6 +868,20 @@ struct WorkbenchCommands: Commands {
             Button("打开…") { OpenProjectAction.choose(for: model) }
                 .keyboardShortcut("o", modifiers: .command)
                 .disabled(!model.isEnabled(.open))
+            Menu("打开最近工程") {
+                ForEach(model.recentProjects) { project in
+                    Button(project.displayName) {
+                        RecentProjectAction.open(project, for: model)
+                    }
+                }
+                if !model.recentProjects.isEmpty {
+                    Divider()
+                    Button("清除最近工程") {
+                        Task { await model.clearRecentProjects() }
+                    }
+                }
+            }
+            .disabled(model.recentProjects.isEmpty || !model.isEnabled(.open))
         }
         CommandGroup(replacing: .saveItem) {
             Button("保存") { Task { await model.save() } }
@@ -603,6 +914,12 @@ struct WorkbenchCommands: Commands {
             Button("停止") { Task { await model.stop() } }
                 .keyboardShortcut(".", modifiers: [.command, .shift])
                 .disabled(!model.isEnabled(.stop))
+        }
+        CommandGroup(after: .help) {
+            Button("检查开发环境…") {
+                Task { await model.presentOnboarding() }
+            }
+            .keyboardShortcut("e", modifiers: [.command, .shift])
         }
     }
 }

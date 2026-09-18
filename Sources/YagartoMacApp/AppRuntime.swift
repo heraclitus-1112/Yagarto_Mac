@@ -54,19 +54,38 @@ struct AppRuntime {
             let recoveryScenario = process.arguments.contains {
                 $0 == "--ui-testing-recovery"
             }
-            let model = AppViewModel(
-                documentService: LocalDocumentService(),
-                buildService: UITestBuildService(),
-                debugService: UITestDebugService(recoveryScenario: recoveryScenario)
-            )
             do {
+                let fixture = try UITestFixture()
+                let onboardingMode: UITestEnvironmentChecker.Mode?
+                if process.arguments.contains("--ui-testing-onboarding-ready") {
+                    onboardingMode = .ready
+                } else if process.arguments.contains("--ui-testing-onboarding-missing") {
+                    onboardingMode = .missing
+                } else {
+                    onboardingMode = nil
+                }
+                let model = AppViewModel(
+                    documentService: LocalDocumentService(),
+                    buildService: UITestBuildService(),
+                    debugService: UITestDebugService(recoveryScenario: recoveryScenario),
+                    recentProjectStore: process.arguments.contains("--ui-testing-recent")
+                        ? UITestRecentProjectStore(project: fixture.directory) : nil,
+                    environmentChecker: onboardingMode.map(UITestEnvironmentChecker.init(mode:)),
+                    onboardingPreferenceStore: onboardingMode == nil
+                        ? nil : UITestOnboardingPreferenceStore()
+                )
                 return AppRuntime(
                     model: model,
                     isUITesting: true,
                     exampleInstaller: nil,
-                    uiFixture: try UITestFixture()
+                    uiFixture: fixture
                 )
             } catch {
+                let model = AppViewModel(
+                    documentService: LocalDocumentService(),
+                    buildService: UITestBuildService(),
+                    debugService: UITestDebugService(recoveryScenario: recoveryScenario)
+                )
                 model.reportOperationError(error)
                 return AppRuntime(
                     model: model,
@@ -102,7 +121,10 @@ struct AppRuntime {
         let model = AppViewModel(
             documentService: LocalDocumentService(),
             buildService: CoreBuildService(),
-            debugService: CoreDebugAdapter()
+            debugService: CoreDebugAdapter(),
+            recentProjectStore: UserDefaultsRecentProjectStore(),
+            environmentChecker: LocalEnvironmentChecker(),
+            onboardingPreferenceStore: UserDefaultsOnboardingPreferenceStore()
         )
 #if DEBUG
         return AppRuntime(
@@ -125,12 +147,15 @@ struct AppRuntime {
 #if DEBUG
             if let uiFixture {
                 await model.open(uiFixture.directory)
+                await model.recordFirstSuccess(.exampleOpened)
             } else if let exampleInstaller {
                 await model.open(try await exampleInstaller.install())
+                await model.recordFirstSuccess(.exampleOpened)
             }
 #else
             if let exampleInstaller {
                 await model.open(try await exampleInstaller.install())
+                await model.recordFirstSuccess(.exampleOpened)
             }
 #endif
         } catch {
@@ -162,12 +187,14 @@ private final class UITestFixture {
             let configuration = ProjectConfiguration(
                 profile: .arm7tdmi,
                 entry: "start",
-                sources: ["main.s"],
+                sources: ["main.s", "helper.s"],
                 outputName: "ui-fixture"
             )
             try ConfigStore(projectDirectory: directory).save(configuration)
             try Data("MOV r0, #1\nMOV r1, #2\n".utf8)
                 .write(to: directory.appendingPathComponent("main.s"), options: .atomic)
+            try Data("MOV r2, #3\n".utf8)
+                .write(to: directory.appendingPathComponent("helper.s"), options: .atomic)
             try Data(".global start\nstart:\n    b start\n".utf8)
                 .write(to: importSource, options: .atomic)
         } catch {
@@ -179,6 +206,89 @@ private final class UITestFixture {
     func cleanup() {
         _ = try? owner.cleanup()
     }
+}
+
+private struct UITestEnvironmentChecker: EnvironmentChecking {
+    enum Mode { case ready, missing }
+    let mode: Mode
+
+    func check() async -> DoctorReport {
+        let ready = mode == .ready
+        return DoctorReport(
+            entries: ToolIdentifier.allCases.map { tool in
+                DoctorEntry(
+                    tool: tool,
+                    required: tool.isRequired,
+                    path: ready || !tool.isRequired ? "/ui-tools/\(tool.rawValue)" : nil
+                )
+            },
+            normalGDB: DoctorGDBStatus(path: ready ? "/ui-tools/gdb" : nil, targetSimCapable: false),
+            simulatorGDB: DoctorGDBStatus(
+                path: ready ? "/ui-tools/gdb-sim" : nil,
+                targetSimCapable: ready
+            ),
+            debugSelections: [
+                DoctorDebugSelection(
+                    profile: .arm7tdmi,
+                    backend: ready ? .gdbSimulator : nil,
+                    gdbExecutable: ready ? "/ui-tools/gdb-sim" : nil,
+                    warnings: []
+                ),
+                DoctorDebugSelection(
+                    profile: .cortexM4,
+                    backend: ready ? .qemuMPS2AN386 : nil,
+                    gdbExecutable: ready ? "/ui-tools/gdb" : nil,
+                    warnings: []
+                ),
+                DoctorDebugSelection(
+                    profile: .stm32f4Discovery,
+                    backend: ready ? .openOCDSTM32F4Discovery : nil,
+                    gdbExecutable: ready ? "/ui-tools/gdb" : nil,
+                    warnings: []
+                )
+            ],
+            stm32f4BoardConfig: ready ? "/ui-tools/stm32f4discovery.cfg" : nil
+        )
+    }
+}
+
+private actor UITestOnboardingPreferenceStore: OnboardingPreferenceStoring {
+    private var preference = OnboardingPreferenceState()
+    func state() -> OnboardingPreferenceState { preference }
+    func setDismissed(_ value: Bool) {
+        preference = OnboardingPreferenceState(
+            isDismissed: value,
+            isCompleted: preference.isCompleted
+        )
+    }
+    func setCompleted(_ value: Bool) {
+        preference = OnboardingPreferenceState(
+            isDismissed: preference.isDismissed,
+            isCompleted: value
+        )
+    }
+}
+
+private actor UITestRecentProjectStore: RecentProjectStoring {
+    private var values: [RecentProject]
+
+    init(project: URL) {
+        values = [RecentProject(projectURL: project)]
+    }
+
+    func projects() -> [RecentProject] { values }
+    func record(_ projectURL: URL) -> [RecentProject] {
+        let project = RecentProject(projectURL: projectURL)
+        values.removeAll { $0.canonicalPath == project.canonicalPath }
+        values.insert(project, at: 0)
+        return values
+    }
+    func remove(_ projectURL: URL) -> [RecentProject] {
+        let path = RecentProject(projectURL: projectURL).canonicalPath
+        values.removeAll { $0.canonicalPath == path }
+        return values
+    }
+    func clear() { values = [] }
 }
 
 private actor UITestBuildService: BuildServicing {
@@ -245,7 +355,12 @@ private actor UITestDebugService: DebugServicing {
         }
         continuation.yield(.stateChanged(.stopped))
         continuation.yield(.snapshot(snapshot(line: 1, r0: 1)))
-        let identifiers = Dictionary(uniqueKeysWithValues: breakpoints.map { ($0.line, "\($0.line)") })
+        var identifiers: [Int: String] = [:]
+        let bindings = breakpoints.map { breakpoint in
+            let identifier = "\(breakpoint.file.lastPathComponent):\(breakpoint.line)"
+            identifiers[breakpoint.line] = identifier
+            return DebugBreakpointBinding(breakpoint: breakpoint, identifier: identifier)
+        }
         if recoveryScenario, launchAttempt == 2 {
             Task { [weak self] in
                 try? await Task.sleep(for: .milliseconds(150))
@@ -253,7 +368,10 @@ private actor UITestDebugService: DebugServicing {
             }
         }
         if mode == .run { continuation.yield(.stateChanged(.running)) }
-        return DebugLaunchResult(breakpointIdentifiers: identifiers)
+        return DebugLaunchResult(
+            breakpointIdentifiers: identifiers,
+            breakpointBindings: bindings
+        )
     }
 
     func pause() async throws { continuation.yield(.stateChanged(.stopped)) }

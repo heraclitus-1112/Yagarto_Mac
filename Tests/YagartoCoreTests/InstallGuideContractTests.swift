@@ -4,17 +4,25 @@ import Foundation
 import XCTest
 
 final class InstallGuideContractTests: XCTestCase {
-    func testSimulatorAndDoctorAreMandatoryBeforeFirstAppLaunch() throws {
+    func testSimulatorAndDoctorAreMandatoryBeforeFirstPreciseARM7Debug() throws {
         let guide = try String(contentsOf: guideURL, encoding: .utf8)
         let simulator = try index(of: "构建 ARM7 指令级 GDB simulator", in: guide)
         let doctor = try index(of: "用 doctor 做安装门槛验收", in: guide)
-        let install = try index(of: "将 App 安装到“应用程序”并首次打开", in: guide)
-        let firstLaunch = try index(of: "open /Applications/YagartoMacApp.app", in: guide)
+        let firstPreciseDebug = try index(of: "完成第一个精确 ARM7 工程", in: guide)
 
         XCTAssertLessThan(simulator, doctor)
-        XCTAssertLessThan(doctor, install)
-        XCTAssertLessThan(doctor, firstLaunch)
+        XCTAssertLessThan(doctor, firstPreciseDebug)
         XCTAssertTrue(guide.contains("Simulator GDB") && guide.contains("失败时停止"))
+    }
+
+    func testPrebuiltReleasePathDocumentsArchiveChecksumAndUnsignedBoundary() throws {
+        let guide = try String(contentsOf: guideURL, encoding: .utf8)
+        XCTAssertTrue(guide.contains("YagartoMacApp-0.6.0-macOS-arm64.zip"))
+        XCTAssertTrue(guide.contains("SHA256SUMS.txt"))
+        XCTAssertTrue(guide.contains("shasum -a 256 -c"))
+        XCTAssertTrue(guide.contains("不包含 CLI 或 ARM 工具链"))
+        XCTAssertTrue(guide.contains("未签名、未公证"))
+        XCTAssertTrue(guide.contains("不要全局关闭 Gatekeeper"))
     }
 
     func testReleasePATHConfigurationAppearsOnlyOnce() throws {

@@ -86,15 +86,28 @@ public struct DebugBreakpointSyncFailure: Equatable, Sendable {
     }
 }
 
+public struct DebugBreakpointBinding: Equatable, Sendable {
+    public let breakpoint: DebugSourceBreakpoint
+    public let identifier: String
+
+    public init(breakpoint: DebugSourceBreakpoint, identifier: String) {
+        self.breakpoint = breakpoint
+        self.identifier = identifier
+    }
+}
+
 public struct DebugLaunchResult: Equatable, Sendable {
     public let breakpointIdentifiers: [Int: String]
+    public let breakpointBindings: [DebugBreakpointBinding]
     public let failures: [DebugBreakpointSyncFailure]
 
     public init(
         breakpointIdentifiers: [Int: String] = [:],
+        breakpointBindings: [DebugBreakpointBinding] = [],
         failures: [DebugBreakpointSyncFailure] = []
     ) {
         self.breakpointIdentifiers = breakpointIdentifiers
+        self.breakpointBindings = breakpointBindings
         self.failures = failures
     }
 }

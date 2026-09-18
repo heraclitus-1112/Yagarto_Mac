@@ -376,6 +376,7 @@ public actor CoreDebugAdapter: DebugServicing {
         projectDirectory: URL
     ) async -> DebugLaunchResult {
         var identifiers: [Int: String] = [:]
+        var bindings: [DebugBreakpointBinding] = []
         var failures: [DebugBreakpointSyncFailure] = []
         for breakpoint in breakpoints.sorted(by: { $0.line < $1.line }) {
             do {
@@ -385,6 +386,10 @@ public actor CoreDebugAdapter: DebugServicing {
                 )
                 let remote = try await controller.setBreakpoint(location)
                 identifiers[breakpoint.line] = remote.id
+                bindings.append(DebugBreakpointBinding(
+                    breakpoint: breakpoint,
+                    identifier: remote.id
+                ))
             } catch {
                 failures.append(DebugBreakpointSyncFailure(
                     breakpoint: breakpoint,
@@ -394,6 +399,7 @@ public actor CoreDebugAdapter: DebugServicing {
         }
         return DebugLaunchResult(
             breakpointIdentifiers: identifiers,
+            breakpointBindings: bindings,
             failures: failures
         )
     }

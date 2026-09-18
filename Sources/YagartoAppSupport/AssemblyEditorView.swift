@@ -13,6 +13,7 @@ public struct AssemblyEditorView: NSViewRepresentable {
     private let isEditable: Bool
     private let onTextChange: @MainActor (String) -> Void
     private let onToggleBreakpoint: @MainActor (Int) -> Void
+    private let onSelectionChange: @MainActor (NSRange) -> Void
     private let scanOperation: AssemblySyntaxScanOperation
 
     public init(
@@ -22,7 +23,8 @@ public struct AssemblyEditorView: NSViewRepresentable {
         selectionRequest: NSRange?,
         isEditable: Bool,
         onTextChange: @escaping @MainActor (String) -> Void,
-        onToggleBreakpoint: @escaping @MainActor (Int) -> Void
+        onToggleBreakpoint: @escaping @MainActor (Int) -> Void,
+        onSelectionChange: @escaping @MainActor (NSRange) -> Void = { _ in }
     ) {
         self.init(
             text: text,
@@ -32,6 +34,7 @@ public struct AssemblyEditorView: NSViewRepresentable {
             isEditable: isEditable,
             onTextChange: onTextChange,
             onToggleBreakpoint: onToggleBreakpoint,
+            onSelectionChange: onSelectionChange,
             scanOperation: { source in
                 await AssemblySyntaxBackgroundScanner.scan(in: source).stylePlan
             }
@@ -46,6 +49,7 @@ public struct AssemblyEditorView: NSViewRepresentable {
         isEditable: Bool,
         onTextChange: @escaping @MainActor (String) -> Void,
         onToggleBreakpoint: @escaping @MainActor (Int) -> Void,
+        onSelectionChange: @escaping @MainActor (NSRange) -> Void = { _ in },
         scanOperation: @escaping AssemblySyntaxScanOperation
     ) {
         self.text = text
@@ -55,6 +59,7 @@ public struct AssemblyEditorView: NSViewRepresentable {
         self.isEditable = isEditable
         self.onTextChange = onTextChange
         self.onToggleBreakpoint = onToggleBreakpoint
+        self.onSelectionChange = onSelectionChange
         self.scanOperation = scanOperation
     }
 
@@ -158,6 +163,11 @@ public struct AssemblyEditorView: NSViewRepresentable {
             ruler?.needsDisplay = true
             pendingEditedRange = editedLineRange(in: textView)
             scheduleHighlight()
+        }
+
+        public func textViewDidChangeSelection(_ notification: Notification) {
+            guard let textView else { return }
+            parent.onSelectionChange(textView.selectedRange())
         }
 
         fileprivate func applyPresentation() {

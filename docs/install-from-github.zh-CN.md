@@ -1,8 +1,39 @@
 # 从 GitHub 下载、安装并使用 YAGARTO Mac
 
-本文面向一台尚未配置开发环境的 Apple Silicon Mac，按顺序安装 YAGARTO Mac 需要的全部软件，并完成 ARM7TDMI、Cortex-M4 和 STM32F4-Discovery 三种 profile 的验证。
+本文面向一台尚未配置开发环境的 Apple Silicon Mac。普通用户可以直接下载预构建 App；需要 CLI、修改源码或构建精确 ARM7 GDB simulator 时，再使用后面的完整源码流程。
 
-当前 GitHub 仓库提供源码，尚未提供预构建的 `.app`、DMG 或自动安装器。因此这里的“安装”是：从 GitHub 克隆源码，在本机生成 Release App，再复制到“应用程序”。
+预构建版本不包含 CLI 或 ARM 工具链，也没有 DMG 和自动更新。App 可以先用于查看示例和编辑源码；构建、仿真与真板调试仍需安装对应 profile 的外部工具。
+
+## 最快免费安装：下载预构建 App
+
+打开 [GitHub Releases](https://github.com/heraclitus-1112/Yagarto_Mac/releases)，在 `v0.6.0` 中下载：
+
+- `YagartoMacApp-0.6.0-macOS-arm64.zip`
+- `SHA256SUMS.txt`
+
+把两个文件放在同一目录，在“终端”进入该目录并核对下载内容：
+
+```sh
+shasum -a 256 -c SHA256SUMS.txt
+```
+
+必须看到 ZIP 后面的 `OK`。随后解压并安装：
+
+```sh
+ditto -x -k YagartoMacApp-0.6.0-macOS-arm64.zip .
+if [ -e /Applications/YagartoMacApp.app ]; then
+  echo "请先退出旧版本，并在 Finder 中将它移到废纸篓。"
+else
+  ditto YagartoMacApp.app /Applications/YagartoMacApp.app
+fi
+open /Applications/YagartoMacApp.app
+```
+
+Release App 未签名、未公证。若 macOS 阻止首次打开，请在 Finder 中按住 Control 点击 App 并选择“打开”；仍被阻止时，到“系统设置 → 隐私与安全性”选择“仍要打开”。不要全局关闭 Gatekeeper。
+
+首次启动的环境向导只检查本机、复制安装命令和打开本文，不会自行运行 Homebrew 或网络脚本。环境未完整时可以跳过，继续编辑源码；不可用的构建或调试能力会保持明确标记。
+
+若只需要最快的 ARM7 兼容运行路径，安装普通 ARM GNU 工具和 QEMU 后，App 可以明确使用 ARM926 兼容回退；它不是精确 ARM7TDMI。课程要求精确 ARM7 指令级行为时，继续完成第 4、5、7、8 节。
 
 ## 1. 确认电脑符合要求
 
@@ -13,14 +44,14 @@ uname -m
 sw_vers -productVersion
 ```
 
-当前从源码构建的要求：
+App 运行要求和从源码构建要求不同：
 
-- `uname -m` 输出 `arm64`；
-- macOS 不低于 26.2。
+- 预构建 App：`uname -m` 输出 `arm64`，macOS 不低于 15；
+- 从源码构建：`uname -m` 输出 `arm64`，macOS 不低于 26.2。
 
-App 包本身的部署目标是 macOS 15，但仓库使用 Swift 6.3。根据 [Apple 当前 Xcode 系统要求](https://developer.apple.com/support/xcode/)，包含 Swift 6.3 的 Xcode 26.5/26.6 需要 macOS 26.2 或更高版本。因此，“已经构建好的 App 能在 macOS 15 运行”不等于“macOS 15 能按本文从源码构建 App”。在 GitHub 尚无预构建 Release 的情况下，macOS 15 用户需要先升级系统。本指南不承诺 Intel Mac 能够构建或运行。
+App 包本身的部署目标是 macOS 15，但仓库使用 Swift 6.3。根据 [Apple 当前 Xcode 系统要求](https://developer.apple.com/support/xcode/)，包含 Swift 6.3 的 Xcode 26.5/26.6 需要 macOS 26.2 或更高版本。因此，“预构建 App 能在 macOS 15 运行”不等于“macOS 15 能从源码构建 App”。本指南不承诺 Intel Mac 能够构建或运行。
 
-## 2. 安装 Xcode 和 Swift 6.3
+## 2. 安装 Xcode 和 Swift 6.3（仅源码构建）
 
 从 Mac App Store 安装当前完整版本的 Xcode。首次安装后执行：
 
@@ -207,7 +238,7 @@ yagarto-mac doctor --format json > "$HOME/Desktop/yagarto-doctor.json"
 
 上述任一项失败时停止安装流程并先完成排障。特别是 `Simulator GDB target sim` 不支持，或 `arm7tdmi` 没有选择 `gdb-simulator` 时，不要继续首次 ARM7 调试；否则 App 会进入 ARM926/QEMU 兼容回退模式。
 
-## 9. 将 App 安装到“应用程序”并首次打开
+## 9. 安装源码构建的 App
 
 首次安装前确认目标位置还没有同名 App：
 
@@ -219,7 +250,7 @@ else
 fi
 ```
 
-只有第 7 节 simulator 自测和第 8 节 `doctor` 验收均通过后，才复制并首次打开完整 App：
+从源码构建 App 的用户可以复制本地产物；若已经使用顶部的预构建 ZIP 安装，则跳过本节：
 
 ```sh
 sudo ditto "$HOME/Developer/Yagarto_Mac/dist/Release/YagartoMacApp.app" \
@@ -238,7 +269,9 @@ open /Applications/YagartoMacApp.app
 
 不要全局关闭 Gatekeeper。
 
-## 10. 在 App 中完成第一个 ARM7 工程
+## 10. 在 App 中完成第一个精确 ARM7 工程
+
+开始本节前必须完成第 7 节 simulator 自测和第 8 节 `doctor` 验收；失败时停止，不要把 ARM926/QEMU 兼容回退写成精确 ARM7TDMI。
 
 1. 打开 `/Applications/YagartoMacApp.app`。
 2. 点击“新建工程…”，工程名填写 `arm7-first`。
@@ -303,6 +336,8 @@ yagarto-mac debug
 `flash --yes` 会真实改写开发板 Flash；项目故意要求显式确认。`debug` 只连接、复位和调试，不会代替烧录。
 
 ## 13. 更新到 GitHub 最新版本
+
+普通用户优先从 Releases 下载新 ZIP，核对新的 `SHA256SUMS.txt`，退出旧 App 并将旧包移到废纸篓后再完整复制。以下命令面向保留源码仓库的开发者。
 
 先退出 App，并确认仓库没有自己尚未提交的修改：
 

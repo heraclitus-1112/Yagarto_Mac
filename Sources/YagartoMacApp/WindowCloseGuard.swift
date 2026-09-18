@@ -85,9 +85,9 @@ struct WindowCloseGuard: NSViewRepresentable {
 
         private func confirmUnsavedBeforeClosing(_ window: NSWindow) -> Bool {
             let alert = NSAlert()
-            alert.messageText = "源码尚未保存"
-            alert.informativeText = "关闭窗口前保存修改吗？活动调试器也会被有界停止。"
-            alert.addButton(withTitle: "保存并关闭")
+            alert.messageText = "工程有未保存修改"
+            alert.informativeText = "关闭窗口前保存全部修改吗？活动调试器也会被有界停止。"
+            alert.addButton(withTitle: "保存全部并关闭")
             alert.addButton(withTitle: "不保存")
             alert.addButton(withTitle: "取消")
             switch alert.runModal() {

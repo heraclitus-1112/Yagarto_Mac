@@ -105,6 +105,91 @@ final class DocumentServiceTests: XCTestCase {
             XCTAssertEqual(error as? DocumentServiceError, .unsafeSymbolicLink(escapedSource.path))
         }
     }
+
+    func testProjectOpensConfiguredSourcesInOrderAndLoadsOnlyActiveSource() async throws {
+        let fixture = try AppTemporaryDirectory()
+        let first = try fixture.source(named: "first.s", bytes: Data("MOV r0, #1\n".utf8))
+        let second = try fixture.source(named: "second.s", bytes: Data("MOV r1, #2\n".utf8))
+        try ConfigStore(projectDirectory: fixture.url).save(ProjectConfiguration(
+            sources: ["first.s", "second.s"]
+        ))
+
+        let document = try await LocalDocumentService().open(fixture.url)
+
+        XCTAssertEqual(document.sourceBuffers.map(\.relativePath), ["first.s", "second.s"])
+        XCTAssertEqual(document.sourceBuffers.map(\.isLoaded), [true, false])
+        XCTAssertEqual(document.sourceURL, first.standardizedFileURL)
+        XCTAssertEqual(document.text, "MOV r0, #1\n")
+        XCTAssertEqual(document.sourceBuffers[1].sourceURL, second.standardizedFileURL)
+    }
+
+    func testSourceSelectionLoadsOnDemandAndPreservesIndependentDirtyBuffers() async throws {
+        let fixture = try AppTemporaryDirectory()
+        let first = try fixture.source(named: "first.s", bytes: Data("MOV r0, #1\n".utf8))
+        let second = try fixture.source(named: "second.s", bytes: Data("MOV r1, #2\n".utf8))
+        try ConfigStore(projectDirectory: fixture.url).save(ProjectConfiguration(
+            sources: ["first.s", "second.s"]
+        ))
+        let service = LocalDocumentService()
+        let opened = try await service.open(fixture.url)
+        let editedFirst = opened.editing("MOV r0, #10\n")
+
+        let selectedSecond = try await service.selectSource("second.s", in: editedFirst)
+        let editedSecond = selectedSecond.editing("MOV r1, #20\n")
+        let backToFirst = try await service.selectSource("first.s", in: editedSecond)
+
+        XCTAssertEqual(backToFirst.sourceURL, first.standardizedFileURL)
+        XCTAssertEqual(backToFirst.text, "MOV r0, #10\n")
+        XCTAssertEqual(backToFirst.sourceBuffers.map(\.isDirty), [true, true])
+
+        let saved = try await service.save(backToFirst)
+        XCTAssertFalse(saved.isDirty)
+        XCTAssertEqual(try String(contentsOf: first, encoding: .utf8), "MOV r0, #10\n")
+        XCTAssertEqual(try String(contentsOf: second, encoding: .utf8), "MOV r1, #20\n")
+    }
+
+    func testOpeningConfiguredSourceActivatesItWithinProject() async throws {
+        let fixture = try AppTemporaryDirectory()
+        _ = try fixture.source(named: "first.s", bytes: Data("MOV r0, #1\n".utf8))
+        let nestedDirectory = fixture.url.appendingPathComponent("nested", isDirectory: true)
+        try FileManager.default.createDirectory(at: nestedDirectory, withIntermediateDirectories: false)
+        let second = nestedDirectory.appendingPathComponent("second.S")
+        try Data("MOV r1, #2\n".utf8).write(to: second)
+        try ConfigStore(projectDirectory: fixture.url).save(ProjectConfiguration(
+            sources: ["first.s", "nested/second.S"]
+        ))
+
+        let document = try await LocalDocumentService().open(second)
+
+        XCTAssertEqual(document.projectDirectory, fixture.url.standardizedFileURL)
+        XCTAssertEqual(document.activeSourceRelativePath, "nested/second.S")
+        XCTAssertEqual(document.text, "MOV r1, #2\n")
+    }
+
+    func testPartialSaveReportsAcknowledgedBuffersAndLeavesLaterFailureDirty() async throws {
+        let fixture = try AppTemporaryDirectory()
+        let first = try fixture.source(named: "first.s", bytes: Data("MOV r0, #1\n".utf8))
+        let second = try fixture.source(named: "second.s", bytes: Data("MOV r1, #2\n".utf8))
+        let victim = try fixture.source(named: "victim.s", bytes: Data("SECRET\n".utf8))
+        try ConfigStore(projectDirectory: fixture.url).save(ProjectConfiguration(
+            sources: ["first.s", "second.s"]
+        ))
+        let service = LocalDocumentService()
+        var document = try await service.open(fixture.url).editing("MOV r0, #10\n")
+        document = try await service.selectSource("second.s", in: document)
+        document = document.editing("MOV r1, #20\n")
+        try FileManager.default.removeItem(at: second)
+        try FileManager.default.createSymbolicLink(at: second, withDestinationURL: victim)
+
+        do {
+            _ = try await service.save(document)
+            XCTFail("Expected partial save failure")
+        } catch let error as WorkspacePartialSaveError {
+            XCTAssertEqual(error.document.sourceBuffers.map(\.isDirty), [false, true])
+            XCTAssertEqual(try String(contentsOf: first, encoding: .utf8), "MOV r0, #10\n")
+            XCTAssertEqual(try String(contentsOf: victim, encoding: .utf8), "SECRET\n")
+        }
+    }
 }
 
 private struct AppTemporaryDirectory {

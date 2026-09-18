@@ -38,9 +38,12 @@ struct YagartoMacApp: App {
             WorkbenchCommands(model: model)
             CommandGroup(replacing: .appInfo) {
                 Button("关于 YAGARTO Mac") {
+                    let version = Bundle.main.object(
+                        forInfoDictionaryKey: "CFBundleShortVersionString"
+                    ) as? String ?? "0.6.0"
                     NSApp.orderFrontStandardAboutPanel(options: [
                         .applicationName: "YAGARTO Mac",
-                        .applicationVersion: "0.5.0",
+                        .applicationVersion: version,
                         .credits: NSAttributedString(
                             string: "非官方 YAGARTO 兼容实现\nGNU GPL-3.0-or-later"
                         )
@@ -76,9 +79,9 @@ final class AppLifecycleDelegate: NSObject, NSApplicationDelegate {
         }
         if model.document?.isDirty == true {
             let alert = NSAlert()
-            alert.messageText = "源码尚未保存"
-            alert.informativeText = "退出前保存修改吗？调试器会在退出前有界停止。"
-            alert.addButton(withTitle: "保存并退出")
+            alert.messageText = "工程有未保存修改"
+            alert.informativeText = "退出前保存全部修改吗？调试器会在退出前有界停止。"
+            alert.addButton(withTitle: "保存全部并退出")
             alert.addButton(withTitle: "不保存")
             alert.addButton(withTitle: "取消")
             switch alert.runModal() {

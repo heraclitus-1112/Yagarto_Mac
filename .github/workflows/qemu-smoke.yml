@@ -1,0 +1,27 @@
+name: Real QEMU smoke
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: qemu-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  qemu-smoke:
+    runs-on: macos-26
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install real ARM and QEMU tools
+        run: brew install arm-none-eabi-gcc arm-none-eabi-gdb qemu
+
+      - name: Run strict real-backend smoke tests
+        run: scripts/test-qemu-smoke.sh

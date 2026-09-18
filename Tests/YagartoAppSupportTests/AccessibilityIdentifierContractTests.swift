@@ -140,4 +140,60 @@ final class AccessibilityIdentifierContractTests: XCTestCase {
             "                .keyboardShortcut(\"n\", modifiers: [.command, .shift])"
         ))
     }
+
+    func testMultiSourceSidebarHasTextualStateAndStableIdentifiers() throws {
+        let repository = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let workbench = try String(
+            contentsOf: repository.appendingPathComponent("Sources/YagartoMacApp/WorkbenchView.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(workbench.contains(#".accessibilityIdentifier("project-sources")"#))
+        XCTAssertTrue(workbench.contains(#".accessibilityIdentifier("source-row-\(source.relativePath)")"#))
+        XCTAssertTrue(workbench.contains(#"Text("已修改")"#))
+        XCTAssertTrue(workbench.contains("await model.selectSource(source.relativePath)"))
+        XCTAssertTrue(workbench.contains("await model.activateDiagnostic(diagnostic)"))
+    }
+
+    func testRecentProjectsAreAvailableFromEmptyStateAndFileMenu() throws {
+        let repository = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let workbench = try String(
+            contentsOf: repository.appendingPathComponent("Sources/YagartoMacApp/WorkbenchView.swift"),
+            encoding: .utf8
+        )
+
+        XCTAssertTrue(workbench.contains(#".accessibilityIdentifier("recent-projects")"#))
+        XCTAssertTrue(workbench.contains(#".accessibilityIdentifier("recent-project-\(project.displayName)")"#))
+        XCTAssertTrue(workbench.contains(#".accessibilityIdentifier("clear-recent-projects")"#))
+        XCTAssertTrue(workbench.contains(#"Menu("打开最近工程")"#))
+        XCTAssertTrue(workbench.contains("RecentProjectAction.open(project, for: model)"))
+    }
+
+    func testEnvironmentOnboardingIsAccessibleAndNeverExecutesInstallCommands() throws {
+        let repository = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let workbench = try String(
+            contentsOf: repository.appendingPathComponent("Sources/YagartoMacApp/WorkbenchView.swift"),
+            encoding: .utf8
+        )
+        for identifier in [
+            "environment-onboarding", "environment-recheck", "copy-install-command",
+            "environment-install-guide", "onboarding-open-example", "onboarding-skip"
+        ] {
+            XCTAssertTrue(workbench.contains(#""\#(identifier)""#), "缺少 \(identifier)")
+        }
+        XCTAssertTrue(workbench.contains("ARM926 是兼容超集，不是精确 ARM7TDMI 模型"))
+        XCTAssertTrue(workbench.contains("NSPasteboard.general"))
+        XCTAssertTrue(workbench.contains(#"Button("检查开发环境…")"#))
+        XCTAssertFalse(workbench.contains("ProcessRunner"))
+        XCTAssertFalse(workbench.contains("Process("))
+    }
 }

@@ -94,6 +94,16 @@ final class CoreServiceIntegrationTests: XCTestCase {
         let initial = try await firstSnapshot(from: initialEvents)
 
         XCTAssertEqual(launch.breakpointIdentifiers, [2: "7"])
+        XCTAssertEqual(
+            launch.breakpointBindings,
+            [DebugBreakpointBinding(
+                breakpoint: DebugSourceBreakpoint(
+                    file: fixture.directory.appendingPathComponent("main.s"),
+                    line: 2
+                ),
+                identifier: "7"
+            )]
+        )
         XCTAssertTrue(launch.failures.isEmpty)
         XCTAssertEqual(initial.location?.line?.numeric, 1)
         XCTAssertEqual(initial.registers.first?.value?.numeric, 1)

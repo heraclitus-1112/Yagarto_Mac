@@ -7,7 +7,7 @@ struct YagartoCLI: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "yagarto-mac",
         abstract: "macOS 上的非官方 YAGARTO 兼容命令行层。",
-        version: "0.2.0",
+        version: "0.6.0",
         subcommands: [
             DoctorCommand.self,
             InitCommand.self,

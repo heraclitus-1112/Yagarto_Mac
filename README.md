@@ -8,7 +8,7 @@ YAGARTO Mac 是一个面向 macOS 的非官方 YAGARTO 兼容工具集，提供�
 
 ## 文档与示例
 
-- [从 GitHub 下载并完整安装](docs/install-from-github.zh-CN.md)：从全新 Apple Silicon Mac 开始，安装全部依赖、构建 App、验收三个后端并完成第一个工程。
+- [从 GitHub 下载并完整安装](docs/install-from-github.zh-CN.md)：下载预构建 Release App，或从源码安装全部依赖并验收三个后端。
 - [中文快速入门](docs/quick-start.zh-CN.md)：安装、doctor、项目命令、产物与退出码。
 - [Emacs 30.2 集成指南](docs/emacs.zh-CN.md)：安全安装、快捷键、GDB/MI、内存与进程清理。
 - [原生 SwiftUI 应用](docs/zh-CN/swiftui-app.md)：构建 `.app`、编辑器、快捷键、调试后端边界与 XCUITest。
@@ -21,7 +21,11 @@ Apple Silicon Mac 使用 AArch64，不能直接运行课程的 ARM32 ELF；Arm G
 
 Phase 4 已提供 macOS 15+ 的 `YagartoMacApp`：上部为 AppKit 源码编辑器与 profile 寄存器，下部为控制台、栈、内存和反汇编。应用通过 `YagartoAppSupport` 直接复用 Core 的构建与 GDB/MI 控制器；寄存器变化、断点和当前执行行都提供非颜色标识与辅助功能文本。
 
+普通用户可从 [GitHub Releases](https://github.com/heraclitus-1112/Yagarto_Mac/releases) 下载 Apple Silicon ZIP 与 `SHA256SUMS.txt`。Release App 未签名、未公证，不包含 CLI 或 ARM 工具链；首次打开和依赖安装边界见完整安装指南。
+
 空状态现在可以全自动新建工程或批量导入独立 `.s/.S`，也可直接打开随应用打包的原创 ARM7 数组寻址示例。新建只需工程名、父目录和 profile；程序会生成最小可运行源码与配置并直接打开，但不会自动构建。批量导入把每个源码移动到同名子工程，结束后只显示汇总。
+
+0.6.0 增加应用内环境检查、第一次成功清单、多源码侧栏与独立编辑缓冲，以及最近 10 个工程。环境检查只诊断并复制命令，不自动安装软件；ARM7 QEMU 回退会始终标注为 ARM926 兼容超集。
 
 ```sh
 scripts/build-app.sh Debug

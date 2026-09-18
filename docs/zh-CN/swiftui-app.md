@@ -4,6 +4,8 @@ YAGARTO Mac App 是 macOS 15 及以上系统的非官方 YAGARTO 兼容实现，
 
 ## 构建与启动
 
+不修改源码的用户可直接从 [GitHub Releases](https://github.com/heraclitus-1112/Yagarto_Mac/releases) 下载 `YagartoMacApp-0.6.0-macOS-arm64.zip` 和 `SHA256SUMS.txt`。预构建 App 不包含 CLI、ARM 工具链或调试后端；首次启动的环境向导会显示每种 profile 的真实可用状态。
+
 构建无 Developer ID 签名的本机应用：
 
 ```sh
@@ -36,8 +38,12 @@ dist/Release/YagartoMacApp.app
 
 “打开”支持两类目标：
 
-- 包含 `yagarto.json` 的工程目录；编辑器打开配置中的第一项 `sources`。
+- 包含 `yagarto.json` 的工程目录；侧栏按配置顺序显示全部 `sources`，初始打开第一项。
 - 位于已配置工程中的 `.s` 或 `.S` 文件；profile、entry 与构建源码列表仍来自相邻 `yagarto.json`。
+
+多源码工程按需读取文件内容。每个已打开源码保留独立的未保存文本、光标选择和断点；切换源码不会重建调试会话。`Command-S` 和构建前自动保存都会保存全部已修改源码，任一文件保存失败时不会启动构建，其余尚未写入的缓冲继续保持“已修改”。
+
+空状态和“文件 → 打开最近工程”显示最近 10 个成功打开或创建的工程。列表只保存在本机，按规范化路径去重，不会启动时自动恢复；失效路径会被移除。
 
 空状态的“打开示例”来自应用内打包的原创 ARM7 数组寻址工程。首次点击会复制到 `~/Library/Application Support/YAGARTO Mac/Examples/ARM7 数组寻址示例` 后再打开，因而可以正常编辑；后续点击复用该工作副本，绝不会覆盖用户已保存的修改。
 
@@ -49,7 +55,9 @@ dist/Release/YagartoMacApp.app
 
 ## 工作区与快捷键
 
-窗口上部左侧是源码与断点 gutter，右侧是寄存器；可拖动分隔线。下部为控制台、栈、内存和反汇编标签页。构建诊断可以点击，若文件与当前源码的 canonical 路径相同，会跳到对应的 1-based 行列。运行中禁止构建、profile 切换和源码编辑；停止后重新允许。
+窗口上部依次为多源码侧栏、源码与断点 gutter、寄存器；可拖动分隔线。单源码工程隐藏侧栏。下部为控制台、栈、内存和反汇编标签页。构建诊断可以点击，并自动切换到对应源码的 1-based 行列。运行中禁止构建、profile 切换、源码编辑和切换文件；暂停后允许只读切换。
+
+首次启动会显示可跳过的环境检查。它直接复用 CLI 的 `doctor` 能力报告，但不会执行安装命令；ARM7 的精确 GDB simulator、ARM926/QEMU 兼容回退、Cortex-M4 QEMU 和 STM32F4 真板工具链分别显示，不会混写为同一种能力。可随时从“帮助 → 检查开发环境…”重新打开。
 
 | 操作 | 快捷键 |
 | --- | --- |

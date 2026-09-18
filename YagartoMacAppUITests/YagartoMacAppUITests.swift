@@ -146,6 +146,67 @@ final class YagartoMacAppUITests: XCTestCase {
         XCTAssertFalse(app.textFields["new-project-name"].exists)
     }
 
+    func testMissingEnvironmentCanBeSkippedWithoutBlockingWorkspace() throws {
+        launchApplication(arguments: ["--ui-testing-onboarding-missing"])
+        let onboarding = app.otherElements["environment-onboarding"]
+        XCTAssertTrue(onboarding.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["ARM7TDMI：不可用"].exists)
+        app.buttons["onboarding-skip"].click()
+        XCTAssertTrue(app.otherElements["empty-state"].waitForExistence(timeout: 5))
+    }
+
+    func testReadyOnboardingTracksFirstBuildDebugStepAndStop() throws {
+        launchApplication(arguments: ["--ui-testing-onboarding-ready"])
+        XCTAssertTrue(app.otherElements["environment-onboarding"].waitForExistence(timeout: 5))
+        app.buttons["onboarding-open-example"].click()
+        XCTAssertTrue(app.textViews["source-editor"].waitForExistence(timeout: 5))
+
+        let state = app.descendants(matching: .any)["debugger-state"]
+        app.buttons["toolbar-build"].click()
+        waitForLabel("就绪", element: state)
+        app.buttons["toolbar-debug"].click()
+        waitForLabel("已暂停", element: state)
+        app.buttons["toolbar-step-instruction"].click()
+        waitForLabel("已暂停", element: state)
+        app.buttons["toolbar-stop"].click()
+        waitForLabel("就绪", element: state)
+
+        app.typeKey("e", modifierFlags: [.command, .shift])
+        XCTAssertTrue(app.otherElements["environment-onboarding"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts["停止并返回就绪，已完成"].waitForExistence(timeout: 5))
+    }
+
+    func testMultiSourceSidebarPreservesEditsAcrossFilesAndBuildsAfterSaveAll() throws {
+        launchApplication()
+        XCTAssertTrue(app.otherElements["empty-state"].waitForExistence(timeout: 5))
+        app.buttons["open-example"].click()
+        let editor = app.textViews["source-editor"]
+        XCTAssertTrue(editor.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.otherElements["project-sources"].exists)
+
+        editor.click()
+        editor.typeKey("a", modifierFlags: .command)
+        editor.typeText("MOV r0, #10\n")
+        app.buttons["source-row-helper.s"].click()
+        editor.click()
+        editor.typeKey("a", modifierFlags: .command)
+        editor.typeText("MOV r2, #30\n")
+        app.buttons["source-row-main.s"].click()
+        XCTAssertTrue((editor.value as? String)?.contains("#10") == true)
+
+        app.buttons["toolbar-save"].click()
+        app.buttons["toolbar-build"].click()
+        waitForLabel("就绪", element: app.descendants(matching: .any)["debugger-state"])
+    }
+
+    func testRecentProjectOpensFromEmptyState() throws {
+        launchApplication(arguments: ["--ui-testing-recent"])
+        let recent = app.buttons["recent-project-example"]
+        XCTAssertTrue(recent.waitForExistence(timeout: 5))
+        recent.click()
+        XCTAssertTrue(app.textViews["source-editor"].waitForExistence(timeout: 5))
+    }
+
     private func waitForLabel(_ label: String, element: XCUIElement) {
         let predicate = NSPredicate(format: "label == %@ OR value == %@", label, label)
         let expectation = XCTNSPredicateExpectation(predicate: predicate, object: element)
