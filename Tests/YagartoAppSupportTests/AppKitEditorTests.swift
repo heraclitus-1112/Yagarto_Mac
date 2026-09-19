@@ -310,7 +310,7 @@ final class AppKitEditorTests: XCTestCase {
         XCTAssertEqual(tailColorAfter, tailColorBefore)
     }
 
-    func testHostedEditorDefersHighlightUntilRealCompositionEnds() throws {
+    func testHostedEditorDefersHighlightUntilRealCompositionEnds() async throws {
         let editor = AssemblyEditorView(
             text: "MOV r0, #1\n",
             breakpoints: [],
@@ -351,7 +351,13 @@ final class AppKitEditorTests: XCTestCase {
         XCTAssertNotEqual(whileMarked, NSColor.systemPurple)
 
         textView.unmarkText()
-        RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+        await waitUntilMainActor(timeout: .seconds(2)) {
+            textView.textStorage?.attribute(
+                .foregroundColor,
+                at: insertion,
+                effectiveRange: nil
+            ) as? NSColor == NSColor.systemPurple
+        }
 
         let afterComposition = textView.textStorage?.attribute(
             .foregroundColor,
