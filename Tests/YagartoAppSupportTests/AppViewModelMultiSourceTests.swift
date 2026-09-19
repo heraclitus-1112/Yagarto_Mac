@@ -129,6 +129,147 @@ final class AppViewModelMultiSourceTests: XCTestCase {
         await model.clearRecentProjects()
         XCTAssertTrue(model.recentProjects.isEmpty)
     }
+
+    func testRenameSourceMigratesDirtyBufferSelectionAndBreakpoints() async throws {
+        let fixture = try MultiSourceFixture()
+        let model = AppViewModel(
+            documentService: LocalDocumentService(),
+            buildService: MultiSourceBuildService(project: fixture.directory),
+            debugService: MultiSourceDebugService(),
+            projectSourceManager: LocalProjectSourceManager()
+        )
+        await model.open(fixture.directory)
+        await model.selectSource("second.s")
+        model.edit("MOV r8, #8\n")
+        model.updateSelection(NSRange(location: 3, length: 0))
+        await model.toggleBreakpoint(line: 1)
+
+        let result = await model.renameSource("second.s", to: "renamed.S")
+
+        XCTAssertEqual(result?.renamedRelativePaths, ["second.s": "renamed.S"])
+        XCTAssertEqual(model.document?.activeSourceRelativePath, "renamed.S")
+        XCTAssertEqual(model.document?.text, "MOV r8, #8\n")
+        XCTAssertEqual(model.selectedRange, NSRange(location: 3, length: 0))
+        XCTAssertEqual(model.breakpoints.lines, [1])
+        XCTAssertTrue(model.document?.isDirty ?? false)
+        XCTAssertEqual(model.selectedSourceRelativePath, "renamed.S")
+        XCTAssertFalse(model.isSourceMutationInProgress)
+    }
+
+    func testCreateCopyAndTrashUpdateTreeAndChooseExpectedActiveSource() async throws {
+        let fixture = try MultiSourceFixture()
+        let external = fixture.directory.deletingLastPathComponent()
+            .appendingPathComponent("external-\(UUID().uuidString).s")
+        try Data("MOV r4, #4\n".utf8).write(to: external)
+        let trashDirectory = fixture.directory.appendingPathComponent("Trash", isDirectory: true)
+        try FileManager.default.createDirectory(at: trashDirectory, withIntermediateDirectories: false)
+        let manager = LocalProjectSourceManager(testingTrashHandler: { source in
+            let destination = trashDirectory.appendingPathComponent(source.lastPathComponent)
+            try FileManager.default.moveItem(at: source, to: destination)
+            return destination
+        })
+        let model = AppViewModel(
+            documentService: LocalDocumentService(),
+            buildService: MultiSourceBuildService(project: fixture.directory),
+            debugService: MultiSourceDebugService(),
+            projectSourceManager: manager
+        )
+        await model.open(fixture.directory)
+
+        _ = await model.createSource(filename: "new-file", inDirectory: nil)
+        XCTAssertEqual(model.document?.activeSourceRelativePath, "new-file.s")
+        XCTAssertEqual(model.projectTree.map(\.name), ["first.s", "second.s", "new-file.s"])
+
+        let copied = await model.copySources([external], toDirectory: nil)
+        XCTAssertEqual(copied?.addedRelativePaths, [external.lastPathComponent])
+        XCTAssertEqual(model.document?.activeSourceRelativePath, external.lastPathComponent)
+
+        _ = await model.trashSource(external.lastPathComponent, dirtyPolicy: .discardChanges)
+        XCTAssertEqual(model.document?.activeSourceRelativePath, "new-file.s")
+        XCTAssertFalse(model.document?.configuration.sources.contains(external.lastPathComponent) ?? true)
+    }
+
+    func testSourceManagementIsDisabledWhileDebuggerStopped() async throws {
+        let fixture = try MultiSourceFixture()
+        let model = AppViewModel(
+            documentService: LocalDocumentService(),
+            buildService: MultiSourceBuildService(project: fixture.directory),
+            debugService: MultiSourceDebugService(),
+            projectSourceManager: LocalProjectSourceManager()
+        )
+        await model.open(fixture.directory)
+        await model.build()
+        await model.start(.debug)
+        XCTAssertEqual(model.state, .stopped)
+
+        let result = await model.createSource(filename: "blocked.s", inDirectory: nil)
+
+        XCTAssertNil(result)
+        XCTAssertFalse(model.canManageProjectSources)
+        XCTAssertFalse(FileManager.default.fileExists(
+            atPath: fixture.directory.appendingPathComponent("blocked.s").path
+        ))
+    }
+
+    func testSourceMutationInvalidatesReadyBuildAndReturnsToIdle() async throws {
+        let fixture = try MultiSourceFixture()
+        let model = AppViewModel(
+            documentService: LocalDocumentService(),
+            buildService: MultiSourceBuildService(project: fixture.directory),
+            debugService: MultiSourceDebugService(),
+            projectSourceManager: LocalProjectSourceManager()
+        )
+        await model.open(fixture.directory)
+        await model.build()
+        XCTAssertEqual(model.state, .ready)
+        XCTAssertNotNil(model.latestBuild)
+
+        _ = await model.createSource(filename: "invalidates-build.s", inDirectory: nil)
+
+        XCTAssertEqual(model.state, .idle)
+        XCTAssertNil(model.latestBuild)
+        XCTAssertFalse(model.isEnabled(.run))
+        XCTAssertFalse(model.isEnabled(.debug))
+    }
+
+    func testRenamingToSameFilenameKeepsReadyBuild() async throws {
+        let fixture = try MultiSourceFixture()
+        let model = AppViewModel(
+            documentService: LocalDocumentService(),
+            buildService: MultiSourceBuildService(project: fixture.directory),
+            debugService: MultiSourceDebugService(),
+            projectSourceManager: LocalProjectSourceManager()
+        )
+        await model.open(fixture.directory)
+        await model.build()
+
+        let result = await model.renameSource("first.s", to: "first.s")
+
+        XCTAssertNotNil(result)
+        XCTAssertEqual(model.state, .ready)
+        XCTAssertNotNil(model.latestBuild)
+        XCTAssertTrue(model.isEnabled(.run))
+    }
+
+    func testFailedSourceMutationPreservesDocumentAndPresentsError() async throws {
+        let fixture = try MultiSourceFixture()
+        let manager = FailingProjectSourceManager()
+        let model = AppViewModel(
+            documentService: LocalDocumentService(),
+            buildService: MultiSourceBuildService(project: fixture.directory),
+            debugService: MultiSourceDebugService(),
+            projectSourceManager: manager
+        )
+        await model.open(fixture.directory)
+        let original = model.document
+
+        let result = await model.renameSource("first.s", to: "renamed.s")
+
+        XCTAssertNil(result)
+        XCTAssertEqual(model.document, original)
+        XCTAssertEqual(model.errorMessage, "模拟工程文件失败")
+        XCTAssertFalse(model.isSourceMutationInProgress)
+    }
 }
 
 private struct MultiSourceFixture {
@@ -222,4 +363,39 @@ private actor MemoryRecentProjectStore: RecentProjectStoring {
 private enum MultiSourceFailure: Error, LocalizedError {
     case expected
     var errorDescription: String? { "保留这个错误" }
+}
+
+private struct FailingProjectSourceManager: ProjectSourceManaging {
+    func createSource(
+        _ request: CreateProjectSourceRequest,
+        in document: WorkspaceDocument
+    ) async throws -> ProjectSourceMutationResult {
+        throw MultiSourceMutationFailure.expected
+    }
+
+    func copySources(
+        _ request: CopyProjectSourcesRequest,
+        in document: WorkspaceDocument
+    ) async throws -> ProjectSourceMutationResult {
+        throw MultiSourceMutationFailure.expected
+    }
+
+    func renameSource(
+        _ request: RenameProjectSourceRequest,
+        in document: WorkspaceDocument
+    ) async throws -> ProjectSourceMutationResult {
+        throw MultiSourceMutationFailure.expected
+    }
+
+    func trashSource(
+        _ request: TrashProjectSourceRequest,
+        in document: WorkspaceDocument
+    ) async throws -> ProjectSourceMutationResult {
+        throw MultiSourceMutationFailure.expected
+    }
+}
+
+private enum MultiSourceMutationFailure: Error, LocalizedError {
+    case expected
+    var errorDescription: String? { "模拟工程文件失败" }
 }

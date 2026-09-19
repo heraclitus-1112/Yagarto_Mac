@@ -47,7 +47,7 @@ public struct WorkspaceSourceBuffer: Equatable, Identifiable, Sendable {
         return loadedText != savedText
     }
 
-    fileprivate init(
+    init(
         relativePath: String,
         sourceURL: URL,
         loadedText: String? = nil,
@@ -61,7 +61,7 @@ public struct WorkspaceSourceBuffer: Equatable, Identifiable, Sendable {
         self.selection = selection
     }
 
-    fileprivate func loading(_ text: String) -> WorkspaceSourceBuffer {
+    func loading(_ text: String) -> WorkspaceSourceBuffer {
         WorkspaceSourceBuffer(
             relativePath: relativePath,
             sourceURL: sourceURL,
@@ -97,6 +97,16 @@ public struct WorkspaceSourceBuffer: Equatable, Identifiable, Sendable {
             sourceURL: sourceURL,
             loadedText: loadedText,
             savedText: text,
+            selection: selection
+        )
+    }
+
+    func relocating(relativePath: String, sourceURL: URL) -> WorkspaceSourceBuffer {
+        WorkspaceSourceBuffer(
+            relativePath: relativePath,
+            sourceURL: sourceURL,
+            loadedText: loadedText,
+            savedText: savedText,
             selection: selection
         )
     }
@@ -260,6 +270,20 @@ public struct WorkspaceDocument: Equatable, Sendable {
         }
         copy.savedConfiguration = snapshot.savedConfiguration
         return copy
+    }
+
+    func replacingPersistedStructure(
+        configuration: ProjectConfiguration,
+        sourceBuffers: [WorkspaceSourceBuffer],
+        activeSourceRelativePath: String
+    ) -> WorkspaceDocument {
+        WorkspaceDocument(
+            projectDirectory: projectDirectory,
+            configuration: configuration,
+            sourceBuffers: sourceBuffers,
+            activeSourceRelativePath: activeSourceRelativePath,
+            savedConfiguration: configuration
+        )
     }
 }
 

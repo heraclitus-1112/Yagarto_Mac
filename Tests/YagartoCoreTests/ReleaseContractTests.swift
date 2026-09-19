@@ -50,6 +50,48 @@ final class ReleaseContractTests: XCTestCase {
         XCTAssertTrue(script.contains("YagartoMacApp-${version}-macOS-arm64.zip"))
     }
 
+    func testXcodeReleaseTargetIncludesNavigatorActionsAndEveryExampleSource() throws {
+        let project = try contents(of: "YagartoMacApp.xcodeproj/project.pbxproj")
+        for required in [
+            "ProjectNavigatorView.swift in Sources",
+            "ProjectSourceActions.swift in Sources",
+            "numbers.s in Copy Bundled Example"
+        ] {
+            XCTAssertTrue(project.contains(required), "Xcode Release target missing \(required)")
+        }
+
+        let buildScript = try contents(of: "scripts/build-app.sh")
+        XCTAssertTrue(buildScript.contains(#"numbers.s" "$bundled_example/numbers.s"#))
+    }
+
+    func testXCUITestSchemeExpandsAgainstAppAndFailureReportingUsesBracedStatus() throws {
+        let scheme = try contents(
+            of: "YagartoMacApp.xcodeproj/xcshareddata/xcschemes/YagartoMacApp.xcscheme"
+        )
+        XCTAssertTrue(scheme.contains("<MacroExpansion>"))
+        XCTAssertTrue(scheme.contains(#"BuildableName="YagartoMacApp.app""#))
+
+        let script = try contents(of: "scripts/test-app.sh")
+        XCTAssertTrue(script.contains(#"FAIL（状态 ${xcode_status}）"#))
+        XCTAssertFalse(script.contains(#"FAIL（状态 $xcode_status）"#))
+        XCTAssertTrue(script.contains("CODE_SIGNING_ALLOWED=YES"))
+        XCTAssertTrue(script.contains("CODE_SIGNING_REQUIRED=YES"))
+        XCTAssertTrue(script.contains("CODE_SIGN_IDENTITY=-"))
+        XCTAssertFalse(script.contains("CODE_SIGNING_ALLOWED=NO"))
+    }
+
+    func testXcodeUITestHostTargetDoesNotCollideWithSwiftPackageProduct() throws {
+        let project = try contents(of: "YagartoMacApp.xcodeproj/project.pbxproj")
+        XCTAssertTrue(project.contains("name = YagartoMacDesktopApp;"))
+        XCTAssertTrue(project.contains("productName = YagartoMacApp;"))
+        XCTAssertTrue(project.contains("TEST_TARGET_NAME = YagartoMacDesktopApp;"))
+
+        let scheme = try contents(
+            of: "YagartoMacApp.xcodeproj/xcshareddata/xcschemes/YagartoMacApp.xcscheme"
+        )
+        XCTAssertTrue(scheme.contains(#"BuildableName="YagartoMacApp.app" BlueprintName="YagartoMacDesktopApp""#))
+    }
+
     func testQEMUSmokeRunsOnlyOnMainWithReadOnlyPermissionsAndHardToolChecks() throws {
         let workflow = try contents(of: ".github/workflows/qemu-smoke.yml")
         XCTAssertTrue(workflow.contains("branches: [main]"))

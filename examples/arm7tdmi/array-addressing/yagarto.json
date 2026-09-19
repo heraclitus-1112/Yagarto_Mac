@@ -4,6 +4,7 @@
   "profile": "arm7tdmi",
   "schemaVersion": 1,
   "sources": [
-    "array-addressing.s"
+    "array-addressing.s",
+    "numbers.s"
   ]
 }

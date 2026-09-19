@@ -150,11 +150,25 @@ final class AccessibilityIdentifierContractTests: XCTestCase {
             contentsOf: repository.appendingPathComponent("Sources/YagartoMacApp/WorkbenchView.swift"),
             encoding: .utf8
         )
+        let navigator = try String(
+            contentsOf: repository.appendingPathComponent("Sources/YagartoMacApp/ProjectNavigatorView.swift"),
+            encoding: .utf8
+        )
 
-        XCTAssertTrue(workbench.contains(#".accessibilityIdentifier("project-sources")"#))
-        XCTAssertTrue(workbench.contains(#".accessibilityIdentifier("source-row-\(source.relativePath)")"#))
-        XCTAssertTrue(workbench.contains(#"Text("已修改")"#))
-        XCTAssertTrue(workbench.contains("await model.selectSource(source.relativePath)"))
+        for identifier in [
+            "project-sources", "project-menu", "project-detail", "project-tree", "source-add-menu",
+            "new-source", "add-existing-sources"
+        ] {
+            XCTAssertTrue(navigator.contains(#""\#(identifier)""#), "缺少 \(identifier)")
+        }
+        XCTAssertTrue(navigator.contains(#".accessibilityIdentifier("source-row-\(node.relativePath)")"#))
+        XCTAssertTrue(navigator.contains(#".accessibilityIdentifier("directory-row-\(node.relativePath)")"#))
+        XCTAssertTrue(navigator.contains(#"Text("已修改")"#))
+        XCTAssertTrue(navigator.contains("minHeight: 44"))
+        XCTAssertTrue(navigator.contains("await model.selectSource(node.relativePath)"))
+        XCTAssertFalse(workbench.contains("if document.sourceBuffers.count > 1"))
+        XCTAssertTrue(workbench.contains("ProjectNavigatorView("))
+        XCTAssertTrue(workbench.contains(#""保存全部""#))
         XCTAssertTrue(workbench.contains("await model.activateDiagnostic(diagnostic)"))
     }
 

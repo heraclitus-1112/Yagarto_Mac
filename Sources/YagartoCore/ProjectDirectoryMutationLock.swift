@@ -6,14 +6,17 @@ import Foundation
 @_silgen_name("flock")
 private func systemFlock(_ descriptor: Int32, _ operation: Int32) -> Int32
 
-final class ProjectDirectoryMutationLock {
+public final class ProjectDirectoryMutationLock {
     private var descriptor: Int32
+    public let projectDirectory: URL
+    var isHeld: Bool { descriptor >= 0 }
 
-    private init(descriptor: Int32) {
+    private init(descriptor: Int32, projectDirectory: URL) {
         self.descriptor = descriptor
+        self.projectDirectory = projectDirectory
     }
 
-    static func acquire(_ directory: URL) throws -> ProjectDirectoryMutationLock {
+    public static func acquire(_ directory: URL) throws -> ProjectDirectoryMutationLock {
         let canonicalDirectory = directory
             .standardizedFileURL
             .resolvingSymlinksInPath()
@@ -35,10 +38,13 @@ final class ProjectDirectoryMutationLock {
             Darwin.close(descriptor)
             throw ProjectDirectoryLockError.failed(canonicalDirectory.path, detail)
         }
-        return ProjectDirectoryMutationLock(descriptor: descriptor)
+        return ProjectDirectoryMutationLock(
+            descriptor: descriptor,
+            projectDirectory: canonicalDirectory
+        )
     }
 
-    func release() {
+    public func release() {
         guard descriptor >= 0 else { return }
         _ = systemFlock(descriptor, LOCK_UN)
         Darwin.close(descriptor)
@@ -50,10 +56,10 @@ final class ProjectDirectoryMutationLock {
     }
 }
 
-private enum ProjectDirectoryLockError: Error, LocalizedError {
+public enum ProjectDirectoryLockError: Error, LocalizedError, Sendable {
     case failed(String, String)
 
-    var errorDescription: String? {
+    public var errorDescription: String? {
         switch self {
         case .failed(let path, let detail):
             return "无法锁定工程目录 \(path)：\(detail)"

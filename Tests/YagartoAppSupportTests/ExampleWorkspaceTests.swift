@@ -34,6 +34,28 @@ final class ExampleWorkspaceTests: XCTestCase {
         )
     }
 
+    func testInstallerRejectsBundledProjectWhenAnyConfiguredSourceIsMissing() async throws {
+        let fixture = try ExampleFixture()
+        try ConfigStore(projectDirectory: fixture.bundledProject).save(ProjectConfiguration(
+            sources: ["main.s", "missing.s"],
+            outputName: "example"
+        ))
+        let installer = ExampleWorkspaceInstaller(
+            bundledProject: fixture.bundledProject,
+            applicationSupportDirectory: fixture.root.appendingPathComponent("Applications"),
+            destinationName: "Broken Example"
+        )
+
+        do {
+            _ = try await installer.install()
+            XCTFail("Expected the incomplete example to be rejected")
+        } catch let error as ExampleWorkspaceError {
+            guard case .bundledExampleMissing = error else {
+                return XCTFail("Unexpected example error: \(error)")
+            }
+        }
+    }
+
     @MainActor
     func testOwnedTemporaryWorkspaceDeletesOnlyDirectoryWithMatchingOwnershipMarker() throws {
         let fixture = try ExampleFixture()

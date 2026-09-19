@@ -8,6 +8,7 @@
 .align 2
 .global start
 .type start, %function
+.extern numbers
 start:
     ldr     r0, =numbers
     mov     r1, #3
@@ -16,10 +17,5 @@ start:
 .Lhalt:
     b       .Lhalt
 .size start, . - start
-
-.section .data.numbers, "aw", %progbits
-.align 2
-numbers:
-    .word   10, 20, 30, 40, 50
 
 .section .note.GNU-stack, "", %progbits

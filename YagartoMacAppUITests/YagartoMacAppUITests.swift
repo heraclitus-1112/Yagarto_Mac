@@ -26,7 +26,7 @@ final class YagartoMacAppUITests: XCTestCase {
 
     func testEmptyEditBuildErrorDebugStepStopAndRecovery() throws {
         launchApplication()
-        XCTAssertTrue(app.otherElements["empty-state"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.descendants(matching: .any)["empty-state"].waitForExistence(timeout: 5))
         app.buttons["open-example"].click()
 
         let editor = app.textViews["source-editor"]
@@ -70,7 +70,7 @@ final class YagartoMacAppUITests: XCTestCase {
 
     func testLaunchErrorAndUnexpectedExitRecoverForAnotherSession() throws {
         launchApplication(arguments: ["--ui-testing-recovery"])
-        XCTAssertTrue(app.otherElements["empty-state"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.descendants(matching: .any)["empty-state"].waitForExistence(timeout: 5))
         app.buttons["open-example"].click()
         XCTAssertTrue(app.textViews["source-editor"].waitForExistence(timeout: 5))
         app.buttons["toolbar-build"].click()
@@ -99,7 +99,7 @@ final class YagartoMacAppUITests: XCTestCase {
 
     func testCreateProjectOpensRunnableTemplateWithoutAutomaticBuild() throws {
         launchApplication()
-        XCTAssertTrue(app.otherElements["empty-state"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.descendants(matching: .any)["empty-state"].waitForExistence(timeout: 5))
         app.buttons["empty-new-project"].click()
 
         let name = app.textFields["new-project-name"]
@@ -117,20 +117,20 @@ final class YagartoMacAppUITests: XCTestCase {
 
     func testImportSourcesShowsSummaryWithoutOpeningCreatedProject() throws {
         launchApplication()
-        XCTAssertTrue(app.otherElements["empty-state"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.descendants(matching: .any)["empty-state"].waitForExistence(timeout: 5))
         app.buttons["empty-import-projects"].click()
         XCTAssertTrue(app.popUpButtons["import-profile-picker"].waitForExistence(timeout: 5))
         app.buttons["import-confirm"].click()
 
-        let summary = app.otherElements["import-summary"]
+        let summary = app.descendants(matching: .any)["import-summary"]
         XCTAssertTrue(summary.waitForExistence(timeout: 5))
         XCTAssertTrue(summary.staticTexts["已创建 1 个工程"].exists)
-        XCTAssertTrue(app.otherElements["empty-state"].exists)
+        XCTAssertTrue(app.descendants(matching: .any)["empty-state"].exists)
     }
 
     func testNewProjectHonoursUnsavedDocumentCancellation() throws {
         launchApplication()
-        XCTAssertTrue(app.otherElements["empty-state"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.descendants(matching: .any)["empty-state"].waitForExistence(timeout: 5))
         app.buttons["open-example"].click()
         let editor = app.textViews["source-editor"]
         XCTAssertTrue(editor.waitForExistence(timeout: 5))
@@ -148,16 +148,16 @@ final class YagartoMacAppUITests: XCTestCase {
 
     func testMissingEnvironmentCanBeSkippedWithoutBlockingWorkspace() throws {
         launchApplication(arguments: ["--ui-testing-onboarding-missing"])
-        let onboarding = app.otherElements["environment-onboarding"]
+        let onboarding = app.descendants(matching: .any)["environment-onboarding"]
         XCTAssertTrue(onboarding.waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["ARM7TDMI：不可用"].exists)
         app.buttons["onboarding-skip"].click()
-        XCTAssertTrue(app.otherElements["empty-state"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.descendants(matching: .any)["empty-state"].waitForExistence(timeout: 5))
     }
 
     func testReadyOnboardingTracksFirstBuildDebugStepAndStop() throws {
         launchApplication(arguments: ["--ui-testing-onboarding-ready"])
-        XCTAssertTrue(app.otherElements["environment-onboarding"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.descendants(matching: .any)["environment-onboarding"].waitForExistence(timeout: 5))
         app.buttons["onboarding-open-example"].click()
         XCTAssertTrue(app.textViews["source-editor"].waitForExistence(timeout: 5))
 
@@ -172,17 +172,17 @@ final class YagartoMacAppUITests: XCTestCase {
         waitForLabel("就绪", element: state)
 
         app.typeKey("e", modifierFlags: [.command, .shift])
-        XCTAssertTrue(app.otherElements["environment-onboarding"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.descendants(matching: .any)["environment-onboarding"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["停止并返回就绪，已完成"].waitForExistence(timeout: 5))
     }
 
     func testMultiSourceSidebarPreservesEditsAcrossFilesAndBuildsAfterSaveAll() throws {
         launchApplication()
-        XCTAssertTrue(app.otherElements["empty-state"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.descendants(matching: .any)["empty-state"].waitForExistence(timeout: 5))
         app.buttons["open-example"].click()
         let editor = app.textViews["source-editor"]
         XCTAssertTrue(editor.waitForExistence(timeout: 5))
-        XCTAssertTrue(app.otherElements["project-sources"].exists)
+        XCTAssertTrue(app.descendants(matching: .any)["project-sources"].exists)
 
         editor.click()
         editor.typeKey("a", modifierFlags: .command)
@@ -197,6 +197,56 @@ final class YagartoMacAppUITests: XCTestCase {
         app.buttons["toolbar-save"].click()
         app.buttons["toolbar-build"].click()
         waitForLabel("就绪", element: app.descendants(matching: .any)["debugger-state"])
+    }
+
+    func testSingleSourceProjectShowsNavigatorAndCanCreateSecondSource() throws {
+        launchApplication(arguments: ["--ui-testing-single-source"])
+        XCTAssertTrue(app.descendants(matching: .any)["empty-state"].waitForExistence(timeout: 5))
+        app.buttons["open-example"].click()
+
+        XCTAssertTrue(app.descendants(matching: .any)["project-sources"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["source-row-main.s"].exists)
+        app.descendants(matching: .any)["source-add-menu"].click()
+        app.menuItems["new-source"].click()
+        let name = app.textFields["new-source-name"]
+        XCTAssertTrue(name.waitForExistence(timeout: 5))
+        name.typeText("helper")
+        app.buttons["new-source-create"].click()
+
+        XCTAssertTrue(app.buttons["source-row-helper.s"].waitForExistence(timeout: 10))
+    }
+
+    func testNavigatorCopiesRenamesAndTrashesSource() throws {
+        launchApplication()
+        app.buttons["open-example"].click()
+        XCTAssertTrue(app.descendants(matching: .any)["project-sources"].waitForExistence(timeout: 5))
+
+        app.descendants(matching: .any)["source-add-menu"].click()
+        app.menuItems["add-existing-sources"].click()
+        let copied = app.buttons["source-row-待导入.s"]
+        XCTAssertTrue(copied.waitForExistence(timeout: 5))
+        let copyNotice = app.alerts.firstMatch
+        if copyNotice.waitForExistence(timeout: 2) {
+            copyNotice.buttons["好"].click()
+        }
+
+        copied.click()
+        app.menuBars.menuBarItems["File"].click()
+        app.menuItems["重命名当前源码…"].click()
+        let rename = app.textFields["rename-source-field-待导入.s"]
+        XCTAssertTrue(rename.waitForExistence(timeout: 5))
+        rename.typeKey("a", modifierFlags: .command)
+        rename.typeText("renamed.s")
+        rename.typeKey(.return, modifierFlags: [])
+
+        let renamed = app.buttons["source-row-renamed.s"]
+        XCTAssertTrue(renamed.waitForExistence(timeout: 10))
+        renamed.click()
+        app.menuBars.menuBarItems["File"].click()
+        app.menuItems["将当前源码移到废纸篓"].click()
+        XCTAssertTrue(app.alerts.firstMatch.buttons["移到废纸篓"].waitForExistence(timeout: 5))
+        app.alerts.firstMatch.buttons["移到废纸篓"].click()
+        XCTAssertFalse(renamed.waitForExistence(timeout: 2))
     }
 
     func testRecentProjectOpensFromEmptyState() throws {
@@ -222,4 +272,5 @@ final class YagartoMacAppUITests: XCTestCase {
         let expectation = XCTNSPredicateExpectation(predicate: predicate, object: element)
         XCTAssertEqual(XCTWaiter.wait(for: [expectation], timeout: 5), .completed)
     }
+
 }

@@ -16,10 +16,18 @@ struct WorkbenchView: View {
     @State private var memoryWindowControl = MemoryWindowControlState()
     @State private var memoryAddressTask: Task<Void, Never>?
     @State private var presentedProjectSheet: ProjectSheet?
+    @State private var presentedSourceSheet: SourceSheet?
+    @State private var renameRequestedPath: String?
+    @State private var sourceOperationNotice: SourceOperationNotice?
     @AppStorage("lastProjectParentPath") private var lastProjectParentPath = ""
     @AppStorage("lastProjectProfile") private var lastProjectProfile = ProfileID.arm7tdmi.rawValue
+    @AppStorage("projectNavigatorVisible") private var projectNavigatorVisible = true
 
     var body: some View {
+        lifecycleContent
+    }
+
+    private var rootContent: some View {
         VStack(spacing: 0) {
             statusStrip
             Divider()
@@ -32,18 +40,62 @@ struct WorkbenchView: View {
         .frame(minWidth: 980, minHeight: 640)
         .background(WindowCloseGuard(model: model).frame(width: 0, height: 0))
         .toolbar { toolbar }
+    }
+
+    private var presentationContent: some View {
+        rootContent
         .sheet(item: $presentedProjectSheet) { sheet in
             projectSheet(sheet)
+        }
+        .sheet(item: $presentedSourceSheet) { sheet in
+            switch sheet.content {
+            case .newSource:
+                NewSourceSheet(
+                    model: model,
+                    destinationRelativePath: model.selectedProjectDirectoryRelativePath
+                ) { created in
+                    if created { presentedSourceSheet = nil }
+                } onCancel: {
+                    presentedSourceSheet = nil
+                }
+            }
+        }
+        .alert(item: $sourceOperationNotice) { notice in
+            Alert(
+                title: Text(notice.title),
+                message: Text(notice.message),
+                dismissButton: .default(Text("好"))
+            )
         }
         .sheet(isPresented: onboardingPresentation) {
             EnvironmentOnboardingView(model: model, openExample: openExample)
         }
+    }
+
+    private var focusedActionContent: some View {
+        presentationContent
         .focusedSceneValue(\.newYagartoProjectAction, model.isEnabled(.newProject) ? {
             requestNewProject()
         } : nil)
         .focusedSceneValue(\.importYagartoProjectsAction, model.isEnabled(.importProjects) ? {
             requestProjectImport()
         } : nil)
+        .focusedSceneValue(\.newYagartoSourceAction, model.canManageProjectSources ? {
+            requestNewSource()
+        } : nil)
+        .focusedSceneValue(\.addYagartoSourcesAction, model.canManageProjectSources ? {
+            requestAddExistingSources()
+        } : nil)
+        .focusedSceneValue(\.renameYagartoSourceAction, model.canManageProjectSources ? {
+            requestRenameSource(model.selectedSourceRelativePath)
+        } : nil)
+        .focusedSceneValue(\.trashYagartoSourceAction, model.canManageProjectSources ? {
+            requestTrashSource(model.selectedSourceRelativePath)
+        } : nil)
+    }
+
+    private var lifecycleContent: some View {
+        focusedActionContent
         .onChange(of: model.document?.configuration.profile) { _, profile in
             if defaultProjectProfile == nil, let profile {
                 lastProjectProfile = profile.rawValue
@@ -54,9 +106,7 @@ struct WorkbenchView: View {
             resetMemoryWindow()
         }
         .onChange(of: model.state) { oldState, newState in
-            if newState == .ready, oldState == .launching || oldState == .terminating {
-                resetMemoryWindow()
-            }
+            handleDebuggerStateChange(from: oldState, to: newState)
         }
         .task {
             await model.refreshRecentProjects()
@@ -73,6 +123,15 @@ struct WorkbenchView: View {
                 }
             }
         )
+    }
+
+    private func handleDebuggerStateChange(from oldState: DebuggerState, to newState: DebuggerState) {
+        switch (oldState, newState) {
+        case (.launching, .ready), (.terminating, .ready):
+            resetMemoryWindow()
+        default:
+            break
+        }
     }
 
     private var statusStrip: some View {
@@ -113,7 +172,7 @@ struct WorkbenchView: View {
                     .keyboardShortcut("o", modifiers: .command)
                     .accessibilityIdentifier("empty-open-project")
                 if let openExample {
-                    Button("打开示例", action: openExample)
+                    Button("打开多文件示例", action: openExample)
                         .accessibilityIdentifier("open-example")
                 }
             }
@@ -121,8 +180,16 @@ struct WorkbenchView: View {
                 Divider()
                     .frame(maxWidth: 480)
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("最近工程")
-                        .font(.headline)
+                    HStack {
+                        Text("最近工程")
+                            .font(.headline)
+                        Spacer()
+                        Button("清除") {
+                            Task { await model.clearRecentProjects() }
+                        }
+                        .accessibilityLabel("清除最近工程")
+                        .accessibilityIdentifier("clear-recent-projects")
+                    }
                     ScrollView {
                         LazyVStack(spacing: 0) {
                             ForEach(model.recentProjects) { project in
@@ -151,10 +218,6 @@ struct WorkbenchView: View {
                         }
                     }
                     .frame(maxHeight: 220)
-                    Button("清除最近工程") {
-                        Task { await model.clearRecentProjects() }
-                    }
-                    .accessibilityIdentifier("clear-recent-projects")
                 }
                 .frame(maxWidth: 480)
                 .accessibilityElement(children: .contain)
@@ -236,11 +299,66 @@ struct WorkbenchView: View {
         presentedProjectSheet = ProjectSheet(content: .importProjects(inputs))
     }
 
+    private func requestNewSource() {
+        guard model.canManageProjectSources else { return }
+        presentedSourceSheet = SourceSheet(content: .newSource)
+    }
+
+    private func requestAddExistingSources() {
+        guard model.canManageProjectSources, let document = model.document else { return }
+        let urls = importInputsOverride
+            ?? ProjectSourceActions.chooseSources(startingAt: document.projectDirectory)
+        guard let urls, !urls.isEmpty else { return }
+        Task { @MainActor in
+            guard let result = await model.copySources(
+                urls,
+                toDirectory: model.selectedProjectDirectoryRelativePath
+            ), !result.addedRelativePaths.isEmpty else { return }
+            sourceOperationNotice = SourceOperationNotice(
+                title: "已添加源码",
+                message: result.addedRelativePaths.joined(separator: "\n")
+            )
+        }
+    }
+
+    private func requestRenameSource(_ relativePath: String?) {
+        guard model.canManageProjectSources, let relativePath else { return }
+        renameRequestedPath = relativePath
+    }
+
+    private func requestTrashSource(_ relativePath: String?) {
+        guard model.canManageProjectSources,
+              let relativePath,
+              let document = model.document,
+              let source = document.sourceBuffers.first(where: {
+                  $0.relativePath == relativePath
+              }),
+              let policy = ProjectSourceActions.confirmTrash(
+                  source: source,
+                  isLastSource: document.sourceBuffers.count == 1
+              ) else { return }
+        Task { await model.trashSource(relativePath, dirtyPolicy: policy) }
+    }
+
     private func workbench(_ document: WorkspaceDocument) -> some View {
         VSplitView {
             HSplitView {
-                if document.sourceBuffers.count > 1 {
-                    sourceSidebar(document)
+                if projectNavigatorVisible {
+                    ProjectNavigatorView(
+                        model: model,
+                        renameRequestedPath: $renameRequestedPath,
+                        openProject: { OpenProjectAction.choose(for: model) },
+                        openRecentProject: { RecentProjectAction.open($0, for: model) },
+                        clearRecentProjects: {
+                            Task { await model.clearRecentProjects() }
+                        },
+                        newSource: requestNewSource,
+                        addExistingSources: requestAddExistingSources,
+                        renameSource: { path, name in
+                            await model.renameSource(path, to: name) != nil
+                        },
+                        trashSource: { requestTrashSource($0) }
+                    )
                         .frame(minWidth: 180, idealWidth: 220, maxWidth: 280)
                 }
 
@@ -255,62 +373,6 @@ struct WorkbenchView: View {
             detailsPane
                 .frame(minHeight: 170, idealHeight: 240)
         }
-    }
-
-    private func sourceSidebar(_ document: WorkspaceDocument) -> some View {
-        VStack(alignment: .leading, spacing: 0) {
-            Text("工程文件")
-                .font(.headline)
-                .padding(.horizontal, 10)
-                .frame(height: 34)
-            Divider()
-            ScrollView {
-                LazyVStack(spacing: 0) {
-                    ForEach(document.sourceBuffers) { source in
-                        let isActive = source.relativePath == document.activeSourceRelativePath
-                        Button {
-                            Task { await model.selectSource(source.relativePath) }
-                        } label: {
-                            HStack(spacing: 8) {
-                                Image(systemName: isActive ? "chevron.right" : "doc.plaintext")
-                                    .frame(width: 16)
-                                Text(source.relativePath)
-                                    .lineLimit(2)
-                                    .multilineTextAlignment(.leading)
-                                Spacer(minLength: 4)
-                                if source.isDirty {
-                                    Text("已修改")
-                                        .font(.caption2.weight(.semibold))
-                                }
-                            }
-                            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
-                            .padding(.horizontal, 10)
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .background(isActive ? Color.accentColor.opacity(0.12) : Color.clear)
-                        .disabled(isActive || !model.canSelectSource)
-                        .accessibilityIdentifier("source-row-\(source.relativePath)")
-                        .accessibilityLabel(sourceAccessibilityLabel(source, isActive: isActive))
-                        .accessibilityHint(isActive ? "当前正在显示的源码" : "切换到此源码")
-                        Divider()
-                    }
-                }
-            }
-        }
-        .background(Color(nsColor: .controlBackgroundColor))
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("project-sources")
-    }
-
-    private func sourceAccessibilityLabel(
-        _ source: WorkspaceSourceBuffer,
-        isActive: Bool
-    ) -> String {
-        var parts = [source.relativePath]
-        if isActive { parts.append("当前文件") }
-        if source.isDirty { parts.append("已修改") }
-        return parts.joined(separator: "，")
     }
 
     private func editorPane(_ document: WorkspaceDocument) -> some View {
@@ -538,6 +600,19 @@ struct WorkbenchView: View {
     @ToolbarContentBuilder
     private var toolbar: some ToolbarContent {
         ToolbarItem(placement: .navigation) {
+            Button {
+                projectNavigatorVisible.toggle()
+            } label: {
+                Image(systemName: "sidebar.left")
+                    .frame(minWidth: 44, minHeight: 44)
+                    .contentShape(Rectangle())
+            }
+            .disabled(model.document == nil)
+            .help(projectNavigatorVisible ? "隐藏工程导航器" : "显示工程导航器")
+            .accessibilityLabel(projectNavigatorVisible ? "隐藏工程导航器" : "显示工程导航器")
+            .accessibilityIdentifier("toggle-project-navigator")
+        }
+        ToolbarItem(placement: .navigation) {
             Picker("目标 profile", selection: Binding(
                 get: { model.document?.configuration.profile ?? .arm7tdmi },
                 set: { model.changeProfile(to: $0) }
@@ -554,7 +629,7 @@ struct WorkbenchView: View {
             toolbarButton("folder", "打开工程", "选择 .s/.S 文件或工程目录", "toolbar-open", enabled: model.isEnabled(.open)) {
                 OpenProjectAction.choose(for: model)
             }
-            toolbarButton("square.and.arrow.down", "保存", "保存当前源码与 profile", "toolbar-save", enabled: model.isEnabled(.save)) {
+            toolbarButton("square.and.arrow.down", "保存全部", "保存所有已修改源码与工程设置", "toolbar-save", enabled: model.isEnabled(.save)) {
                 Task { await model.save() }
             }
             toolbarButton("hammer", "构建", "自动保存后构建工程", "toolbar-build", enabled: model.isEnabled(.build)) {
@@ -855,6 +930,10 @@ struct WorkbenchCommands: Commands {
     let model: AppViewModel
     @FocusedValue(\.newYagartoProjectAction) private var newProjectAction
     @FocusedValue(\.importYagartoProjectsAction) private var importProjectsAction
+    @FocusedValue(\.newYagartoSourceAction) private var newSourceAction
+    @FocusedValue(\.addYagartoSourcesAction) private var addSourcesAction
+    @FocusedValue(\.renameYagartoSourceAction) private var renameSourceAction
+    @FocusedValue(\.trashYagartoSourceAction) private var trashSourceAction
 
     var body: some Commands {
         CommandGroup(replacing: .newItem) {
@@ -864,6 +943,13 @@ struct WorkbenchCommands: Commands {
             Button("导入现有源码…") { importProjectsAction?() }
                 .keyboardShortcut("i", modifiers: [.command, .shift])
                 .disabled(importProjectsAction == nil || !model.isEnabled(.importProjects))
+            Divider()
+            Button("新建汇编文件…") { newSourceAction?() }
+                .keyboardShortcut("n", modifiers: [.command, .option])
+                .disabled(newSourceAction == nil)
+            Button("添加现有汇编文件…") { addSourcesAction?() }
+                .keyboardShortcut("i", modifiers: [.command, .option])
+                .disabled(addSourcesAction == nil)
             Divider()
             Button("打开…") { OpenProjectAction.choose(for: model) }
                 .keyboardShortcut("o", modifiers: .command)
@@ -884,9 +970,16 @@ struct WorkbenchCommands: Commands {
             .disabled(model.recentProjects.isEmpty || !model.isEnabled(.open))
         }
         CommandGroup(replacing: .saveItem) {
-            Button("保存") { Task { await model.save() } }
+            Button("保存全部") { Task { await model.save() } }
                 .keyboardShortcut("s", modifiers: .command)
                 .disabled(!model.isEnabled(.save))
+        }
+        CommandGroup(after: .saveItem) {
+            Button("重命名当前源码…") { renameSourceAction?() }
+                .disabled(renameSourceAction == nil)
+            Button("将当前源码移到废纸篓") { trashSourceAction?() }
+                .keyboardShortcut(.delete, modifiers: .command)
+                .disabled(trashSourceAction == nil || model.document?.sourceBuffers.count == 1)
         }
         CommandMenu("调试") {
             Button("构建") { Task { await model.build() } }
@@ -932,6 +1025,22 @@ private struct ImportYagartoProjectsActionKey: FocusedValueKey {
     typealias Value = () -> Void
 }
 
+private struct NewYagartoSourceActionKey: FocusedValueKey {
+    typealias Value = () -> Void
+}
+
+private struct AddYagartoSourcesActionKey: FocusedValueKey {
+    typealias Value = () -> Void
+}
+
+private struct RenameYagartoSourceActionKey: FocusedValueKey {
+    typealias Value = () -> Void
+}
+
+private struct TrashYagartoSourceActionKey: FocusedValueKey {
+    typealias Value = () -> Void
+}
+
 private extension FocusedValues {
     var newYagartoProjectAction: (() -> Void)? {
         get { self[NewYagartoProjectActionKey.self] }
@@ -941,6 +1050,108 @@ private extension FocusedValues {
     var importYagartoProjectsAction: (() -> Void)? {
         get { self[ImportYagartoProjectsActionKey.self] }
         set { self[ImportYagartoProjectsActionKey.self] = newValue }
+    }
+
+    var newYagartoSourceAction: (() -> Void)? {
+        get { self[NewYagartoSourceActionKey.self] }
+        set { self[NewYagartoSourceActionKey.self] = newValue }
+    }
+
+    var addYagartoSourcesAction: (() -> Void)? {
+        get { self[AddYagartoSourcesActionKey.self] }
+        set { self[AddYagartoSourcesActionKey.self] = newValue }
+    }
+
+    var renameYagartoSourceAction: (() -> Void)? {
+        get { self[RenameYagartoSourceActionKey.self] }
+        set { self[RenameYagartoSourceActionKey.self] = newValue }
+    }
+
+    var trashYagartoSourceAction: (() -> Void)? {
+        get { self[TrashYagartoSourceActionKey.self] }
+        set { self[TrashYagartoSourceActionKey.self] = newValue }
+    }
+}
+
+private struct SourceSheet: Identifiable {
+    enum Content {
+        case newSource
+    }
+
+    let id = UUID()
+    let content: Content
+}
+
+private struct SourceOperationNotice: Identifiable {
+    let id = UUID()
+    let title: String
+    let message: String
+}
+
+@MainActor
+private struct NewSourceSheet: View {
+    @Bindable var model: AppViewModel
+    let destinationRelativePath: String?
+    let onCreated: (Bool) -> Void
+    let onCancel: () -> Void
+
+    @State private var filename = ""
+    @State private var isWorking = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("新建汇编文件")
+                .font(.title2.weight(.semibold))
+            Text(destinationDescription)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+            TextField("文件名", text: $filename)
+                .accessibilityIdentifier("new-source-name")
+                .onSubmit { create() }
+            Text("未填写扩展名时会自动补充 .s；文件会加入当前工程并立即打开。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if let error = model.errorMessage, !error.isEmpty {
+                Label(error, systemImage: "exclamationmark.triangle")
+                    .font(.callout)
+                    .foregroundStyle(.red)
+            }
+            HStack {
+                Spacer()
+                Button("取消", action: onCancel)
+                    .keyboardShortcut(.cancelAction)
+                    .disabled(isWorking)
+                Button(isWorking ? "正在创建…" : "创建") { create() }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(filename.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isWorking)
+                    .accessibilityIdentifier("new-source-create")
+            }
+        }
+        .padding(24)
+        .frame(width: 460)
+        .interactiveDismissDisabled(isWorking)
+    }
+
+    private var destinationDescription: String {
+        guard let directory = model.document?.projectDirectory else { return "" }
+        if let destinationRelativePath, !destinationRelativePath.isEmpty {
+            return "创建位置：\(directory.appendingPathComponent(destinationRelativePath).path)"
+        }
+        return "创建位置：\(directory.path)"
+    }
+
+    private func create() {
+        guard !isWorking else { return }
+        isWorking = true
+        Task { @MainActor in
+            let result = await model.createSource(
+                filename: filename,
+                inDirectory: destinationRelativePath
+            )
+            isWorking = false
+            onCreated(result != nil)
+        }
     }
 }
 

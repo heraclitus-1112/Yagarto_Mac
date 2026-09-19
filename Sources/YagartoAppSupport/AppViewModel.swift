@@ -27,10 +27,13 @@ public final class AppViewModel {
     public private(set) var memory: [MIMemoryBlock] = []
     public private(set) var errorMessage: String?
     public private(set) var isProjectOperationInProgress = false
+    public private(set) var isSourceMutationInProgress = false
     public private(set) var recentProjects: [RecentProject] = []
     public private(set) var environmentCheckState: EnvironmentCheckState = .idle
     public private(set) var isOnboardingPresented = false
     public private(set) var firstSuccessProgress = FirstSuccessProgress()
+    public private(set) var selectedSourceRelativePath: String?
+    public private(set) var selectedProjectDirectoryRelativePath: String?
     public var selectedRange: NSRange?
 
     private var machine = DebuggerStateMachine()
@@ -38,6 +41,7 @@ public final class AppViewModel {
     private let buildService: any BuildServicing
     private let debugService: any DebugServicing
     private let projectCreationService: any ProjectCreationServicing
+    private let projectSourceManager: any ProjectSourceManaging
     private let recentProjectStore: (any RecentProjectStoring)?
     private let environmentChecker: (any EnvironmentChecking)?
     private let onboardingPreferenceStore: (any OnboardingPreferenceStoring)?
@@ -69,12 +73,14 @@ public final class AppViewModel {
         projectCreationService: any ProjectCreationServicing = CoreProjectCreationService(),
         recentProjectStore: (any RecentProjectStoring)? = nil,
         environmentChecker: (any EnvironmentChecking)? = nil,
-        onboardingPreferenceStore: (any OnboardingPreferenceStoring)? = nil
+        onboardingPreferenceStore: (any OnboardingPreferenceStoring)? = nil,
+        projectSourceManager: any ProjectSourceManaging = LocalProjectSourceManager()
     ) {
         self.documentService = documentService
         self.buildService = buildService
         self.debugService = debugService
         self.projectCreationService = projectCreationService
+        self.projectSourceManager = projectSourceManager
         self.recentProjectStore = recentProjectStore
         self.environmentChecker = environmentChecker
         self.onboardingPreferenceStore = onboardingPreferenceStore
@@ -84,6 +90,16 @@ public final class AppViewModel {
 
     public var state: DebuggerState { machine.state }
     public var documentInstanceID: UUID? { documentIdentifier }
+    public var projectTree: [ProjectTreeNode] {
+        ProjectTreeNode.build(from: document?.sourceBuffers ?? [])
+    }
+
+    public var canManageProjectSources: Bool {
+        !isProjectOperationInProgress
+            && !isSourceMutationInProgress
+            && (state == .idle || state == .ready)
+            && document != nil
+    }
 
     public var currentExecutionLine: Int? {
         guard state == .stopped,
@@ -266,6 +282,8 @@ public final class AppViewModel {
             guard generation == sourceSelectionGeneration,
                   identifier == documentIdentifier else { return }
             self.document = selected
+            selectedSourceRelativePath = relativePath
+            selectedProjectDirectoryRelativePath = Self.parentDirectory(of: relativePath)
             breakpoints = breakpointsBySource[canonicalPath(selected.sourceURL)] ?? BreakpointLines()
             selectedRange = selected.activeSelection
             if state == .stopped { scheduleStoppedBreakpointReconciliation() }
@@ -274,6 +292,140 @@ public final class AppViewModel {
                   identifier == documentIdentifier else { return }
             present(error)
         }
+    }
+
+    public func selectProjectDirectory(_ relativePath: String?) {
+        guard canManageProjectSources else { return }
+        selectedProjectDirectoryRelativePath = relativePath
+    }
+
+    public func createSource(
+        filename: String,
+        inDirectory relativePath: String?
+    ) async -> ProjectSourceMutationResult? {
+        await performSourceMutation { document in
+            try await self.projectSourceManager.createSource(
+                CreateProjectSourceRequest(
+                    directoryRelativePath: relativePath,
+                    filename: filename
+                ),
+                in: document
+            )
+        }
+    }
+
+    public func copySources(
+        _ sourceURLs: [URL],
+        toDirectory relativePath: String?
+    ) async -> ProjectSourceMutationResult? {
+        await performSourceMutation { document in
+            try await self.projectSourceManager.copySources(
+                CopyProjectSourcesRequest(
+                    sourceURLs: sourceURLs,
+                    destinationDirectoryRelativePath: relativePath
+                ),
+                in: document
+            )
+        }
+    }
+
+    public func renameSource(
+        _ relativePath: String,
+        to newFilename: String
+    ) async -> ProjectSourceMutationResult? {
+        await performSourceMutation { document in
+            try await self.projectSourceManager.renameSource(
+                RenameProjectSourceRequest(
+                    relativePath: relativePath,
+                    newFilename: newFilename
+                ),
+                in: document
+            )
+        }
+    }
+
+    public func trashSource(
+        _ relativePath: String,
+        dirtyPolicy: DirtySourceTrashPolicy
+    ) async -> ProjectSourceMutationResult? {
+        await performSourceMutation { document in
+            try await self.projectSourceManager.trashSource(
+                TrashProjectSourceRequest(
+                    relativePath: relativePath,
+                    dirtyPolicy: dirtyPolicy
+                ),
+                in: document
+            )
+        }
+    }
+
+    private func performSourceMutation(
+        _ operation: (WorkspaceDocument) async throws -> ProjectSourceMutationResult
+    ) async -> ProjectSourceMutationResult? {
+        guard canManageProjectSources, var snapshot = document else { return nil }
+        snapshot = snapshot.updatingActiveSelection(selectedRange)
+        document = snapshot
+        breakpointsBySource[canonicalPath(snapshot.sourceURL)] = breakpoints
+        let identifier = documentIdentifier
+        isSourceMutationInProgress = true
+        isProjectOperationInProgress = true
+        defer {
+            isSourceMutationInProgress = false
+            isProjectOperationInProgress = false
+        }
+        do {
+            let result = try await operation(snapshot)
+            guard identifier == documentIdentifier else { return nil }
+            if result.document == snapshot,
+               result.addedRelativePaths.isEmpty,
+               result.renamedRelativePaths.isEmpty,
+               result.removedRelativePath == nil {
+                clearPresentedError()
+                return result
+            }
+            applySourceMutation(result, previousDocument: snapshot)
+            clearPresentedError()
+            return result
+        } catch {
+            guard identifier == documentIdentifier else { return nil }
+            present(error)
+            return nil
+        }
+    }
+
+    private func applySourceMutation(
+        _ result: ProjectSourceMutationResult,
+        previousDocument: WorkspaceDocument
+    ) {
+        for (oldRelativePath, newRelativePath) in result.renamedRelativePaths {
+            let oldURL = previousDocument.projectDirectory.appendingPathComponent(oldRelativePath)
+            let newURL = previousDocument.projectDirectory.appendingPathComponent(newRelativePath)
+            if let stored = breakpointsBySource.removeValue(forKey: canonicalPath(oldURL)) {
+                breakpointsBySource[canonicalPath(newURL)] = stored
+            }
+        }
+        if let removed = result.removedRelativePath {
+            let removedURL = previousDocument.projectDirectory.appendingPathComponent(removed)
+            breakpointsBySource.removeValue(forKey: canonicalPath(removedURL))
+        }
+
+        document = result.document
+        selectedSourceRelativePath = result.document.activeSourceRelativePath
+        selectedProjectDirectoryRelativePath = Self.parentDirectory(
+            of: result.document.activeSourceRelativePath
+        )
+        breakpoints = breakpointsBySource[canonicalPath(result.document.sourceURL)]
+            ?? BreakpointLines()
+        selectedRange = result.document.activeSelection
+        latestBuild = nil
+        machine = DebuggerStateMachine()
+        breakpointIdentifiers = [:]
+        breakpointRequestGenerations = [:]
+        reconcilingBreakpoints = []
+        debugSessionGeneration &+= 1
+        clearRuntimePresentation()
+        documentRevision &+= 1
+        sourceSelectionGeneration &+= 1
     }
 
     public func changeProfile(to profile: ProfileID) {
@@ -696,7 +848,16 @@ public final class AppViewModel {
         clearPresentedError()
         machine = DebuggerStateMachine()
         selectedRange = nil
+        selectedSourceRelativePath = openedDocument.activeSourceRelativePath
+        selectedProjectDirectoryRelativePath = Self.parentDirectory(
+            of: openedDocument.activeSourceRelativePath
+        )
         sourceSelectionGeneration &+= 1
+    }
+
+    private static func parentDirectory(of relativePath: String) -> String? {
+        let parent = (relativePath as NSString).deletingLastPathComponent
+        return parent.isEmpty || parent == "." ? nil : parent
     }
 
     private func activateSnapshotSourceIfNeeded(_ snapshot: DebugSnapshot) {

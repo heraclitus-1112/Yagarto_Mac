@@ -55,7 +55,9 @@ struct AppRuntime {
                 $0 == "--ui-testing-recovery"
             }
             do {
-                let fixture = try UITestFixture()
+                let fixture = try UITestFixture(
+                    singleSource: process.arguments.contains("--ui-testing-single-source")
+                )
                 let onboardingMode: UITestEnvironmentChecker.Mode?
                 if process.arguments.contains("--ui-testing-onboarding-ready") {
                     onboardingMode = .ready
@@ -113,7 +115,7 @@ struct AppRuntime {
             installer = ExampleWorkspaceInstaller(
                 bundledProject: bundledProject,
                 applicationSupportDirectory: applicationSupport,
-                destinationName: "ARM7 数组寻址示例"
+                destinationName: "ARM7 多文件数组寻址示例"
             )
         } else {
             installer = nil
@@ -178,7 +180,7 @@ private final class UITestFixture {
     var projectParent: URL { owner.directory }
     let importSource: URL
 
-    init() throws {
+    init(singleSource: Bool = false) throws {
         owner = try OwnedTemporaryWorkspace.create(prefix: "YagartoMacApp-UI")
         directory = owner.directory.appendingPathComponent("example", isDirectory: true)
         importSource = owner.directory.appendingPathComponent("待导入.s")
@@ -187,14 +189,16 @@ private final class UITestFixture {
             let configuration = ProjectConfiguration(
                 profile: .arm7tdmi,
                 entry: "start",
-                sources: ["main.s", "helper.s"],
+                sources: singleSource ? ["main.s"] : ["main.s", "helper.s"],
                 outputName: "ui-fixture"
             )
             try ConfigStore(projectDirectory: directory).save(configuration)
             try Data("MOV r0, #1\nMOV r1, #2\n".utf8)
                 .write(to: directory.appendingPathComponent("main.s"), options: .atomic)
-            try Data("MOV r2, #3\n".utf8)
-                .write(to: directory.appendingPathComponent("helper.s"), options: .atomic)
+            if !singleSource {
+                try Data("MOV r2, #3\n".utf8)
+                    .write(to: directory.appendingPathComponent("helper.s"), options: .atomic)
+            }
             try Data(".global start\nstart:\n    b start\n".utf8)
                 .write(to: importSource, options: .atomic)
         } catch {

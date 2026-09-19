@@ -14,5 +14,6 @@ else
 fi
 test -f "$output/Contents/Resources/examples/arm7tdmi/array-addressing/yagarto.json"
 test -f "$output/Contents/Resources/examples/arm7tdmi/array-addressing/array-addressing.s"
+test -f "$output/Contents/Resources/examples/arm7tdmi/array-addressing/numbers.s"
 test ! -e "$output/Contents/Resources/examples/arm7tdmi/array-addressing/.yagarto"
 printf '%s\n' "$output"

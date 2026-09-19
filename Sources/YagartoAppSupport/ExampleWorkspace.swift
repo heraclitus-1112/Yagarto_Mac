@@ -50,8 +50,12 @@ public actor ExampleWorkspaceInstaller {
         } catch {
             throw ExampleWorkspaceError.bundledExampleMissing(bundledProject.path)
         }
-        guard let source = configuration.sources.first,
-              manager.fileExists(atPath: bundledProject.appendingPathComponent(source).path) else {
+        guard !configuration.sources.isEmpty else {
+            throw ExampleWorkspaceError.bundledExampleMissing(bundledProject.path)
+        }
+        for source in configuration.sources where !manager.fileExists(
+            atPath: bundledProject.appendingPathComponent(source).path
+        ) {
             throw ExampleWorkspaceError.bundledExampleMissing(bundledProject.path)
         }
 

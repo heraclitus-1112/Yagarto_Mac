@@ -49,6 +49,25 @@ public struct ConfigStore: Sendable {
             )
         }
         defer { directoryLock.release() }
+        try save(configuration, holding: directoryLock)
+    }
+
+    public func save(
+        _ configuration: ProjectConfiguration,
+        holding directoryLock: ProjectDirectoryMutationLock
+    ) throws {
+        try Self.validate(configuration)
+        let canonicalProject = projectDirectory
+            .standardizedFileURL
+            .resolvingSymlinksInPath()
+            .standardizedFileURL
+        guard directoryLock.isHeld,
+              directoryLock.projectDirectory == canonicalProject else {
+            throw YagartoError.configurationIOFailed(
+                configurationURL.path,
+                "工程目录锁与配置目录不匹配。"
+            )
+        }
         do {
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]

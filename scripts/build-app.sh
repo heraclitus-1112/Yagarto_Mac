@@ -57,6 +57,7 @@ elif grep -Eq 'required plug-in failed to load|xcodebuild failed to load a requi
   bundled_example="$staging_app/Contents/Resources/examples/arm7tdmi/array-addressing"
   mkdir -p "$bundled_example"
   cp "$project_root/examples/arm7tdmi/array-addressing/array-addressing.s" "$bundled_example/array-addressing.s"
+  cp "$project_root/examples/arm7tdmi/array-addressing/numbers.s" "$bundled_example/numbers.s"
   cp "$project_root/examples/arm7tdmi/array-addressing/yagarto.json" "$bundled_example/yagarto.json"
   cp "$project_root/examples/arm7tdmi/array-addressing/README.md" "$bundled_example/README.md"
   chmod 0755 "$staging_app/Contents/MacOS/YagartoMacApp"
@@ -88,4 +89,5 @@ else
   test -f "$root_resource_bundle/Contents/Resources/arm7tdmi.ld"
 fi
 test -f "$app_path/Contents/Resources/examples/arm7tdmi/array-addressing/yagarto.json"
+test -f "$app_path/Contents/Resources/examples/arm7tdmi/array-addressing/numbers.s"
 echo "$app_path"
