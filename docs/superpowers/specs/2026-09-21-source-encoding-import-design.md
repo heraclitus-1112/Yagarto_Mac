@@ -36,4 +36,3 @@
 - `ProjectCreatorTests` 验证旧编码文件被写成 UTF-8、入口检测成功、转换警告存在并保持既有原文件迁移语义。
 - `ProjectSourceManagerTests` 验证添加文件时外部原件字节不变、工程副本为 UTF-8、转换路径被报告，并继续验证批量回滚。
 - 定向运行解码器、工程创建器、源码管理器和相关 ViewModel/契约测试；收尾运行一次严格 Debug 测试与 Release 构建，不重复执行 XCUITest。
-

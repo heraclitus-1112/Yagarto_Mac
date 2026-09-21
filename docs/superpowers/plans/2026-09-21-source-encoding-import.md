@@ -172,4 +172,3 @@ Run one strict Debug suite and one Release app build/fake audit. Do not run XCUI
 git add Sources Tests docs/zh-CN/swiftui-app.md
 git commit -m "fix: import legacy encoded assembly sources"
 ```
-
