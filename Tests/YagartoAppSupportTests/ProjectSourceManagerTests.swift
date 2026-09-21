@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+import CoreFoundation
 import Foundation
 import XCTest
 @testable import YagartoAppSupport
@@ -53,6 +54,54 @@ final class ProjectSourceManagerTests: XCTestCase {
         XCTAssertEqual(
             try ConfigStore(projectDirectory: fixture.directory).load().sources,
             ["main.s", "vendor.s", "vendor-2.s", "math.S"]
+        )
+    }
+
+    func testCopySourcesConvertsWindows1252AndGB18030ToUTF8WithoutChangingOriginals() async throws {
+        let fixture = try SourceManagerFixture(sources: ["main.s"])
+        let external = try SourceManagerFixture(sources: [])
+        let frenchText = "@ résultat récupère\r\nMOV r1, #1\r\n"
+        let chineseText = "@ 中文注释：课程源码\r\nMOV r2, #2\r\n"
+        let frenchData = try XCTUnwrap(frenchText.data(using: .windowsCP1252))
+        let gb18030 = String.Encoding(
+            rawValue: CFStringConvertEncodingToNSStringEncoding(
+                CFStringEncoding(CFStringEncodings.GB_18030_2000.rawValue)
+            )
+        )
+        let chineseData = try XCTUnwrap(chineseText.data(using: gb18030))
+        let french = external.directory.appendingPathComponent("french.s")
+        let chinese = external.directory.appendingPathComponent("chinese.s")
+        try frenchData.write(to: french)
+        try chineseData.write(to: chinese)
+        let document = try await LocalDocumentService().open(fixture.directory)
+
+        let result = try await LocalProjectSourceManager().copySources(
+            CopyProjectSourcesRequest(
+                sourceURLs: [french, chinese],
+                destinationDirectoryRelativePath: nil
+            ),
+            in: document
+        )
+
+        XCTAssertEqual(result.addedRelativePaths, ["french.s", "chinese.s"])
+        XCTAssertEqual(result.convertedRelativePaths, ["french.s", "chinese.s"])
+        XCTAssertEqual(result.document.activeSourceRelativePath, "french.s")
+        XCTAssertEqual(result.document.text, frenchText)
+        XCTAssertEqual(try Data(contentsOf: french), frenchData)
+        XCTAssertEqual(try Data(contentsOf: chinese), chineseData)
+        XCTAssertEqual(
+            try String(
+                contentsOf: fixture.directory.appendingPathComponent("french.s"),
+                encoding: .utf8
+            ),
+            frenchText
+        )
+        XCTAssertEqual(
+            try String(
+                contentsOf: fixture.directory.appendingPathComponent("chinese.s"),
+                encoding: .utf8
+            ),
+            chineseText
         )
     }
 

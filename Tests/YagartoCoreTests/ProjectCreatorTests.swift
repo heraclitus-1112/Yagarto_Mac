@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 import Darwin
+import CoreFoundation
 import Foundation
 import XCTest
 @testable import YagartoCore
@@ -103,6 +104,53 @@ final class ProjectCreatorTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: try XCTUnwrap(bySource["第二课.S"]?.sourceURL)), secondData)
         XCTAssertEqual(bySource["first.s"]?.configuration.entry, "start")
         XCTAssertEqual(bySource["第二课.S"]?.configuration.entry, "lesson_entry")
+    }
+
+    func testImportConvertsWindows1252AndGB18030SourcesToUTF8() throws {
+        let root = try ProjectCreatorTemporaryDirectory()
+        let frenchText = "@ résultat récupère\r\n.global start\r\nstart: b start\r\n"
+        let chineseText = "@ 中文注释：课程源码\r\n.global start\r\nstart: b start\r\n"
+        let frenchData = try XCTUnwrap(frenchText.data(using: .windowsCP1252))
+        let gb18030 = String.Encoding(
+            rawValue: CFStringConvertEncodingToNSStringEncoding(
+                CFStringEncoding(CFStringEncodings.GB_18030_2000.rawValue)
+            )
+        )
+        let chineseData = try XCTUnwrap(chineseText.data(using: gb18030))
+        let french = root.url.appendingPathComponent("french.s")
+        let chinese = root.url.appendingPathComponent("chinese.s")
+        try frenchData.write(to: french)
+        try chineseData.write(to: chinese)
+
+        let report = ProjectCreator().importProjects(ProjectImportRequest(
+            inputs: [french, chinese],
+            profile: .arm7tdmi
+        ))
+
+        XCTAssertEqual(report.created.count, 2)
+        XCTAssertTrue(report.skipped.isEmpty)
+        XCTAssertEqual(report.warnings.map(\.code), [
+            "project.encoding_converted", "project.encoding_converted"
+        ])
+        XCTAssertEqual(Set(report.warnings.map(\.message)), [
+            "已从 Windows-1252/ISO-8859-1 转换为 UTF-8。",
+            "已从 GBK/GB18030 转换为 UTF-8。"
+        ])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: french.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: chinese.path))
+        let byName = Dictionary(uniqueKeysWithValues: report.created.map {
+            ($0.sourceURL.lastPathComponent, $0)
+        })
+        XCTAssertEqual(
+            try String(contentsOf: try XCTUnwrap(byName["french.s"]?.sourceURL), encoding: .utf8),
+            frenchText
+        )
+        XCTAssertEqual(
+            try String(contentsOf: try XCTUnwrap(byName["chinese.s"]?.sourceURL), encoding: .utf8),
+            chineseText
+        )
+        XCTAssertEqual(byName["french.s"]?.configuration.entry, "start")
+        XCTAssertEqual(byName["chinese.s"]?.configuration.entry, "start")
     }
 
     func testDirectoryImportIsNonRecursiveAndSkipsAmbiguousOrExistingProjects() throws {

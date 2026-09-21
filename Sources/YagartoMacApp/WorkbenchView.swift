@@ -314,9 +314,14 @@ struct WorkbenchView: View {
                 urls,
                 toDirectory: model.selectedProjectDirectoryRelativePath
             ), !result.addedRelativePaths.isEmpty else { return }
+            var message = result.addedRelativePaths.joined(separator: "\n")
+            if !result.convertedRelativePaths.isEmpty {
+                message += "\n\n已转换为 UTF-8：\n"
+                message += result.convertedRelativePaths.joined(separator: "\n")
+            }
             sourceOperationNotice = SourceOperationNotice(
                 title: "已添加源码",
-                message: result.addedRelativePaths.joined(separator: "\n")
+                message: message
             )
         }
     }

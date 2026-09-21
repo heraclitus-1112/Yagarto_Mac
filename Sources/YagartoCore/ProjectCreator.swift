@@ -174,9 +174,7 @@ public struct ProjectCreator: Sendable {
             do {
                 let result = try importSource(source, profile: request.profile)
                 created.append(result.created)
-                if let warning = result.warning {
-                    warnings.append(warning)
-                }
+                warnings.append(contentsOf: result.warnings)
             } catch let failure as ImportFailure {
                 skipped.append(ProjectImportIssue(
                     sourceURL: source,
@@ -217,8 +215,14 @@ public struct ProjectCreator: Sendable {
         }
         defer { directoryLock.release() }
         let snapshot = try readSafeSource(source)
-        guard let sourceText = String(data: snapshot.data, encoding: .utf8) else {
-            throw ImportFailure(code: "project.invalid_utf8", message: "源码不是有效的 UTF-8 文本。")
+        let decoded: DecodedSourceText
+        do {
+            decoded = try SourceTextDecoder().decode(snapshot.data)
+        } catch {
+            throw ImportFailure(
+                code: "project.invalid_utf8",
+                message: "源码不是有效的 UTF-8、GBK/GB18030 或西文文本，或包含二进制控制字符。"
+            )
         }
         guard !belongsToExistingProject(source) else {
             throw ImportFailure(code: "project.already_configured", message: "源码已经属于一个 YAGARTO 工程。")
@@ -229,7 +233,7 @@ public struct ProjectCreator: Sendable {
         } catch {
             throw ImportFailure(code: "project.invalid_name", message: "源码文件名不能用作工程名。")
         }
-        let entry = try detectedEntry(in: sourceText, sourceURL: source, profile: profile)
+        let entry = try detectedEntry(in: decoded.text, sourceURL: source, profile: profile)
         for suffix in 1...10_000 {
             let directoryName = suffix == 1 ? baseName : "\(baseName)-\(suffix)"
             do {
@@ -237,13 +241,24 @@ public struct ProjectCreator: Sendable {
                     parent: parent,
                     directoryName: directoryName,
                     sourceName: source.lastPathComponent,
-                    sourceData: snapshot.data,
+                    sourceData: decoded.utf8Data,
                     profile: profile,
                     entry: entry
                 )
+                var warnings: [ProjectImportIssue] = []
+                if decoded.encoding != .utf8 {
+                    warnings.append(ProjectImportIssue(
+                        sourceURL: source,
+                        code: "project.encoding_converted",
+                        message: "已从 \(decoded.encoding.displayName) 转换为 UTF-8。"
+                    ))
+                }
+                if let removalWarning = removeOriginalIfUnchanged(source, snapshot: snapshot) {
+                    warnings.append(removalWarning)
+                }
                 return ImportResult(
                     created: created,
-                    warning: removeOriginalIfUnchanged(source, snapshot: snapshot)
+                    warnings: warnings
                 )
             } catch PublishFailure.destinationExists {
                 continue
@@ -768,7 +783,7 @@ private extension ProjectCreator {
 
     struct ImportResult {
         let created: CreatedProject
-        let warning: ProjectImportIssue?
+        let warnings: [ProjectImportIssue]
     }
 
     struct SafeSourceSnapshot {

@@ -52,17 +52,20 @@ public struct TrashProjectSourceRequest: Equatable, Sendable {
 public struct ProjectSourceMutationResult: Equatable, Sendable {
     public let document: WorkspaceDocument
     public let addedRelativePaths: [String]
+    public let convertedRelativePaths: [String]
     public let renamedRelativePaths: [String: String]
     public let removedRelativePath: String?
 
     public init(
         document: WorkspaceDocument,
         addedRelativePaths: [String] = [],
+        convertedRelativePaths: [String] = [],
         renamedRelativePaths: [String: String] = [:],
         removedRelativePath: String? = nil
     ) {
         self.document = document
         self.addedRelativePaths = addedRelativePaths
+        self.convertedRelativePaths = convertedRelativePaths
         self.renamedRelativePaths = renamedRelativePaths
         self.removedRelativePath = removedRelativePath
     }
@@ -99,7 +102,7 @@ public enum ProjectSourceMutationError: Error, Equatable, LocalizedError, Sendab
         case .unsafeHardLink(let path):
             return "为避免修改其他文件，拒绝操作硬链接：\(path)"
         case .invalidUTF8(let path):
-            return "源码不是有效的 UTF-8 文本：\(path)"
+            return "无法无损识别源码文本，或文件包含二进制控制字符：\(path)"
         case .fileTooLarge(let actual, let limit):
             return "源码文件过大（\(actual) 字节，上限 \(limit) 字节）。"
         case .cannotTrashLastSource:
@@ -247,12 +250,21 @@ public struct LocalProjectSourceManager: ProjectSourceManaging, Sendable {
             in: document.projectDirectory
         )
         var reserved = Set(document.configuration.sources.map { $0.lowercased() })
-        var prepared: [(data: Data, text: String, relativePath: String, destination: URL)] = []
+        var prepared: [(
+            data: Data,
+            text: String,
+            relativePath: String,
+            destination: URL,
+            converted: Bool
+        )] = []
         for source in request.sourceURLs {
             let source = source.standardizedFileURL
             try validateSafeRegularFile(source)
             let data = try readSourceData(source)
-            guard let text = String(data: data, encoding: .utf8) else {
+            let decoded: DecodedSourceText
+            do {
+                decoded = try SourceTextDecoder().decode(data)
+            } catch {
                 throw ProjectSourceMutationError.invalidUTF8(source.path)
             }
             let originalName = try normalizedFilename(source.lastPathComponent)
@@ -263,10 +275,11 @@ public struct LocalProjectSourceManager: ProjectSourceManaging, Sendable {
             )
             let relativePath = joined(directory.relativePath, name)
             prepared.append((
-                data: data,
-                text: text,
+                data: decoded.utf8Data,
+                text: decoded.text,
                 relativePath: relativePath,
-                destination: directory.url.appendingPathComponent(name).standardizedFileURL
+                destination: directory.url.appendingPathComponent(name).standardizedFileURL,
+                converted: decoded.encoding != .utf8
             ))
         }
 
@@ -303,7 +316,10 @@ public struct LocalProjectSourceManager: ProjectSourceManaging, Sendable {
                         sourceBuffers: buffers,
                         activeSourceRelativePath: active
                     ),
-                    addedRelativePaths: prepared.map(\.relativePath)
+                    addedRelativePaths: prepared.map(\.relativePath),
+                    convertedRelativePaths: prepared.compactMap {
+                        $0.converted ? $0.relativePath : nil
+                    }
                 )
             } catch {
                 let originalError = error
